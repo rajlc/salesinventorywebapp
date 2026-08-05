@@ -1,0 +1,838 @@
+Latest update:
+2023-10-18 14:55:43
+1724
+GetMessages
+GET
+/im/message/list
+Description：Get message list
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+session_id
+String
+Yes
+session id
+start_time
+Number
+Yes
+when request the first page pls input current timestamp，get the next page pls input previous page response field next_start_time
+page_size
+Number
+Yes
+page size
+last_message_id
+String
+No
+previous page output param [last_message_id];it could be null when get the first page, get the next page pls input previous page response field last_message_id
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+err_code
+data
+Object
+json
+success
+Boolean
+result true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+GET
+/im/message/list
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/message/list");
+request.setHttpMethod("GET");
+request.addApiParameter("session_id", "100094063_2_1011822749_1_103");
+request.addApiParameter("start_time", "1623400073000");
+request.addApiParameter("page_size", "20");
+request.addApiParameter("last_message_id", "24jFlAu0BtRbP47190");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": {
+    "last_message_id": "3ipmsuQ0BtlFC53412",
+    "message_list": [
+      {
+        "from_account_type": "1",
+        "session_id": "700557996641_1_900002_2_103",
+        "message_id": "3iqtOwy0BtlFC18843",
+        "type": "1",
+        "content": "{\"imgUrl\":\"http://lzd-staging-sg-im.oss-ap-southeast-1.aliyuncs.com/O1CN0128GXGDqmV1rwJKK000000_%21%216000000007905-lazada-im-sg.jpg?Expires\u003d1725605606\u0026OSSAccessKeyId\u003dLTAIAJpcmH1nMtrH\u0026Signature\u003dYKpEmWWIrZXZBA5w566ZBu0rSSc%3D\",\"osskey\":\"O1CN0128GXGDqmV1rwJKK000000_!!6000000007905-lazada-im-sg.jpg\",\"width\":\"786\",\"thumbnailWidth\":\"138\",\"thumbnailHeight\":\"300\",\"height\":\"1704\"}",
+        "to_account_id": "900002",
+        "send_time": "1694069588194",
+        "auto_reply": "false",
+        "to_account_type": "2",
+        "site_id": "BD",
+        "template_id": "3",
+        "processMsg": "NOTE: The message has not been sent. Please be polite and aware that you are required to comply with local laws \u0026 policies",
+        "from_account_id": "700557996641",
+        "status": "0"
+      }
+    ],
+    "next_start_time": "1694053058888",
+    "has_more": "false"
+  },
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "null"
+}
+
+
+Latest update:
+2023-10-19 22:26:56
+1201
+GetSessionDetail
+GET
+/im/session/get
+Description：get session detail by sessionid
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+session_id
+String
+Yes
+session id
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+error code 0=success
+data
+Object
+json
+success
+Boolean
+result true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+GET
+/im/session/get
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/session/get");
+request.setHttpMethod("GET");
+request.addApiParameter("session_id", "100094063_2_1011822749_1_103");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": {
+    "summary": "2222",
+    "unread_count": "0",
+    "last_message_id": "3iqSGkI0BJuEj99338",
+    "head_url": "https://sg-live.slatic.net/original/ebf238e7aa294b55f5198f2a709efa42.png",
+    "self_position": "1694072914212",
+    "site_id": "BD",
+    "last_message_time": "1694075514908",
+    "session_id": "700558011552_1_900002_2_103",
+    "title": "4a299402",
+    "buyer_id": "700558011552",
+    "to_position": "1694075514908",
+    "tags": [
+      "official"
+    ]
+  },
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "SUCCESS"
+}
+
+
+Latest update:
+2023-10-18 15:00:29
+1110
+GetSessionList
+GET
+/im/session/list
+Description：query seller session list
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+last_session_id
+String
+No
+previous page output param [last_session_id];The last session id on this page, it needs to be passed in as an input parameter when pulling the next page
+start_time
+String
+Yes
+next page start time;when pull first page pls input current timestamp， when pull next page pls input last page response field next_start_time
+page_size
+String
+Yes
+page size
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+error code, 0=success
+data
+Object
+json
+success
+Boolean
+result true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+GET
+/im/session/list
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/session/list");
+request.setHttpMethod("GET");
+request.addApiParameter("last_session_id", "100094063_2_1011822749_1_103");
+request.addApiParameter("start_time", "1623313363102");
+request.addApiParameter("page_size", "20");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": {
+    "session_list": [
+      {
+        "summary": "2222",
+        "unread_count": "0",
+        "last_message_id": "3iqSGkI0BJuEj99338",
+        "head_url": "https://sg-live.slatic.net/original/ebf238e7aa294b55f5198f2a709efa42.png",
+        "self_position": "1694072914212",
+        "site_id": "BD",
+        "last_message_time": "1694075514908",
+        "session_id": "700558011552_1_900002_2_103",
+        "title": "4a299402",
+        "buyer_id": "700558011552",
+        "to_position": "1694075514908",
+        "tags": [
+          "official"
+        ]
+      }
+    ],
+    "next_start_time": "1693575845503",
+    "has_more": "false",
+    "last_session_id": "700016724351_1_900002_2_103"
+  },
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "SUCCESS"
+}
+
+
+Latest update:
+2023-10-19 22:25:27
+875
+MessageRecall
+GET/POST
+/im/message/recall
+Description：message recall
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+session_id
+String
+Yes
+session id;conversation id
+message_id
+String
+Yes
+the id of message that need to be recalled;1）Cannot be recalled more than two minutes since the message has been sent 2）system message could not be recalled
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+error code 0=success
+success
+Boolean
+true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+GET/POST
+/im/message/recall
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/message/recall");
+request.addApiParameter("session_id", "100094063_2_1011822749_1_103");
+request.addApiParameter("message_id", "23Fp7TJ0BtmwA00132");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "SUCCESS"
+}
+
+Latest update:
+2023-10-19 16:24:59
+963
+OpenSession
+GET/POST
+/im/session/open
+Description：open a new conversation
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+order_id
+Number
+Yes
+orderId
+Response Parameters
+Name
+Type
+Description
+session_id
+String
+unique id of conversation
+Error code
+Error code
+Error message
+Solution
+No Data
+GET/POST
+/im/session/open
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/session/open");
+request.addApiParameter("order_id", "465423342423");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "session_id": "100094063_2_1011822749_1_103",
+  "request_id": "0ba2887315178178017221014"
+}
+
+
+Latest update:
+2023-10-20 09:11:36
+889
+ReadSession
+POST
+/im/session/read
+Description：session read
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+session_id
+String
+Yes
+session id;unique id of a conversation
+last_read_message_id
+String
+Yes
+last message id of user readed
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+error code 0=success
+success
+Boolean
+true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+POST
+/im/session/read
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/session/read");
+request.addApiParameter("session_id", "100094063_2_1011822749_1_103");
+request.addApiParameter("last_read_message_id", "23Fp7TJ0BtmwA00132");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "SUCCESS"
+}
+
+Latest update:
+2023-10-18 15:00:42
+1080
+SendMessage
+POST
+/im/message/send
+Description：send message
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+session_id
+String
+Yes
+conversation id
+template_id
+String
+Yes
+message template id, 1: normal text message 3: picture message 4: emoji message 10006: item message 10007: order message 10008: voucher message 10010: invite buyers to follow the store
+txt
+String
+No
+template_id=1 required
+img_url
+String
+No
+template_id=3 required
+width
+String
+No
+template_id=3/6 required
+height
+String
+No
+template_id=3/6 required
+item_id
+String
+No
+template_id=10006 required
+order_id
+String
+No
+template_id=10007 required
+promotion_id
+String
+No
+template_id=10008 required
+video_id
+String
+No
+Temporarily not supported
+Response Parameters
+Name
+Type
+Description
+err_code
+String
+error code 0=success
+data
+Object
+json
+success
+Boolean
+true or false
+err_message
+String
+error message
+Error code
+Error code
+Error message
+Solution
+No Data
+POST
+/im/message/send
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/im/message/send");
+request.addApiParameter("session_id", "100094063_2_1011822749_1_103");
+request.addApiParameter("template_id", "1");
+request.addApiParameter("txt", "test message");
+request.addApiParameter("img_url", "https://sg-live-02.slatic.net/p/0dc6fb4898f7e991bf44c45471dca9c9.jpg");
+request.addApiParameter("width", "100");
+request.addApiParameter("height", "100");
+request.addApiParameter("item_id", "1762013406");
+request.addApiParameter("order_id", "1762013406");
+request.addApiParameter("promotion_id", "91471122422003");
+request.addApiParameter("video_id", "3678332");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": {
+    "message_id": "3iTBIen0Btqvu00208",
+    "template_id": "10007",
+    "current_time": "1694499984371"
+  },
+  "success": "true",
+  "err_code": "0",
+  "request_id": "0ba2887315178178017221014",
+  "err_message": "SUCCESS"
+}
+
+

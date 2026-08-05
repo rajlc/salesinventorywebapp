@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daraz Open Platform - Application Approval Documentation</title>
+    <!-- Google Fonts for premium typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Mermaid JS for vector diagrams -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            securityLevel: 'loose',
+            flowchart: { useMaxWidth: true, htmlLabels: true }
+        });
+    </script>
+    <style>
+        :root {
+            --primary: #4F46E5;
+            --primary-dark: #3730A3;
+            --text-main: #1F2937;
+            --text-muted: #4B5563;
+            --bg-light: #F9FAFB;
+            --border-color: #E5E7EB;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            color: var(--text-main);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px 20px;
+            background-color: var(--bg-light);
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #ffffff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+            border: 1px solid var(--border-color);
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 5px;
+            border-bottom: 2px solid var(--primary);
+            padding-bottom: 10px;
+        }
+        h2 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #111827;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #374151;
+            margin-top: 20px;
+        }
+        p, li {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+        ul {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+        .meta-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        .meta-table th, .meta-table td {
+            border: 1px solid var(--border-color);
+            padding: 12px;
+            text-align: left;
+        }
+        .meta-table th {
+            background-color: var(--bg-light);
+            color: #374151;
+            font-weight: 600;
+        }
+        .mermaid {
+            margin: 25px 0;
+            padding: 20px;
+            background-color: var(--bg-light);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+        }
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 12px;
+            color: #9CA3AF;
+            text-align: center;
+        }
+        @media print {
+            body {
+                background-color: #ffffff;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+                border: none;
+                padding: 0;
+                max-width: 100%;
+            }
+            .mermaid {
+                page-break-inside: avoid;
+            }
+            h2 {
+                page-break-before: always;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Application Approval Documentation</h1>
+        <p style="margin-top: 0; color: #6B7280; font-size: 13px;">Daraz Open Platform API Access Request Documentation</p>
+        
+        <table class="meta-table">
+            <tr>
+                <th>Application Name</th>
+                <td>Bagmati Traders IM Chat</td>
+            </tr>
+            <tr>
+                <th>Developer/Company</th>
+                <td>Bagmati Traders</td>
+            </tr>
+            <tr>
+                <th>App Category</th>
+                <td>ERP IM Chat</td>
+            </tr>
+            <tr>
+                <th>Purpose</th>
+                <td>Centralized Customer Messaging, Order Sync, and Automated Operations</td>
+            </tr>
+        </table>
+
+        <h2>1. Business Reason & Justification for the App</h2>
+        <p>
+            Bagmati Traders runs a multi-channel retail and wholesale business in Nepal, managing orders across physical storefronts and the Daraz Marketplace.
+        </p>
+        <p>
+            Currently, our operations suffer from manual processing delays. Operating the seller customer support chat separately from our central inventory system leads to delay in responding to customer product queries and post-order requests. Additionally, manually transcribing order details causes stock status synchronization delay.
+        </p>
+        <p>
+            By establishing access to the <strong>Daraz Open Platform (specifically the ERP IM Chat API)</strong>, our application integrates messaging alongside inventory control:
+        </p>
+        <ul>
+            <li><strong>Automated Order Mapping & Ingestion:</strong> Seamlessly imports orders triggered by customer checkouts directly to internal processing queues.</li>
+            <li><strong>Real-time Status Tracking:</strong> Automatic logging of customer reverse orders (returns) and delivery stages.</li>
+            <li><strong>Immediate Chat Assistance:</strong> Automatically checks internal live inventory databases to answer customer questions about product dimensions, stock availability, and shipping times.</li>
+            <li><strong>AI and Keyword Automation:</strong> Provides swift response templates and Gemini AI assistance to resolve buyer queries within seconds, raising our seller response rate metrics on Daraz.</li>
+        </ul>
+        <p>
+            This is an internally used application, strictly restricted to our own merchant store accounts to improve operational standards, reduce cancellation rates, and provide high-quality support to Daraz buyers.
+        </p>
+
+        <h2>2. Design Documentation & Data Flows</h2>
+        
+        <h3>2.1 System Architecture</h3>
+        <p>
+            The integration is designed as a hybrid cloud architecture:
+        </p>
+        <ul>
+            <li><strong>Frontend Interface (React/Next.js):</strong> Dashboard for staff agents to track logs, chat history, and configure keyword templates.</li>
+            <li><strong>Deno Edge Layer (Supabase Functions):</strong> Lightweight, zero-cold-start webhook receiver that intercepts Daraz events, verifies cryptographic payload signatures, and performs routing.</li>
+            <li><strong>Database & AI Layer (PostgreSQL & Gemini):</strong> Saves message models, coordinates stock ledgers, and generates assistant answers.</li>
+        </ul>
+
+        <h3>2.2 Flow: Secure Seller Account OAuth Authorization</h3>
+        <p>
+            This sequence diagrams the initial secure handshake to store seller tokens in our PostgreSQL DB.
+        </p>
+        <div class="mermaid">
+            sequenceDiagram
+                participant User as Store Admin
+                participant Frontend as System UI
+                participant Backend as API Route (Vercel)
+                participant Daraz as Daraz Auth Server
+                participant DB as Database (Supabase)
+
+                User->>Frontend: Clicks "Connect Daraz Store"
+                Frontend->>Backend: Request authorization link
+                Backend-->>Frontend: Returns signed URL
+                Frontend->>User: Redirects to login
+                User->>Daraz: logs in & approves App
+                Daraz-->>Backend: Redirects with auth code (?code=xxx)
+                Backend->>Daraz: POST exchange /auth/token/create
+                Daraz-->>Backend: Returns access & refresh tokens
+                Backend->>DB: Stores encrypted token row
+                Backend-->>Frontend: Redirects with status=success
+                Frontend-->>User: Show connected store
+        </div>
+
+        <h3>2.3 Flow: Incoming Buyer Messages & Auto-Reply</h3>
+        <p>
+            This diagram charts the data pathway when a buyer sends a message, showing signature verification, local caching, and automated reply dispatch.
+        </p>
+        <div class="mermaid">
+            sequenceDiagram
+                participant Daraz as Daraz Message Gateway
+                participant Edge as Supabase Edge Function
+                participant DB as Supabase DB
+                participant Gemini as Gemini 2.5 API
+                
+                Daraz->>Edge: POST /functions/v1/daraz-chat (with Authorization Signature)
+                Edge->>Edge: Recreate HMAC-SHA256 of payload & secret
+                alt Signature Mismatch
+                    Edge-->>Daraz: 410 Unauthorized
+                else Valid Signature
+                    Edge->>DB: Upsert Session & Insert Message Row
+                    Edge->>DB: Read keyword matching rules & store status
+                    alt Keyword Rule Matches
+                        Edge->>Daraz: POST /im/message/send (Autoreply)
+                    else No Keywords & AI enabled
+                        Edge->>DB: Fetch last 5 messages + active stock items list
+                        DB-->>Edge: Returns context data
+                        Edge->>Gemini: POST generateContent (System prompt + context)
+                        Gemini-->>Edge: Returns reply text
+                        Edge->>Daraz: POST /im/message/send (Gemini reply)
+                        Edge->>DB: Insert sent auto-reply log
+                    end
+                    Edge-->>Daraz: 200 OK (Acknowledge receipt)
+                end
+        </div>
+
+        <div class="footer">
+            <p>Bagmati Traders &copy; 2026 - Information Technology Department</p>
+        </div>
+    </div>
+</body>
+</html>

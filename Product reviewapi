@@ -1,0 +1,439 @@
+Latest update:
+2024-06-15 17:11:55
+1089
+GetHistoryReviewIdList
+GET/POST
+/review/seller/history/list
+Description：Get history review id list for one seller(reviews within 3 months can be get)
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+item_id
+String
+Yes
+Product Item ID
+order_id
+Number
+No
+Order ID
+start_time
+Number
+Yes
+Start Time, timestamp in millisecond, this is the same with "create_time" in the response data of interface (/review/seller/list/v2)；The time range cannot exceed 7 days
+end_time
+Number
+Yes
+End Time, timestamp in millisecond, this is the same with "create_time" in the response data of interface (/review/seller/list/v2)；The time range cannot exceed 7 days
+current
+Number
+Yes
+The current pageNo, default value = 1, max value = 50
+Response Parameters
+Name
+Type
+Description
+data
+Object
+response data
+success
+Boolean
+success or fail
+error_code
+String
+error code
+error_msg
+String
+error msg
+Error code
+Error code
+Error message
+Solution
+PARAMS_VALIDATE_ERROR
+NULL_SELLERID
+Cannot recognize "seller_id"
+PARAMS_VALIDATE_ERROR
+NULL_ITEMID
+Cannot recognize "item_id"
+PARAMS_VALIDATE_ERROR
+NULL_CURRENT
+Cannot recognize "current"
+PARAMS_VALIDATE_ERROR
+CURRENT_ABOVE_LIMIT
+"current" is above the limit, the max value is 50
+PARAMS_VALIDATE_ERROR
+NULL_STARTTIME_OR_ENDTIME
+Cannot recognize "start_time" or "end_time"
+PARAMS_VALIDATE_ERROR
+STARTTIME_OVER_LIMIT
+Only support checking 90 days of history data
+PARAMS_VALIDATE_ERROR
+TIMESPAN_ABOVE_LIMIT
+Only support checking 7days data at one time
+PARAMS_VALIDATE_ERROR
+WRONG_ORDER_ID
+Cannot recognize "order_id"
+TRAFFIC_CONTROL
+TRAFFIC_CONTROL
+Traffic control
+GET/POST
+/review/seller/history/list
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/review/seller/history/list");
+request.addApiParameter("item_id", "2419854443");
+request.addApiParameter("order_id", "1000000000");
+request.addApiParameter("start_time", "1662134400000");
+request.addApiParameter("end_time", "1662739200000");
+request.addApiParameter("current", "1");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "error_msg": "error",
+  "code": "0",
+  "data": {
+    "current": "1",
+    "total": "18",
+    "id_list": [
+      1000000000,
+      1000000001
+    ],
+    "page_size": "10"
+  },
+  "success": "true",
+  "error_code": "error",
+  "request_id": "0ba2887315178178017221014"
+}
+
+
+Latest update:
+2024-06-15 17:12:02
+973
+GetReviewListByIdList
+GET
+/review/seller/list/v2
+Description：get review list by id list, need get id list first
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+id_list
+Number[]
+Yes
+id list, maxLength = 10
+Response Parameters
+Name
+Type
+Description
+data
+Object
+response data
+success
+Boolean
+*
+error_code
+String
+*
+error_msg
+String
+*
+Error code
+Error code
+Error message
+Solution
+PARAMS_VALIDATE_ERROR
+NULL_SELLERID
+Cannot recognize sellerid
+PARAMS_VALIDATE_ERROR
+NULL_ID
+id list is null
+TRAFFIC_CONTROL
+TRAFFIC_CONTROL
+Traffic control
+GET
+/review/seller/list/v2
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/review/seller/list/v2");
+request.setHttpMethod("GET");
+request.addApiParameter("id_list", "[111111111111,11111111112]");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "error_msg": "null",
+  "code": "0",
+  "data": {
+    "outdated_reviews": [
+      1111111111,
+      1111111112
+    ],
+    "review_list": [
+      {
+        "review_images": [],
+        "can_reply": "true",
+        "create_time": "1658235676532",
+        "submit_time": "1658235676532",
+        "review_content": "this is a good product",
+        "ratings": {
+          "seller_rating": "5",
+          "overall_rating": "2",
+          "logistics_rating": "4",
+          "product_rating": "2"
+        },
+        "product_id": "11111111111",
+        "review_videos": [
+          {
+            "video_url": "http:****",
+            "video_cover_url": "http:*****"
+          }
+        ],
+        "id": "11111111111",
+        "seller_reply": "thanks for your review",
+        "order_id": "111111111111",
+        "review_type": "PRODUCT_REVIEW"
+      }
+    ]
+  },
+  "success": "true",
+  "error_code": "null",
+  "request_id": "0ba2887315178178017221014"
+}
+
+
+Latest update:
+2024-06-14 13:10:40
+697
+SubmitSellerReply
+GET
+/review/seller/reply/add
+Description：submit seller reply for customers review
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+Yes
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+id
+Number
+Yes
+review id that user wants to reply to. Can be obtain from GetProductReviewList
+content
+String
+Yes
+reply content in text, only support reply in text.max length = 500
+Response Parameters
+Name
+Type
+Description
+data
+Boolean
+reply success or fail
+success
+Boolean
+reply success or fail
+error_code
+String
+error code
+error_msg
+String
+error msg
+Error code
+Error code
+Error message
+Solution
+PARAMS_VALIDATE_ERROR
+NULL_SELLERID
+Cannot recognize sellerid
+PARAMS_VALIDATE_ERROR
+NULL_ID
+Cannot recognize id
+PARAMS_VALIDATE_ERROR
+NULL_CONTENT
+Empty content
+PARAMS_VALIDATE_ERROR
+REPLY_ALREADY
+Already replied. All reply needs go through quality control process.
+PARAMS_VALIDATE_ERROR
+NO_SUCH_REVIEW
+No such review
+PARAMS_VALIDATE_ERROR
+REVIEW_STATUS_CANNOT_REPLY
+Review status cannot be replied to, review's status may be changed because of being edited or reported
+PARAMS_VALIDATE_ERROR
+REVIEW_TYPE_DONOT_SUPPORT_REPLY
+Review type cannot be replied to, only reply to PRODUCT_REVIEW
+PARAMS_VALIDATE_ERROR
+REVIEW_INFO_DONOT_SUPPORT_REPLY
+Review info cannot be replied to, review must have text content or images or video
+PARAMS_VALIDATE_ERROR
+REVIEW_REPORTED_CANNOT_REPLY
+Review been reported cannot be repied to
+PARAMS_VALIDATE_ERROR
+REPLY_CONTENT_TOO_LONG
+Reply too long
+PARAMS_VALIDATE_ERROR
+BEYOND_REPLY_PERIOD
+Reply over due
+TRAFFIC_CONTROL
+TRAFFIC_CONTROL
+Traffic control
+GET
+/review/seller/reply/add
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/review/seller/reply/add");
+request.setHttpMethod("GET");
+request.addApiParameter("id", "11111111111");
+request.addApiParameter("content", "thank you for your reply");
+IopResponse response = client.execute(request, accessToken);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "error_msg": "error",
+  "code": "0",
+  "data": "true",
+  "success": "true",
+  "error_code": "error",
+  "request_id": "0ba2887315178178017221014"
+}
