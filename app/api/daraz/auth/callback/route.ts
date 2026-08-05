@@ -3,11 +3,11 @@ import crypto from 'crypto'
 import axios from 'axios'
 
 // Helper to sign requests
-// Per Daraz API spec: 'sign' and 'sign_method' must be EXCLUDED from the signature string.
-// Including sign_method produces a wrong hash → Daraz rejects it as "Unregistered API key".
+// Daraz signing spec: sort ALL params alphabetically, excluding only 'sign' itself
+// (sign_method IS included — omitting it causes "IncompleteSignature")
+// String format: {apiPath}{key1}{val1}{key2}{val2}... signed with HMAC-SHA256(appSecret)
 function signRequest(apiName: string, params: Record<string, any>, appSecret: string) {
-    const EXCLUDED_KEYS = new Set(['sign', 'sign_method'])
-    const keys = Object.keys(params).filter(k => !EXCLUDED_KEYS.has(k)).sort()
+    const keys = Object.keys(params).filter(k => k !== 'sign').sort()
     let str = apiName
     keys.forEach(key => {
         str += key + params[key]
