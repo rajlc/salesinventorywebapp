@@ -175,8 +175,7 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
         unreadChatsRes,
         unrepliedReviewsRes,
         openRemindersRes,
-        fastDueBuysRes,
-        fastPaidTxRes
+        supplierLedgerRes
     ] = await Promise.all([
         // Daraz Status Counts based on exact user logic
         getDarazCount('Pending'),
@@ -277,18 +276,8 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
             .order('date', { ascending: true })
             .limit(20),
 
-        // Fast Supplier Due Buys
-        supabase
-            .from('purchases')
-            .select('total_amount')
-            .ilike('payment_type', 'due')
-            .or('purchase_type.eq.Buy,purchase_type.eq.buy,purchase_type.is.null'),
-
-        // Fast Supplier Paid Transactions
-        supabase
-            .from('supplier_transactions')
-            .select('amount')
-            .eq('transaction_type', 'Paid')
+        // Supplier Ledger for Pending Due Balance
+        getSupplierLedger({ fiscalYearId: fyId }).catch(() => ({ ledger: [] }))
     ])
 
     const darazTotal = darazPending + darazPacked + darazReadyToShip + darazShipped + darazReturnedDelivered + darazCustomerReturnDelivered
@@ -358,12 +347,12 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     const shippedOrders = (estShippedRes as any).data || []
     const estShippedTotal = shippedOrders.reduce((sum: number, o: any) => sum + (Number(o.price) || 0), 0)
 
-    // Process Supplier Ledger Pending Due Balance (Fast direct sum)
-    const dueBuysList = fastDueBuysRes?.data || []
-    const paidTxList = fastPaidTxRes?.data || []
-    const totalDueBuy = dueBuysList.reduce((sum: number, p: any) => sum + (Number(p.total_amount) || 0), 0)
-    const totalPaid = paidTxList.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0)
-    const pendingSupplierDue = Math.max(0, totalDueBuy - totalPaid)
+    // Process Supplier Ledger Pending Due Balance (exact sum of supplier ledger running balances)
+    const ledger = supplierLedgerRes?.ledger || []
+    const pendingSupplierDue = ledger.reduce((sum, entry) => {
+        const bal = Number(entry.running_balance) || 0
+        return sum + bal
+    }, 0)
 
 
     // --- Process Notifications ---
