@@ -2,6 +2,7 @@
 
 import { Menu, Plus } from 'lucide-react';
 import { AddProductModal } from '@/features/inventory/components/AddProductModal';
+import ChequeNotificationBell from './ChequeNotificationBell';
 
 interface MobileHeaderProps {
   pathname: string;
@@ -125,6 +126,7 @@ const MobileHeader: React.FC<MobileHeaderProps> = ({
 
       {/* Right Side Actions */}
       <div className="flex items-center gap-2 relative z-20">
+        <ChequeNotificationBell />
         {headerAction}
       </div>
     </div>

@@ -175,7 +175,8 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
         unreadChatsRes,
         unrepliedReviewsRes,
         openRemindersRes,
-        supplierLedgerRes
+        fastDueBuysRes,
+        fastPaidTxRes
     ] = await Promise.all([
         // Daraz Status Counts based on exact user logic
         getDarazCount('Pending'),
@@ -214,7 +215,8 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
         // Stock Valuation
         supabase
             .from('stock_ledger_view')
-            .select('total_stock, est_price'),
+            .select('total_stock, est_price')
+            .gt('total_stock', 0),
 
         // Damaged Stocks Count
         supabase
@@ -249,6 +251,7 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
                 .or(`deleted.is.null,deleted.eq.false`)
                 .gte('order_date', fyStart)
                 .lte('order_date', fyEnd)
+                .limit(5000)
             : Promise.resolve({ data: [] }),
 
         // Unread Daraz Chats (Last 5 days)
@@ -274,8 +277,18 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
             .order('date', { ascending: true })
             .limit(20),
 
-        // Supplier Ledger for Pending Due Balance
-        getSupplierLedger({ fiscalYearId: fyId }).catch(() => ({ ledger: [] }))
+        // Fast Supplier Due Buys
+        supabase
+            .from('purchases')
+            .select('total_amount')
+            .ilike('payment_type', 'due')
+            .or('purchase_type.eq.Buy,purchase_type.eq.buy,purchase_type.is.null'),
+
+        // Fast Supplier Paid Transactions
+        supabase
+            .from('supplier_transactions')
+            .select('amount')
+            .eq('transaction_type', 'Paid')
     ])
 
     const darazTotal = darazPending + darazPacked + darazReadyToShip + darazShipped + darazReturnedDelivered + darazCustomerReturnDelivered
@@ -345,12 +358,13 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     const shippedOrders = (estShippedRes as any).data || []
     const estShippedTotal = shippedOrders.reduce((sum: number, o: any) => sum + (Number(o.price) || 0), 0)
 
-    // Process Supplier Ledger Pending Due Balance
-    const ledger = supplierLedgerRes?.ledger || []
-    const pendingSupplierDue = ledger.reduce((sum, entry) => {
-        const bal = Number(entry.running_balance) || 0
-        return sum + (bal > 0 ? bal : 0)
-    }, 0)
+    // Process Supplier Ledger Pending Due Balance (Fast direct sum)
+    const dueBuysList = fastDueBuysRes?.data || []
+    const paidTxList = fastPaidTxRes?.data || []
+    const totalDueBuy = dueBuysList.reduce((sum: number, p: any) => sum + (Number(p.total_amount) || 0), 0)
+    const totalPaid = paidTxList.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0)
+    const pendingSupplierDue = Math.max(0, totalDueBuy - totalPaid)
+
 
     // --- Process Notifications ---
     const unreadChatsCount = (unreadChatsRes.data || []).length

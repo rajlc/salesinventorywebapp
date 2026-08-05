@@ -24,6 +24,7 @@ import { DashboardContext } from "./context"
 
 import { PermissionProvider } from '@/lib/permissions/PermissionContext'
 import { PermissionFilteredNav } from '@/components/permissions/PermissionFilteredNav'
+import ChequeNotificationBell from "@/components/dashboard/ChequeNotificationBell"
 
 export default function DashboardLayoutWrapper(props: any) {
     return (
@@ -235,6 +236,25 @@ function DashboardLayout({
                     ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname === '/dashboard/suppliers/dashboard' || pathname === '/dashboard/suppliers' || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/suppliers/suppliers-account' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname === '/dashboard/sales/daraz/profit-tracker' ? 'h-full' : 'h-[calc(100vh-4rem)] md:h-full'}
                     pointer-events-auto
                 `}>
+                    {/* Desktop Top Header Bar */}
+                    <header className="hidden md:flex h-14 bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800/80 px-6 items-center justify-between sticky top-0 z-30 shadow-2xs">
+                        <div className="flex items-center gap-3">
+                            {headerTitle ? (
+                                typeof headerTitle === 'string' ? (
+                                    <h1 className="font-bold text-lg text-slate-800 dark:text-slate-100">{headerTitle}</h1>
+                                ) : (
+                                    headerTitle
+                                )
+                            ) : (
+                                <span className="font-semibold text-slate-600 dark:text-slate-300 text-sm">BagmatiERP System</span>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-3">
+                            {headerAction}
+                            <ChequeNotificationBell />
+                        </div>
+                    </header>
+
                     <div className={`${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname === '/dashboard/suppliers/dashboard' || pathname === '/dashboard/suppliers' || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/suppliers/suppliers-account' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname === '/dashboard/sales/daraz/profit-tracker' ? 'p-0 h-full' : 'px-4 pb-4 pt-1'} md:p-8 ${isMobileMode ? 'pb-24' : ''}`}>
                         {isMobileMode && pathname === '/dashboard' ? (
                             <MobileDashboard />

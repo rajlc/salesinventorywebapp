@@ -11,23 +11,36 @@ export interface SupplierLedgerEntry {
     running_balance: number
 }
 
-// Helper to check debit conditions (Logic defined in requirement)
-const isDebitPurchase = (p: any) => {
-    const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due';
-    const type = (p.purchase_type || 'Buy').toLowerCase();
-    if (type === 'buy' && isCashOrOnline) return true;
-    if (type === 'sell' && isCashOrOnline) return true;
-    if (type === 'sell' && !isCashOrOnline) return true;
-    return false;
+// Supplier Ledger Accounting Logic — matches mobile app supplierRepo.ts exactly:
+//
+// isDebitPurchase:  Buy+Cash ✓  Sell+Cash ✓  Sell+Due ✓
+// isCreditPurchase: Buy+Cash ✓  Sell+Cash ✓  Buy+Due  ✓
+//
+// Cash buys/sells appear in BOTH debit AND credit → net zero effect on balance
+// Due-Buy   → Credit only  (you owe supplier more)
+// Due-Sell  → Debit only   (supplier owes you / reduces your liability)
+// Paid tx   → Debit        (you paid cash → reduces what you owe)
+// Received tx→ Credit      (supplier paid you)
+//
+// Running Balance = Opening + Credit - Debit
+// Negative = YOU owe the supplier | Positive = SUPPLIER owes you
+
+const isDebitPurchase = (p: any): boolean => {
+    const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due'
+    const type = (p.purchase_type || 'Buy').toLowerCase()
+    if (type === 'buy' && isCashOrOnline) return true
+    if (type === 'sell' && isCashOrOnline) return true
+    if (type === 'sell' && !isCashOrOnline) return true
+    return false
 }
 
-const isCreditPurchase = (p: any) => {
-    const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due';
-    const type = (p.purchase_type || 'Buy').toLowerCase();
-    if (type === 'buy' && isCashOrOnline) return true;
-    if (type === 'sell' && isCashOrOnline) return true;
-    if (type === 'buy' && !isCashOrOnline) return true;
-    return false;
+const isCreditPurchase = (p: any): boolean => {
+    const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due'
+    const type = (p.purchase_type || 'Buy').toLowerCase()
+    if (type === 'buy' && isCashOrOnline) return true
+    if (type === 'sell' && isCashOrOnline) return true
+    if (type === 'buy' && !isCashOrOnline) return true
+    return false
 }
 
 export async function getSupplierLedger({
@@ -67,102 +80,92 @@ export async function getSupplierLedger({
     }
 
     const supplierIds = suppliers.map(s => s.id)
+    if (supplierIds.length === 0) return { ledger: [] }
 
-    // 3. Fetch ALL relevant financial data (Purchases & Transactions) using pagination to bypass Supabase max_rows (1000) limit
-    // Optimization: filtering by supplierIds to avoid full table scan if search is active
-    // We need "Previous" data (before startDate) for Opening Balance
-    // And "Current" data (startDate <= date <= endDate) for Debit/Credit
-
-    // Fetch Purchases in pages of 1000
+    // 3. Batch Fetch Purchases & Transactions with ORDER BY ID for deterministic range pagination
     let allPurchases: any[] = []
-    let purchasesPage = 0
+    let pPage = 0
     const pageSize = 1000
+
     while (true) {
-        const from = purchasesPage * pageSize
-        const to = from + pageSize - 1
         const { data, error } = await supabase
             .from('purchases')
             .select('supplier_id, purchase_date, purchase_type, payment_type, total_amount')
             .in('supplier_id', supplierIds)
             .lte('purchase_date', endDate)
-            .range(from, to)
+            .order('id', { ascending: true })
+            .range(pPage * pageSize, (pPage + 1) * pageSize - 1)
 
-        if (error) {
-            console.error('Error fetching purchases data', error)
-            return { ledger: [], error: 'Failed to fetch purchases data' }
-        }
-        if (!data || data.length === 0) break
+        if (error || !data || data.length === 0) break
         allPurchases = allPurchases.concat(data)
         if (data.length < pageSize) break
-        purchasesPage++
+        pPage++
     }
 
-    // Fetch Transactions in pages of 1000
     let allTransactions: any[] = []
-    let transactionsPage = 0
+    let tPage = 0
+
     while (true) {
-        const from = transactionsPage * pageSize
-        const to = from + pageSize - 1
         const { data, error } = await supabase
             .from('supplier_transactions')
             .select('supplier_id, transaction_date, transaction_type, amount')
             .in('supplier_id', supplierIds)
             .lte('transaction_date', endDate)
-            .range(from, to)
+            .order('id', { ascending: true })
+            .range(tPage * pageSize, (tPage + 1) * pageSize - 1)
 
-        if (error) {
-            console.error('Error fetching transactions data', error)
-            return { ledger: [], error: 'Failed to fetch transactions data' }
-        }
-        if (!data || data.length === 0) break
+        if (error || !data || data.length === 0) break
         allTransactions = allTransactions.concat(data)
         if (data.length < pageSize) break
-        transactionsPage++
+        tPage++
     }
 
-    // 4. Client-side Aggregation
-    const ledgerMap = new Map<string, SupplierLedgerEntry>()
+    // 4. In-Memory Aggregation matching getSupplierStats logic 100%
+    const ledgerMap = new Map<string, {
+        supplier_id: string
+        supplier_name: string
+        openingBalance: number
+        cashBuy: number
+        cashSell: number
+        dueSell: number
+        dueBuy: number
+        paid: number
+        received: number
+    }>()
 
-    // Initialize map
     suppliers.forEach(s => {
         ledgerMap.set(s.id, {
             supplier_id: s.id,
             supplier_name: s.supplier_name,
-            opening_balance: 0,
-            debit: 0,
-            credit: 0,
-            running_balance: 0
+            openingBalance: 0,
+            cashBuy: 0, cashSell: 0, dueSell: 0, dueBuy: 0, paid: 0, received: 0
         })
     })
 
-    // Process Purchases
-    allPurchases?.forEach(p => {
+    // Purchases
+    allPurchases.forEach(p => {
         const entry = ledgerMap.get(p.supplier_id)
         if (!entry) return
 
         const amount = Number(p.total_amount) || 0
+        const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due'
+        const type = (p.purchase_type || 'Buy').toLowerCase()
         const isBefore = p.purchase_date < startDate
         const isCurrent = p.purchase_date >= startDate && p.purchase_date <= endDate
 
-        // Helper boolean values regarding Debit/Credit contribution
-        const contributesDebit = isDebitPurchase(p)
-        const contributesCredit = isCreditPurchase(p)
-
         if (isBefore) {
-            // Logic for Opening Balance:
-            // Opening Balance is essentially the "Running Balance" from the past.
-            // Running Balance = Opening + Credit - Debit
-            // So contribution to Opening Balance = Credit contribution - Debit contribution
-            if (contributesCredit) entry.opening_balance += amount
-            if (contributesDebit) entry.opening_balance -= amount
+            if (type === 'buy' && !isCashOrOnline) entry.openingBalance += amount
+            else if (type === 'sell' && !isCashOrOnline) entry.openingBalance -= amount
         } else if (isCurrent) {
-            if (contributesDebit) entry.debit += amount
-            if (contributesCredit) entry.credit += amount
+            if (type === 'buy' && isCashOrOnline) entry.cashBuy += amount
+            else if (type === 'sell' && isCashOrOnline) entry.cashSell += amount
+            else if (type === 'sell' && !isCashOrOnline) entry.dueSell += amount
+            else if (type === 'buy' && !isCashOrOnline) entry.dueBuy += amount
         }
     })
 
-    // Process Transactions
-    allTransactions?.forEach(t => {
+    // Transactions
+    allTransactions.forEach(t => {
         const entry = ledgerMap.get(t.supplier_id)
         if (!entry) return
 
@@ -170,31 +173,35 @@ export async function getSupplierLedger({
         const isBefore = t.transaction_date < startDate
         const isCurrent = t.transaction_date >= startDate && t.transaction_date <= endDate
 
-        const isPaid = t.transaction_type === 'Paid'
-        const isReceived = t.transaction_type === 'Received'
-
-        // Debit Logic: Transaction Type = Paid
-        // Credit Logic: Transaction Type = Received
-
         if (isBefore) {
-            // Paid -> contributes to Debit -> decreases balance
-            if (isPaid) entry.opening_balance -= amount
-            // Received -> contributes to Credit -> increases balance
-            if (isReceived) entry.opening_balance += amount
+            if (t.transaction_type === 'Paid') entry.openingBalance -= amount
+            if (t.transaction_type === 'Received') entry.openingBalance += amount
         } else if (isCurrent) {
-            if (isPaid) entry.debit += amount
-            if (isReceived) entry.credit += amount
+            if (t.transaction_type === 'Paid') entry.paid += amount
+            if (t.transaction_type === 'Received') entry.received += amount
         }
     })
 
-    // 5. Calculate Final Running Balance and Format
-    const results = Array.from(ledgerMap.values()).map(entry => {
-        entry.running_balance = entry.opening_balance + entry.credit - entry.debit
-        return entry
+    // 5. Final Calculation
+    const results: SupplierLedgerEntry[] = Array.from(ledgerMap.values()).map(e => {
+        const totalDebit = e.cashBuy + e.cashSell + e.dueSell + e.paid
+        const totalCredit = e.cashBuy + e.cashSell + e.dueBuy + e.received
+        const runningBalance = e.openingBalance + totalCredit - totalDebit
+
+        return {
+            supplier_id: e.supplier_id,
+            supplier_name: e.supplier_name,
+            opening_balance: e.openingBalance,
+            debit: totalDebit,
+            credit: totalCredit,
+            running_balance: runningBalance
+        }
     })
 
     return { ledger: results }
 }
+
+
 
 // ============================================================================
 // DETAIL PAGE ACTIONS
@@ -269,23 +276,9 @@ export async function getSupplierStats({
     let openingBalance = 0
 
     prevPurchases?.forEach(p => {
-        const amount = Number(p.total_amount) || 0;
-        const isCashOrOnline = (p.payment_type || '').toLowerCase() !== 'due';
-        const type = (p.purchase_type || 'Buy').toLowerCase();
-
-        // Credit Contributions
-        if ((type === 'buy' && isCashOrOnline) ||
-            (type === 'sell' && isCashOrOnline) ||
-            (type === 'buy' && !isCashOrOnline)) {
-            openingBalance += amount;
-        }
-
-        // Debit Contributions
-        if ((type === 'buy' && isCashOrOnline) ||
-            (type === 'sell' && isCashOrOnline) ||
-            (type === 'sell' && !isCashOrOnline)) {
-            openingBalance -= amount;
-        }
+        const amount = Number(p.total_amount) || 0
+        if (isCreditPurchase(p)) openingBalance += amount
+        if (isDebitPurchase(p)) openingBalance -= amount
     })
 
     prevTransactions?.forEach(t => {
