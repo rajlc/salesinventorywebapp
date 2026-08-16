@@ -705,6 +705,8 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
         store_id,
         order_date,
         order_id,
+        order_number,
+        store:online_stores(seller_account),
         items:daraz_order_items(id, product_id, purchase_cost, seller_sku, product_name)
     `)
         .eq('order_number', orderNumber)
@@ -714,13 +716,35 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
         throw new Error(`Order ${orderNumber} not found in DB`)
     }
 
+    const sellerAccountName = (order.store as any)?.seller_account || ''
+    let storeId = order.store_id
+    if (!storeId && sellerAccountName) {
+        const { data: storeObj } = await supabase
+            .from('online_stores')
+            .select('id')
+            .ilike('seller_account', sellerAccountName)
+            .maybeSingle()
+        if (storeObj?.id) {
+            storeId = storeObj.id
+        } else {
+            const { data: tokenObj } = await supabase
+                .from('daraz_api_tokens')
+                .select('store_id')
+                .ilike('account', sellerAccountName)
+                .maybeSingle()
+            if (tokenObj?.store_id) {
+                storeId = tokenObj.store_id
+            }
+        }
+    }
+
     const updates = []
     let debugLog: string[] = []
     let feeSyncResult = 'Skipped'
+    let finalFee = 0
 
     // 1b. Sync Finance Fees (Matching order-sync page logic EXACTLY)
-    // Only if store_id exists (needed for API)
-    if (order.store_id) {
+    if (storeId) {
         try {
             // Calculate revenue (Product Price)
             const { data: orderData } = await supabase
@@ -733,9 +757,8 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                 sum + ((item.amount || 0) * (item.quantity || 1)), 0) || 0
 
             // Fetch Finance API transactions
-            // Use order.order_id which is the actual Daraz Trade Order ID
             const targetId = order.order_id || orderNumber
-            const transactions = await fetchDarazFinanceTransactions(targetId, order.store_id, order.order_date)
+            const transactions = await fetchDarazFinanceTransactions(targetId, storeId, order.order_date)
 
             // Helper to get fee total from transactions by keywords
             // CRITICAL: Sum ALL amounts (positive and negative) to handle reversals/refunds
@@ -757,35 +780,34 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                 console.log(`[SYNC DEBUG] Order ${orderNumber}: No transactions found yet. skipping fee update.`)
                 feeSyncResult = 'Pending (No Finance Data)'
             } else {
-                // 1. Free Shipping Max Fee (search for SPECIFIC fee name, not generic 'shipping')
+                // 1. Free Shipping Max Fee
                 const val_free_ship = getFinanceTotal(['free shipping', 'free_shipping'])
 
-                // 2. Co-funded Voucher Max (search for SPECIFIC fee name)
+                // 2. Co-funded Voucher Max
                 const val_voucher = getFinanceTotal(['co-funded', 'cofunded', 'co_funded'])
 
-                // 3. Other fees from Finance API (always from API)
+                // 3. Other fees from Finance API
                 const val_commission = getFinanceTotal(['commission'])
                 const val_payment = getFinanceTotal(['payment fee'])
                 const val_handling = getFinanceTotal(['handling fee'])
                 const val_coin = getFinanceTotal(['coin'])
                 const val_tax = getFinanceTotal(['tax', 'vat', 'wht'])
 
-                // Total Fee = Shipping + Voucher + Commission + Payment + Handling + Coins + Tax
-                const totalFee = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax
+                finalFee = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax
 
-                console.log(`[SYNC DEBUG] Order ${orderNumber} (ID: ${targetId}): Found ${transactions?.length || 0} txns. Total Fee: ${totalFee}`)
+                console.log(`[SYNC DEBUG] Order ${orderNumber} (ID: ${targetId}): Found ${transactions?.length || 0} txns. Total Fee: ${finalFee}`)
 
                 // Save to database
                 const { error: updateError } = await supabase
                     .from('daraz_orders')
-                    .update({ daraz_fees: totalFee })
+                    .update({ daraz_fees: finalFee, store_id: storeId })
                     .eq('order_number', orderNumber)
 
                 if (updateError) {
                     console.error(`[SYNC ERROR] Failed to update ${orderNumber}:`, updateError)
                     feeSyncResult = 'Update Failed'
                 } else {
-                    feeSyncResult = `Updated (Fee: ${totalFee.toFixed(2)})`
+                    feeSyncResult = `Updated (Fee: Rs. ${finalFee.toFixed(2)})`
                     try {
                         const productIds = order.items?.map((it: any) => it.product_id).filter(Boolean) || []
                         if (productIds.length > 0) {
@@ -800,31 +822,26 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
 
         } catch (feeErr: any) {
             debugLog.push(`Fee Sync Error: ${feeErr.message}`)
-            feeSyncResult = 'Error'
+            feeSyncResult = `Error: ${feeErr.message}`
         }
     } else {
         feeSyncResult = 'Skipped (No Store ID)'
     }
 
     // 2. Identify items that need updates (Unlocked or 0 or Unlinked)
-    // We strictly check for items missing purchase_cost OR items that are not linked (product_id is null)
-    let itemsToUpdate = order.items.filter((item: any) => !item.purchase_cost || item.purchase_cost === 0 || !item.product_id)
-
-    // debugLog.push(`Candidates: ${itemsToUpdate.length}`)
+    let itemsToUpdate = order.items?.filter((item: any) => !item.purchase_cost || item.purchase_cost === 0 || !item.product_id) || []
 
     // 3. Resolve Prices and Re-Link if necessary
     if (itemsToUpdate.length > 0) {
-        // Fetch ALL products for robust matching
-        // MAX LIMIT: 1000 is default, increase to 10000 to cover all 2000+ products
         const { data: products } = await supabase
             .from('inventory_price_reports_view')
             .select('product_id, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4, last_price, est_price')
             .limit(10000)
 
         const linkedItemIds = itemsToUpdate.map((i: any) => i.product_id).filter(Boolean)
-        const allProductIds = Array.from(new Set(linkedItemIds)) // Only fetch details for ~10-20 items per order
+        const allProductIds = Array.from(new Set(linkedItemIds))
 
-        const { data: productDetails, error: pdError } = await supabase
+        const { data: productDetails } = await supabase
             .from('products')
             .select('id, product_type, est_price')
             .in('id', allProductIds)
@@ -837,14 +854,12 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
             productDetailsMap.set(pt.id, pt)
         })
 
-        // Fetch combo components for all combo products
         const comboProductIds = productDetails?.filter(pt => pt.product_type === 'combo').map(pt => pt.id) || []
         const { data: comboComponents } = await supabase
             .from('product_combos')
             .select('parent_product_id, child_product_id, quantity')
             .in('parent_product_id', comboProductIds)
 
-        // Build combo components map
         const comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
         comboComponents?.forEach(cc => {
             if (!comboComponentsMap.has(cc.parent_product_id)) {
@@ -856,7 +871,6 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
             })
         })
 
-        // Fetch prices (last_price, est_price) for all linked products (not just combos)
         const allChildIds = Array.from(new Set(
             Array.from(comboComponentsMap.values())
                 .flat()
@@ -881,32 +895,23 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
         for (const item of itemsToUpdate) {
             let purchaseCost = 0
 
-            // A. Exact Linked Match (Combo Aware)
             if (item.product_id) {
                 const pType = productTypeMap.get(item.product_id) || 'single'
 
                 if (pType === 'combo') {
-                    // Sum of components
                     const components = comboComponentsMap.get(item.product_id) || []
                     let comboCost = 0
                     components.forEach(comp => {
                         const cp = priceMap.get(comp.child_product_id)
-                        // Priority: Last Price -> Est Price -> 0
                         const price = cp?.last_price || cp?.est_price || 0
                         comboCost += (price * comp.quantity)
                     })
                     purchaseCost = comboCost
                 } else {
-                    // Single Product
-                    // Priority: Inventory View last_price -> Inventory View est_price -> Products Table est_price -> 0
                     const livePrice = priceMap.get(item.product_id)
                     const pd = productDetailsMap.get(item.product_id)
-
                     purchaseCost = livePrice?.last_price || livePrice?.est_price || pd?.est_price || 0
                 }
-            } else {
-                // B. Unlinked - Try to Link
-                // (Fuzzy matching logic omitted for brevity as it was very long, using 0 for now to prevent crash)
             }
 
             if (purchaseCost > 0) {
@@ -917,25 +922,109 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
     }
 
     revalidatePath('/dashboard/sales/daraz/profit-tracker')
-    return { success: true, updates, log: debugLog, feeSync: feeSyncResult }
+    return {
+        success: true,
+        orderNumber,
+        sellerAccount: sellerAccountName,
+        fee: finalFee,
+        feeSync: feeSyncResult,
+        updatesCount: updates.length,
+        log: debugLog
+    }
 }
 
-// Bulk Sync: Scans recent orders (e.g. last 100) and attempts to fix missing costs/fees
+// Fetch all orders for a specific delivery date
+export async function getDailyOrdersForDate(params: { dateStr: string, sellerAccount?: string }) {
+    const { dateStr, sellerAccount } = params
+    const supabase = await createAdminClient()
+
+    let query = supabase
+        .from('daraz_order_report_view')
+        .select(`
+            order_primary_id,
+            order_number,
+            invoice_number,
+            order_status,
+            delivered_at,
+            delivered_by_daraz,
+            delivery_date,
+            seller_account,
+            total_revenue,
+            total_purchase_cost,
+            daraz_fees,
+            estimated_profit,
+            items_summary
+        `)
+        .gte('delivery_date', `${dateStr}T00:00:00.000Z`)
+        .lte('delivery_date', `${dateStr}T23:59:59.999Z`)
+
+    if (sellerAccount && sellerAccount !== 'All') {
+        query = query.eq('seller_account', sellerAccount)
+    }
+
+    query = query.order('delivery_date', { ascending: false }).limit(2000)
+
+    let { data, error } = await query
+
+    if (error || !data || data.length === 0) {
+        // Try fallback date query without 'T' format or with date prefix
+        const fallbackQuery = supabase
+            .from('daraz_order_report_view')
+            .select(`
+                order_primary_id,
+                order_number,
+                invoice_number,
+                order_status,
+                delivered_at,
+                delivered_by_daraz,
+                delivery_date,
+                seller_account,
+                total_revenue,
+                total_purchase_cost,
+                daraz_fees,
+                estimated_profit,
+                items_summary
+            `)
+            .gte('delivery_date', dateStr)
+            .lte('delivery_date', `${dateStr} 23:59:59`)
+        
+        if (sellerAccount && sellerAccount !== 'All') {
+            fallbackQuery.eq('seller_account', sellerAccount)
+        }
+
+        const fallbackResult = await fallbackQuery.order('delivery_date', { ascending: false }).limit(2000)
+        if (!fallbackResult.error && fallbackResult.data && fallbackResult.data.length > 0) {
+            data = fallbackResult.data
+        }
+    }
+
+    const orders = (data || []).map((o: any) => {
+        const hasValidCost = o.total_purchase_cost !== null && o.total_purchase_cost > 0
+        const hasValidFees = o.daraz_fees !== null && o.daraz_fees !== undefined && o.daraz_fees > 0
+        const isSynced = hasValidCost && hasValidFees
+        return {
+            ...o,
+            sync_status: isSynced ? 'synced' : 'not_synced'
+        }
+    })
+
+    const orderNumbers = orders.map((o: any) => o.order_number).filter(Boolean)
+    const syncedCount = orders.filter((o: any) => o.sync_status === 'synced').length
+    const unsyncedCount = orders.length - syncedCount
+
+    return {
+        orders,
+        orderNumbers,
+        totalCount: orders.length,
+        syncedCount,
+        unsyncedCount
+    }
+}
+
+// Bulk Sync: Scans recent orders and attempts to fix missing costs/fees
 export async function syncBulkOrderPurchaseCosts() {
     const supabase = await createClient()
 
-    // Find orders with missing fees or missing purchase costs in the last 30 days
-    // Limit to 20 per batch for safe execution time
-    const { data: orders } = await supabase
-        .from('daraz_orders')
-        .select('order_number')
-        .or('daraz_fees.is.null,items.purchase_cost.is.null') // This pseudo-filter is tricky, better to fetch recent and scan
-        .order('created_at', { ascending: false })
-        .limit(20)
-
-    // Better query: Find orders where fees are null OR items have 0 cost
-    // Supabase OR syntax across tables is hard.
-    // Let's just pick recent 50 orders and sync them.
     const { data: recentOrders } = await supabase
         .from('daraz_orders')
         .select('order_number')

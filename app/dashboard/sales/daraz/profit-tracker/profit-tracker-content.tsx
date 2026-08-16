@@ -22,6 +22,7 @@ import Link from 'next/link'
 import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats } from '@/features/sales/actions/report-actions'
 import { format, startOfWeek, endOfWeek, getWeek } from 'date-fns'
 import { BulkSyncButton } from './bulk-sync-button'
+import { DailyBreakdownModal } from './daily-breakdown-modal'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
@@ -263,6 +264,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
     })
     const [activeSubTab, setActiveSubTab] = useState<'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly' | 'report-api'>('orders')
     const [selectedWeekRange, setSelectedWeekRange] = useState<{ start: string, end: string } | null>(null)
+    const [selectedDailyDateKey, setSelectedDailyDateKey] = useState<string | null>(null)
 
     const handleSubTabChange = (tab: 'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly' | 'report-api') => {
         if (tab !== activeSubTab) {
@@ -1248,77 +1250,14 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                                 </TableCell>
 
                                                 <TableCell className="text-center py-3.5">
-                                                    <Dialog>
-                                                        <DialogTrigger asChild>
-                                                            <Button variant="outline" size="sm" className="h-8 text-xs font-semibold px-3 rounded-lg border-gray-300 hover:bg-gray-50 dark:border-zinc-700 dark:hover:bg-zinc-800">
-                                                                View Breakdown
-                                                            </Button>
-                                                        </DialogTrigger>
-                                                        <DialogContent className="max-w-2xl bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-2xl p-6">
-                                                            <DialogHeader>
-                                                                <DialogTitle className="text-base font-bold text-gray-900 dark:text-gray-100">
-                                                                    Daily Breakdown - {!isNaN(dateObj.getTime()) ? format(dateObj, 'MMMM d, yyyy') : dateKey}
-                                                                </DialogTitle>
-                                                            </DialogHeader>
-
-                                                            <div className="py-4 space-y-4">
-                                                                <div className="grid grid-cols-2 gap-4">
-                                                                    <div className="p-3 bg-gray-50 dark:bg-zinc-800/60 rounded-xl border border-gray-100 dark:border-zinc-800">
-                                                                        <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Total Profit</p>
-                                                                        <p className={`text-base font-extrabold mt-1 ${totalProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
-                                                                            Rs. {totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                        </p>
-                                                                    </div>
-                                                                    <div className="p-3 bg-gray-50 dark:bg-zinc-800/60 rounded-xl border border-gray-100 dark:border-zinc-800">
-                                                                        <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Total Revenue</p>
-                                                                        <p className="text-base font-extrabold text-gray-900 dark:text-gray-100 mt-1">
-                                                                            Rs. {totalRevenue.toLocaleString()}
-                                                                        </p>
-                                                                    </div>
-                                                                </div>
-
-                                                                <div className="border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden">
-                                                                    <Table>
-                                                                        <TableHeader className="bg-gray-50 dark:bg-zinc-800/60">
-                                                                            <TableRow>
-                                                                                <TableHead className="text-[11px] font-bold uppercase">Store Name</TableHead>
-                                                                                <TableHead className="text-right text-[11px] font-bold uppercase">Profit</TableHead>
-                                                                                <TableHead className="text-right text-[11px] font-bold uppercase">Revenue</TableHead>
-                                                                                <TableHead className="text-center text-[11px] font-bold uppercase">Status</TableHead>
-                                                                            </TableRow>
-                                                                        </TableHeader>
-                                                                        <TableBody className="text-xs">
-                                                                            {Object.entries(dayStat.statsBySeller || {}).map(([seller, s]: [string, any]) => (
-                                                                                <TableRow key={seller}>
-                                                                                    <TableCell className="font-semibold text-gray-800 dark:text-gray-200 py-3">{seller}</TableCell>
-                                                                                    <TableCell className={`text-right font-bold py-3 ${s.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
-                                                                                        Rs. {(s.profit || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                                    </TableCell>
-                                                                                    <TableCell className="text-right font-medium py-3 text-gray-800 dark:text-gray-200">
-                                                                                        Rs. {(s.revenue || 0).toLocaleString()}
-                                                                                    </TableCell>
-                                                                                    <TableCell className="text-center py-3">
-                                                                                        {s.missing > 0 ? (
-                                                                                            <span className="font-bold text-rose-500">{s.missing} Missing</span>
-                                                                                        ) : (
-                                                                                            <span className="font-semibold text-emerald-600 dark:text-emerald-400">Synced</span>
-                                                                                        )}
-                                                                                    </TableCell>
-                                                                                </TableRow>
-                                                                            ))}
-                                                                        </TableBody>
-                                                                    </Table>
-                                                                </div>
-
-                                                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-gray-100 dark:border-zinc-800">
-                                                                    <div className="text-xs text-gray-500 dark:text-gray-400">
-                                                                        Bulk sync will update fees and purchase costs for all {dayOrderNumbers.length} orders on this day.
-                                                                    </div>
-                                                                    <BulkSyncButton orderNumbers={dayOrderNumbers} />
-                                                                </div>
-                                                            </div>
-                                                        </DialogContent>
-                                                    </Dialog>
+                                                    <Button
+                                                        variant="outline"
+                                                        size="sm"
+                                                        onClick={() => setSelectedDailyDateKey(dateKey)}
+                                                        className="h-8 text-xs font-semibold px-3 rounded-lg border-gray-300 hover:bg-gray-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                                                    >
+                                                        View Breakdown
+                                                    </Button>
                                                 </TableCell>
                                             </TableRow>
                                         )
@@ -1326,6 +1265,17 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                 </TableBody>
                             </Table>
                         </div>
+
+                        {/* Dedicated Daily Breakdown Modal */}
+                        {selectedDailyDateKey && (
+                            <DailyBreakdownModal
+                                dateKey={selectedDailyDateKey}
+                                dayStat={stats[selectedDailyDateKey]}
+                                isOpen={!!selectedDailyDateKey}
+                                onClose={() => setSelectedDailyDateKey(null)}
+                                defaultSellerAccount={sellerAccount}
+                            />
+                        )}
                     </Card>
                 )}
 
