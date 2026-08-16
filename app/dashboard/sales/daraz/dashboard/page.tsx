@@ -12,7 +12,7 @@ import { useDashboard } from '@/app/dashboard/context'
 
 import { OrderStatusSyncTable } from '@/features/sales/components/OrderStatusSyncTable'
 import { OrderSyncPageContent } from '../order-sync/page'
-import ProfitTrackerPage from '../profit-tracker/page'
+import { ProfitTrackerContent } from '../profit-tracker/profit-tracker-content'
 import { DarazOrderList } from '@/features/sales/components/DarazOrderList'
 import { DarazSalesReport } from '@/features/sales/components/DarazSalesReport'
 import { DarazProductReport } from '@/features/sales/components/DarazProductReport'
@@ -850,7 +850,7 @@ function DashboardContent() {
                 )}
 
                 {activeTab === 'profit-tracker' && (
-                    <ProfitTrackerPage isEmbedded={true} />
+                    <ProfitTrackerContent isEmbedded={true} />
                 )}
 
                 {activeTab === 'order-list' && (

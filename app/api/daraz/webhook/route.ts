@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import { syncSingleDarazOrderAction } from '@/features/sales/actions/daraz-sync-order'
-import { processIncomingMessageAutoReply } from '@/features/chat/actions/chat-actions'
+import { processIncomingMessageAutoReply, processPendingDelayedMessagesAction } from '@/features/chat/actions/chat-actions'
 
 // Signature verification using HMAC-SHA256
 function verifySignature(appKey: string, body: string, appSecret: string, receivedSignature: string): boolean {
@@ -112,7 +112,8 @@ export async function POST(request: NextRequest) {
                 console.log(`[Webhook] ✅ Order ${tradeOrderId} auto-synced. Status: ${result.newStatus}`)
 
                 // Queue automated chat message if it is a new order (Pending)
-                if (result.newStatus === 'Pending') {
+                const isPendingOrder = String(result.newStatus || '').toLowerCase() === 'pending'
+                if (isPendingOrder) {
                     try {
                         const { data: chatSettings } = await supabase
                             .from('daraz_chat_settings')
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest) {
                             .maybeSingle()
 
                         if (chatSettings?.auto_reply_on_new_order) {
-                            const delayMinutes = chatSettings.new_order_delay_minutes || 1
+                            const delayMinutes = chatSettings.new_order_delay_minutes ?? 1
                             const scheduledAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
                             
                             // Check if already queued to prevent duplicate entries
@@ -160,6 +161,11 @@ export async function POST(request: NextRequest) {
                         console.error('[Webhook] Failed to queue automated chat message:', queueErr.message)
                     }
                 }
+
+                // Process any due delayed messages immediately
+                processPendingDelayedMessagesAction().catch(err => {
+                    console.error('[Webhook] Background processPendingDelayedMessagesAction error:', err)
+                })
 
                 return NextResponse.json({
                     success: true,

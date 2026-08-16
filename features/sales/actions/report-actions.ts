@@ -407,8 +407,10 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
             created_at: order.created_at,
             seller_account: order.seller_account,
             products: order.items_summary || [],
-            total_revenue: order.total_revenue,
-            total_purchase_cost: order.total_purchase_cost,
+            items_summary: order.items_summary || [],
+            total_revenue: order.total_revenue || 0,
+            total_purchase_cost: order.total_purchase_cost || 0,
+            daraz_fees: order.daraz_fees || 0,
             profit: order.estimated_profit,
             profit_percentage: order.profit_percentage || 0,
             sync_status: calculatedSyncStatus
@@ -456,6 +458,7 @@ export async function getDailyProfitStats(params: GetOrderReportParams) {
                 profit: parseFloat(row.profit) || 0,
                 revenue: parseFloat(row.revenue) || 0,
                 cost: parseFloat(row.cost) || 0,
+                orderCount: parseInt(row.order_count || row.orderCount) || 1,
                 missing: parseInt(row.missing) || 0
             }));
 
@@ -469,6 +472,197 @@ export async function getDailyProfitStats(params: GetOrderReportParams) {
         console.error('Error in getDailyProfitStats:', error);
         // Return empty array instead of throwing to prevent breaking the UI
         return [];
+    }
+}
+
+// Fetch exact unpaginated weekly financial breakdown details for a week period & store filter
+export async function getWeeklyFinancialBreakdownDetails(params: {
+    startDate: string
+    endDate: string
+    sellerAccount?: string
+}) {
+    const { startDate, endDate, sellerAccount } = params
+    const supabase = await createAdminClient()
+
+    let query = supabase
+        .from('daraz_order_report_view')
+        .select('*')
+
+    if (startDate) {
+        query = query.gte('delivery_date', startDate)
+    }
+    if (endDate) {
+        const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`
+        query = query.lte('delivery_date', endDateTime)
+    }
+    if (sellerAccount && sellerAccount !== 'All') {
+        query = query.eq('seller_account', sellerAccount)
+    }
+
+    query = query.limit(5000)
+
+    const { data: rawOrders, error } = await query
+
+    if (error) {
+        console.error('Error fetching weekly financial details:', error)
+        throw new Error(`Failed to fetch weekly financial details: ${error.message}`)
+    }
+
+    const ordersList = rawOrders || []
+    
+    let totalRevenue = 0
+    let totalFreeShip = 0
+    let totalVoucher = 0
+    let totalCommission = 0
+    let totalPayment = 0
+    let totalHandling = 0
+    let totalCoins = 0
+    let totalTax = 0
+    let totalFees = 0
+    let totalReceivable = 0
+    let count = ordersList.length
+
+    ordersList.forEach((o: any) => {
+        const rev = o.total_revenue || 0
+        const freeShip = rev * 0.04 * 1.13
+        const voucher = rev * 0.03
+        const comm = o.daraz_fees ? (o.daraz_fees * 0.4) : (rev * 0.0634)
+        const pay = rev * 0.0282
+        const handling = 11.30
+        const coins = 5.65
+        const tax = rev * 0.01
+        
+        const combined = freeShip + voucher + comm + pay + handling + coins + tax
+        const fee = (o.daraz_fees && o.daraz_fees > 0) ? o.daraz_fees : combined
+
+        totalRevenue += rev
+        totalFreeShip += freeShip
+        totalVoucher += voucher
+        totalCommission += comm
+        totalPayment += pay
+        totalHandling += handling
+        totalCoins += coins
+        totalTax += tax
+        totalFees += fee
+        totalReceivable += (rev - fee)
+    })
+
+    return {
+        orderCount: count,
+        totalRevenue,
+        totalFreeShip,
+        totalVoucher,
+        totalCommission,
+        totalPayment,
+        totalHandling,
+        totalCoins,
+        totalTax,
+        totalFees,
+        totalReceivable,
+        orders: ordersList.map((o: any) => ({
+            order_primary_id: o.order_primary_id,
+            order_number: o.order_number,
+            order_status: o.order_status,
+            delivered_at: o.delivered_at || o.delivered_by_daraz || o.created_at,
+            seller_account: o.seller_account,
+            total_revenue: o.total_revenue || 0,
+            daraz_fees: o.daraz_fees || 0,
+            items_summary: o.items_summary || []
+        }))
+    }
+}
+
+// Fetch exact unpaginated monthly financial breakdown details for a month period & store filter
+export async function getMonthlyFinancialBreakdownDetails(params: {
+    monthKey: string // e.g. '2026-08'
+    sellerAccount?: string
+}) {
+    const { monthKey, sellerAccount } = params
+    const supabase = await createAdminClient()
+
+    const startDate = `${monthKey}-01`
+    const endDate = `${monthKey}-31T23:59:59.999Z`
+
+    let query = supabase
+        .from('daraz_order_report_view')
+        .select('*')
+        .gte('delivery_date', startDate)
+        .lte('delivery_date', endDate)
+
+    if (sellerAccount && sellerAccount !== 'All') {
+        query = query.eq('seller_account', sellerAccount)
+    }
+
+    query = query.limit(10000)
+
+    const { data: rawOrders, error } = await query
+
+    if (error) {
+        console.error('Error fetching monthly financial details:', error)
+        throw new Error(`Failed to fetch monthly financial details: ${error.message}`)
+    }
+
+    const ordersList = rawOrders || []
+    
+    let totalRevenue = 0
+    let totalFreeShip = 0
+    let totalVoucher = 0
+    let totalCommission = 0
+    let totalPayment = 0
+    let totalHandling = 0
+    let totalCoins = 0
+    let totalTax = 0
+    let totalFees = 0
+    let totalReceivable = 0
+    let count = ordersList.length
+
+    ordersList.forEach((o: any) => {
+        const rev = o.total_revenue || 0
+        const freeShip = rev * 0.04 * 1.13
+        const voucher = rev * 0.03
+        const comm = o.daraz_fees ? (o.daraz_fees * 0.4) : (rev * 0.0634)
+        const pay = rev * 0.0282
+        const handling = 11.30
+        const coins = 5.65
+        const tax = rev * 0.01
+        
+        const combined = freeShip + voucher + comm + pay + handling + coins + tax
+        const fee = (o.daraz_fees && o.daraz_fees > 0) ? o.daraz_fees : combined
+
+        totalRevenue += rev
+        totalFreeShip += freeShip
+        totalVoucher += voucher
+        totalCommission += comm
+        totalPayment += pay
+        totalHandling += handling
+        totalCoins += coins
+        totalTax += tax
+        totalFees += fee
+        totalReceivable += (rev - fee)
+    })
+
+    return {
+        orderCount: count,
+        totalRevenue,
+        totalFreeShip,
+        totalVoucher,
+        totalCommission,
+        totalPayment,
+        totalHandling,
+        totalCoins,
+        totalTax,
+        totalFees,
+        totalReceivable,
+        orders: ordersList.map((o: any) => ({
+            order_primary_id: o.order_primary_id,
+            order_number: o.order_number,
+            order_status: o.order_status,
+            delivered_at: o.delivered_at || o.delivered_by_daraz || o.created_at,
+            seller_account: o.seller_account,
+            total_revenue: o.total_revenue || 0,
+            daraz_fees: o.daraz_fees || 0,
+            items_summary: o.items_summary || []
+        }))
     }
 }
 

@@ -1,19 +1,17 @@
 'use client'
 
 import React, { useState, useEffect, useMemo } from 'react'
-import { ArrowLeft, ShoppingBag, ShoppingCart, FileText, Plus, Building, Calendar, Wallet, Layers, ArrowRight, Edit, Info, RefreshCw, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react'
+import { ArrowLeft, ShoppingBag, ShoppingCart, FileText, Plus, Building, Calendar, Layers, ArrowRight, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react'
 import Link from 'next/link'
-import { Card, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Button, Input, Label, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui-shim'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Card, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Button } from '@/components/ui-shim'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getCompanyDetails } from '@/features/settings/actions/company-details-actions'
 import { getPanVatBills } from '@/features/account/actions/pan-vat-bill-actions'
 import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
 import { formatNepaliCurrency } from '@/lib/utils/date-converter'
 import { AddPanVatCompanyModal } from '@/features/account/components/AddPanVatCompanyModal'
 import { AddPanVatBillModal } from '@/features/account/components/AddPanVatBillModal'
-import { getDarazWeeklyTransactions, saveDarazWeeklyTransaction, getWeeklyEstimatedSales } from '@/features/account/actions/daraz-transaction-actions'
 import { useOnlineStores } from '@/features/settings/hooks/useStores'
-import { toast } from 'sonner'
 
 import { getSalesBills } from '@/features/sales/actions/sales-bill-actions'
 import { AddSalesBillModal } from '@/features/sales/components/AddSalesBillModal'
@@ -63,23 +61,6 @@ function getWeeksInInterval(startDateStr: string, endDateStr: string) {
     return weeks.reverse() // Latest weeks on top
 }
 
-const getSellerColor = (seller: string) => {
-    const s = (seller || '').toLowerCase()
-    if (s.includes('cosmetic')) {
-        return 'bg-pink-50 text-pink-700 dark:bg-pink-950/20 dark:text-pink-400 border-pink-100 dark:border-pink-900/20'
-    }
-    if (s.includes('btas')) {
-        return 'bg-blue-50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-400 border-blue-100 dark:border-blue-900/20'
-    }
-    if (s.includes('balaju')) {
-        return 'bg-purple-50 text-purple-700 dark:bg-purple-950/20 dark:text-purple-400 border-purple-100 dark:border-purple-900/20'
-    }
-    if (s.includes('bagmati')) {
-        return 'bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400 border-amber-100 dark:border-amber-900/20'
-    }
-    return 'bg-zinc-50 text-zinc-700 dark:bg-zinc-800/30 dark:text-zinc-400 border-zinc-100 dark:border-zinc-800'
-}
-
 export default function PanVatBillingPage() {
     const [fiscalYearId, setFiscalYearId] = useState<string>('all')
     const [isAddBillModalOpen, setIsAddBillModalOpen] = useState(false)
@@ -96,123 +77,12 @@ export default function PanVatBillingPage() {
     }, [fiscalYearId, fiscalYears])
 
     // Fetch Online Stores (Seller accounts & Company mappings)
-    const { data: onlineStores = [], isLoading: isLoadingStores } = useOnlineStores()
-
-    // Estimates state for current week
-    const [currentWeekEstimates, setCurrentWeekEstimates] = useState<Record<string, number>>({})
-    const [loadingCurrentWeekEstimates, setLoadingCurrentWeekEstimates] = useState(false)
-
-    // Last 4 weeks history expansion state
-    const [showAllHistory, setShowAllHistory] = useState(false)
+    const { data: onlineStores = [] } = useOnlineStores()
 
     // Sales Billing Section states
     const [isAddSalesBillModalOpen, setIsAddSalesBillModalOpen] = useState(false)
     const [showAllSalesHistory, setShowAllSalesHistory] = useState(false)
     const [showAllDailySales, setShowAllDailySales] = useState(false)
-
-    // Fetch saved settlements/transactions for selected Fiscal Year
-    const { data: savedTransactions = [], isLoading: isLoadingTransactions } = useQuery({
-        queryKey: ['daraz-weekly-transactions', fiscalYearId],
-        queryFn: () => getDarazWeeklyTransactions(fiscalYearId !== 'all' ? fiscalYearId : undefined),
-        enabled: !!fiscalYearId,
-        staleTime: 1000 * 60 * 2,
-    })
-
-    // Edit modal state
-    const [editingRow, setEditingRow] = useState<any | null>(null)
-    const [isViewMode, setIsViewMode] = useState(false)
-    const [salesAmount, setSalesAmount] = useState<string>('')
-    const [cofundedVoucherMax, setCofundedVoucherMax] = useState<string>('')
-    const [paymentFee, setPaymentFee] = useState<string>('')
-    const [darazCoinsFee, setDarazCoinsFee] = useState<string>('')
-    const [freeShippingFee, setFreeShippingFee] = useState<string>('')
-    const [commissionFee, setCommissionFee] = useState<string>('')
-    const [gstWithholding, setGstWithholding] = useState<string>('')
-    const [handlingFee, setHandlingFee] = useState<string>('')
-    const [estimatedSalesAmount, setEstimatedSalesAmount] = useState<number>(0)
-    const [loadingSalesEst, setLoadingSalesEst] = useState(false)
-
-    // Save/Upsert Transaction Mutation
-    const saveMutation = useMutation({
-        mutationFn: saveDarazWeeklyTransaction,
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['daraz-weekly-transactions'] })
-            toast.success('Weekly transaction saved successfully!')
-            setEditingRow(null)
-        },
-        onError: (err: any) => {
-            toast.error(`Error saving: ${err.message}`)
-        }
-    })
-
-    // Load actual weekly Estimated Sales amount when modal is triggered
-    useEffect(() => {
-        if (editingRow) {
-            setLoadingSalesEst(true)
-            getWeeklyEstimatedSales(editingRow.startDateStr, editingRow.endDateStr, editingRow.sellerAccount)
-                .then(amount => {
-                    setEstimatedSalesAmount(amount)
-                })
-                .catch(err => {
-                    console.error(err)
-                    toast.error('Failed to calculate Estimated Sales Amount')
-                })
-                .finally(() => {
-                    setLoadingSalesEst(false)
-                })
-        }
-    }, [editingRow])
-
-    // Handle Edit Click
-    const handleEdit = (row: any, isView = false) => {
-        setIsViewMode(isView)
-        setEditingRow(row)
-        const t = row.savedTransaction
-        
-        // Pre-fill inputs with saved details or default empty string
-        setSalesAmount(t ? t.sales_amount.toString() : '')
-        setCofundedVoucherMax(t ? t.cofunded_voucher_max.toString() : '')
-        setPaymentFee(t ? t.payment_fee.toString() : '')
-        setDarazCoinsFee(t ? t.daraz_coins_discount_participation_fee.toString() : '')
-        setFreeShippingFee(t ? t.free_shipping_max_fee.toString() : '')
-        setCommissionFee(t ? t.commission_fee.toString() : '')
-        setGstWithholding(t ? t.general_sales_tax_withholding.toString() : '')
-        setHandlingFee(t ? t.handling_fee.toString() : '')
-        setEstimatedSalesAmount(t ? t.estimated_sales_amount : 0)
-    }
-
-    // Dynamic fee summation on-the-fly (excluding General Sales Tax withholding)
-    const totalFees = useMemo(() => {
-        const v1 = parseFloat(cofundedVoucherMax) || 0
-        const v2 = parseFloat(paymentFee) || 0
-        const v3 = parseFloat(darazCoinsFee) || 0
-        const v4 = parseFloat(freeShippingFee) || 0
-        const v5 = parseFloat(commissionFee) || 0
-        const v7 = parseFloat(handlingFee) || 0
-        return v1 + v2 + v3 + v4 + v5 + v7
-    }, [cofundedVoucherMax, paymentFee, darazCoinsFee, freeShippingFee, commissionFee, handlingFee])
-
-    const handleSave = () => {
-        if (!editingRow) return
-        const num = (val: string) => parseFloat(val) || 0
-        saveMutation.mutate({
-            start_date: editingRow.startDateStr,
-            end_date: editingRow.endDateStr,
-            seller_account: editingRow.sellerAccount,
-            company_name: editingRow.companyName,
-            estimated_sales_amount: estimatedSalesAmount,
-            sales_amount: num(salesAmount),
-            cofunded_voucher_max: num(cofundedVoucherMax),
-            payment_fee: num(paymentFee),
-            daraz_coins_discount_participation_fee: num(darazCoinsFee),
-            free_shipping_max_fee: num(freeShippingFee),
-            commission_fee: num(commissionFee),
-            general_sales_tax_withholding: num(gstWithholding),
-            handling_fee: num(handlingFee),
-            total_commission_fees: totalFees,
-            fiscal_year_id: editingRow.fiscalYearId || null
-        })
-    }
 
     // Weeks calculation
     const weeks = useMemo(() => {
@@ -234,50 +104,6 @@ export default function PanVatBillingPage() {
         })
     }, [weeks])
 
-    // Generate combined list of current week's transactions
-    const currentWeekTransactions = useMemo(() => {
-        if (!currentWeek || onlineStores.length === 0) return []
-        
-        return onlineStores.map(store => {
-            const saved = savedTransactions.find(t => 
-                t.start_date === currentWeek.startDateStr && 
-                t.end_date === currentWeek.endDateStr && 
-                t.seller_account === store.seller_account
-            )
-            
-            return {
-                weekLabel: currentWeek.label,
-                startDateStr: currentWeek.startDateStr,
-                endDateStr: currentWeek.endDateStr,
-                sellerAccount: store.seller_account,
-                companyName: store.company_name,
-                fiscalYearId: selectedFiscalYear?.id,
-                savedTransaction: saved
-            }
-        })
-    }, [currentWeek, onlineStores, savedTransactions, selectedFiscalYear])
-
-    // Fetch estimated sales dynamically for the current week for all stores
-    useEffect(() => {
-        if (!currentWeek || onlineStores.length === 0) return
-        
-        setLoadingCurrentWeekEstimates(true)
-        const promises = onlineStores.map(store => 
-            getWeeklyEstimatedSales(currentWeek.startDateStr, currentWeek.endDateStr, store.seller_account)
-                .then(amount => ({ sellerAccount: store.seller_account, amount }))
-                .catch(() => ({ sellerAccount: store.seller_account, amount: 0 }))
-        )
-        
-        Promise.all(promises).then(results => {
-            const map: Record<string, number> = {}
-            results.forEach(r => {
-                map[r.sellerAccount] = r.amount
-            })
-            setCurrentWeekEstimates(map)
-            setLoadingCurrentWeekEstimates(false)
-        })
-    }, [currentWeek, onlineStores])
-
     // Get last 4 weeks
     const last4Weeks = useMemo(() => {
         if (!currentWeek) return []
@@ -285,43 +111,6 @@ export default function PanVatBillingPage() {
         if (idx === -1) return []
         return weeks.slice(idx + 1, idx + 5)
     }, [weeks, currentWeek])
-
-    // Generate combined list of last 4 weeks' transactions
-    const last4WeeksTransactions = useMemo(() => {
-        if (last4Weeks.length === 0 || onlineStores.length === 0) return []
-        
-        const rows: any[] = []
-        last4Weeks.forEach(week => {
-            onlineStores.forEach(store => {
-                const saved = savedTransactions.find(t => 
-                    t.start_date === week.startDateStr && 
-                    t.end_date === week.endDateStr && 
-                    t.seller_account === store.seller_account
-                )
-                
-                rows.push({
-                    weekLabel: week.label,
-                    startDateStr: week.startDateStr,
-                    endDateStr: week.endDateStr,
-                    sellerAccount: store.seller_account,
-                    companyName: store.company_name,
-                    fiscalYearId: selectedFiscalYear?.id,
-                    savedTransaction: saved
-                })
-            })
-        })
-        return rows
-    }, [last4Weeks, onlineStores, savedTransactions, selectedFiscalYear])
-
-    // Filter displayed history: if showAllHistory is false, show only the first week's rows
-    const displayedHistoryTransactions = useMemo(() => {
-        if (showAllHistory || last4WeeksTransactions.length === 0) {
-            return last4WeeksTransactions
-        }
-        if (last4Weeks.length === 0) return []
-        const firstWeek = last4Weeks[0]
-        return last4WeeksTransactions.filter(row => row.startDateStr === firstWeek.startDateStr)
-    }, [showAllHistory, last4WeeksTransactions, last4Weeks])
 
     // Set active fiscal year as default on mount
     useEffect(() => {
@@ -510,11 +299,11 @@ export default function PanVatBillingPage() {
             description: 'Comprehensive tax and VAT transaction reports'
         },
         {
-            name: 'Daraz Transaction',
-            href: '/dashboard/account/pan-vat-billing/daraz-transaction',
-            icon: Wallet,
-            color: 'bg-orange-600 dark:bg-orange-500',
-            description: 'Weekly Daraz settlement amounts, commission fees and vouchers'
+            name: 'Daraz Account & Finance',
+            href: '/dashboard/account/pan-vat-billing/daraz-finance',
+            icon: FileText,
+            color: 'bg-amber-600 dark:bg-amber-500',
+            description: 'Order financial breakdown, fees, purchase cost & net profit'
         },
     ]
 
@@ -688,215 +477,6 @@ export default function PanVatBillingPage() {
                         ))}
                     </div>
                 )}
-            </div>
-
-            {/* Daraz Transaction Section */}
-            <div className="px-4 md:px-6 space-y-4 border-t dark:border-zinc-800 pt-6">
-                {/* Section Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-gray-200 dark:border-zinc-800 pb-3 gap-3">
-                    <div className="flex items-center gap-2">
-                        <Wallet className="h-5 w-5 text-orange-600 dark:text-orange-500" />
-                        <h2 className="text-[17px] font-bold text-gray-800 dark:text-gray-100">Daraz Transaction</h2>
-                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
-                            Current & History
-                        </span>
-                    </div>
-                    <Link
-                        href="/dashboard/account/pan-vat-billing/daraz-transaction"
-                        className="text-xs font-bold text-orange-600 hover:text-orange-700 flex items-center gap-1 hover:underline"
-                    >
-                        View All Settlements
-                        <ArrowRight size={14} />
-                    </Link>
-                </div>
-
-                {/* Sub-section: Current Week */}
-                <div className="space-y-3">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Current Week Settlements</h3>
-                    {isLoadingStores || isLoadingTransactions ? (
-                        <div className="flex items-center gap-2 py-4">
-                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-orange-500"></div>
-                            <p className="text-xs text-gray-500">Loading current week...</p>
-                        </div>
-                    ) : currentWeekTransactions.length === 0 ? (
-                        <p className="text-xs text-gray-500 italic">No registered online stores or current week is outside the selected fiscal year.</p>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                            {currentWeekTransactions.map((row) => {
-                                const t = row.savedTransaction
-                                return (
-                                    <Card
-                                        key={row.sellerAccount}
-                                        className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 p-4 hover:shadow-md transition-all flex flex-col justify-between"
-                                    >
-                                        <div className="space-y-3">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span className={`inline-flex px-2 py-0.5 rounded-md text-[10px] font-bold border ${getSellerColor(row.sellerAccount)}`}>
-                                                    {row.sellerAccount}
-                                                </span>
-                                                {t ? (
-                                                    <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-400">
-                                                        Saved
-                                                    </span>
-                                                ) : (
-                                                    <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-800 dark:bg-zinc-800 dark:text-zinc-400">
-                                                        Pending
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div>
-                                                <h4 className="font-extrabold text-sm text-gray-900 dark:text-gray-100">{row.companyName}</h4>
-                                                <p className="text-[11px] text-gray-500 mt-0.5">{row.weekLabel}</p>
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-2 border-t dark:border-zinc-800 pt-2">
-                                                <div>
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider block">Estimated</span>
-                                                    <span className="text-xs font-bold text-gray-700 dark:text-gray-300">
-                                                        {t ? formatNepaliCurrency(t.estimated_sales_amount) : (
-                                                            loadingCurrentWeekEstimates ? (
-                                                                <span className="animate-pulse">Syncing...</span>
-                                                            ) : formatNepaliCurrency(currentWeekEstimates[row.sellerAccount] || 0)
-                                                        )}
-                                                    </span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider block">Actual Sales</span>
-                                                    <span className="text-xs font-bold text-orange-600 dark:text-orange-400">
-                                                        {t ? formatNepaliCurrency(t.sales_amount) : 'Rs. 0.00'}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <button
-                                            onClick={() => handleEdit(row, false)}
-                                            className="mt-4 w-full py-1.5 text-center text-xs font-bold bg-gray-50 hover:bg-orange-50 hover:text-orange-600 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-600 dark:text-gray-300 border dark:border-zinc-700 rounded-lg transition-colors flex items-center justify-center gap-1"
-                                        >
-                                            <Edit size={12} />
-                                            Edit Settlement
-                                        </button>
-                                    </Card>
-                                )
-                            })}
-                        </div>
-                    )}
-                </div>
-
-                {/* Sub-section: Last 4 Weeks History */}
-                <div className="space-y-3 pt-2">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Last 4 Weeks History</h3>
-                    {isLoadingStores || isLoadingTransactions ? (
-                        <div className="flex items-center gap-2 py-4">
-                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-orange-500"></div>
-                            <p className="text-xs text-gray-500">Loading history...</p>
-                        </div>
-                    ) : last4WeeksTransactions.length === 0 ? (
-                        <p className="text-xs text-gray-500 italic">No historical records available for the last 4 weeks.</p>
-                    ) : (
-                        <Card className="overflow-hidden border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
-                            <div className="overflow-x-auto">
-                                <Table>
-                                    <TableHeader className="bg-gray-50 dark:bg-zinc-800/50">
-                                        <TableRow>
-                                            <TableHead className="w-16">S.N</TableHead>
-                                            <TableHead>Date Period</TableHead>
-                                            <TableHead>Company Name</TableHead>
-                                            <TableHead className="text-right">Sales Amount</TableHead>
-                                            <TableHead className="text-right">Total Fees</TableHead>
-                                            <TableHead className="text-center w-24">Status</TableHead>
-                                            <TableHead className="text-center w-24">Actions</TableHead>
-                                        </TableRow>
-                                    </TableHeader>
-                                    <TableBody>
-                                        {displayedHistoryTransactions.map((row, index) => {
-                                            const t = row.savedTransaction
-                                            const commFees = t ? (
-                                                (t.cofunded_voucher_max || 0) +
-                                                (t.payment_fee || 0) +
-                                                (t.daraz_coins_discount_participation_fee || 0) +
-                                                (t.free_shipping_max_fee || 0) +
-                                                (t.commission_fee || 0) +
-                                                (t.handling_fee || 0)
-                                            ) : 0
-                                            return (
-                                                <TableRow key={`${row.startDateStr}-${row.sellerAccount}`} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30">
-                                                    <TableCell className="text-gray-500 font-medium text-xs">{index + 1}</TableCell>
-                                                    <TableCell className="py-2.5">
-                                                        <div className="font-semibold text-gray-900 dark:text-gray-100 text-xs">{row.weekLabel}</div>
-                                                        <div className="mt-1">
-                                                            <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold border ${getSellerColor(row.sellerAccount)}`}>
-                                                                {row.sellerAccount}
-                                                            </span>
-                                                        </div>
-                                                    </TableCell>
-                                                    <TableCell className="text-gray-600 dark:text-gray-400 font-medium text-xs">{row.companyName}</TableCell>
-                                                    <TableCell className="text-right font-bold text-gray-900 dark:text-gray-100 text-xs">
-                                                        {t ? (
-                                                            <div className="space-y-0.5 text-right">
-                                                                <div>Rs. {t.sales_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                                                <div className="text-[10px] font-normal text-gray-500">
-                                                                    TDS = Rs. {(t.general_sales_tax_withholding || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                </div>
-                                                            </div>
-                                                        ) : (
-                                                            '-'
-                                                        )}
-                                                    </TableCell>
-                                                    <TableCell className="text-right font-medium text-red-600 dark:text-red-400 text-xs">
-                                                        {t ? `Rs. ${commFees.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-'}
-                                                    </TableCell>
-                                                    <TableCell className="text-center">
-                                                        {t ? (
-                                                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400">
-                                                                <CheckCircle2 className="h-3 w-3" />
-                                                                Saved
-                                                            </span>
-                                                        ) : (
-                                                            <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-800 dark:bg-zinc-800 dark:text-zinc-400">
-                                                                Pending
-                                                            </span>
-                                                        )}
-                                                    </TableCell>
-                                                    <TableCell className="text-center">
-                                                        <div className="flex items-center justify-center gap-1.5">
-                                                            {t && (
-                                                                <button
-                                                                    onClick={() => handleEdit(row, true)}
-                                                                    className="p-1 hover:bg-blue-50 dark:hover:bg-blue-950/20 text-blue-600 dark:text-blue-400 rounded-md transition-colors"
-                                                                    title="View Details"
-                                                                >
-                                                                    <Info size={14} />
-                                                                </button>
-                                                            )}
-                                                            <button
-                                                                onClick={() => handleEdit(row, false)}
-                                                                className="p-1 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-orange-600 dark:text-orange-400 rounded-md transition-colors"
-                                                                title="Edit Settlement"
-                                                            >
-                                                                <Edit size={14} />
-                                                            </button>
-                                                        </div>
-                                                    </TableCell>
-                                                </TableRow>
-                                            )
-                                        })}
-                                    </TableBody>
-                                </Table>
-                            </div>
-                        </Card>
-                    )}
-                    {!showAllHistory && last4Weeks.length > 1 && last4WeeksTransactions.length > 0 && (
-                        <div className="flex justify-center pt-2">
-                            <Button
-                                onClick={() => setShowAllHistory(true)}
-                                variant="outline"
-                                className="px-5 py-2 text-xs font-bold border-orange-200 hover:border-orange-500 text-orange-600 hover:text-orange-700 bg-white dark:bg-zinc-900 transition-all shadow-sm hover:shadow hover:scale-[1.02] flex items-center gap-1.5"
-                            >
-                                Show More
-                                <ArrowRight size={12} />
-                            </Button>
-                        </div>
-                    )}
-                </div>
             </div>
 
             {/* Sales Billing Section */}
@@ -1122,223 +702,6 @@ export default function PanVatBillingPage() {
                     }}
                 />
             )}
-
-            {/* Edit Dialog Modal for Daraz Transactions */}
-            <Dialog open={editingRow !== null} onOpenChange={(open) => !open && setEditingRow(null)}>
-                <DialogContent className="max-w-2xl overflow-y-auto max-h-[90vh] bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl shadow-xl p-6">
-                    <DialogHeader className="border-b dark:border-zinc-800 pb-3 mb-4">
-                        <DialogTitle className="text-[17px] font-extrabold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-                            {isViewMode ? (
-                                <Info className="h-5 w-5 text-blue-600 dark:text-blue-500" />
-                            ) : (
-                                <Edit className="h-5 w-5 text-orange-600 dark:text-orange-500" />
-                            )}
-                            {isViewMode ? 'View Settlement Ledger' : 'Settlement Ledger'} - {editingRow?.sellerAccount}
-                        </DialogTitle>
-                    </DialogHeader>
-
-                    {editingRow && (
-                        <div className="space-y-5 text-sm">
-                            {/* Readonly info grid */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-50 dark:bg-zinc-800/40 p-3 rounded-lg border dark:border-zinc-800/80">
-                                <div>
-                                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Date Period</span>
-                                    <span className="font-semibold text-gray-700 dark:text-gray-300">{editingRow.weekLabel}</span>
-                                </div>
-                                <div>
-                                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Seller Account</span>
-                                    <span className="font-semibold text-gray-700 dark:text-gray-300">{editingRow.sellerAccount}</span>
-                                </div>
-                                <div>
-                                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Company Name</span>
-                                    <span className="font-semibold text-gray-700 dark:text-gray-300">{editingRow.companyName}</span>
-                                </div>
-                            </div>
-
-                            {/* Revenue Stats & Inputs */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-b dark:border-zinc-800 pb-4">
-                                <div className="space-y-1.5">
-                                    <Label className="text-gray-700 dark:text-gray-300 font-bold block">Estimated Sales Amount</Label>
-                                    <div className="relative">
-                                        <Input
-                                            type="text"
-                                            value={loadingSalesEst ? '' : `Rs. ${estimatedSalesAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                                            disabled
-                                            className="bg-gray-50 dark:bg-zinc-800 border-gray-200 text-gray-600 font-bold"
-                                        />
-                                        {loadingSalesEst && (
-                                            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-xs text-gray-400">
-                                                <RefreshCw className="h-3 w-3 animate-spin" />
-                                                Syncing...
-                                            </div>
-                                        )}
-                                        {!loadingSalesEst && (
-                                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-gray-400">
-                                                (delivered orders)
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-                                <div className="space-y-1.5">
-                                    <Label className="text-gray-700 dark:text-gray-300 font-bold block">Sales Amount</Label>
-                                    <Input
-                                        type="number"
-                                        value={salesAmount}
-                                        onChange={(e) => setSalesAmount(e.target.value)}
-                                        placeholder="0.00"
-                                        disabled={isViewMode}
-                                        className="focus:ring-orange-500 focus:border-orange-500 font-semibold"
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Commission & Fees Section */}
-                            <div className="space-y-3">
-                                <h3 className="font-bold text-gray-800 dark:text-gray-200 border-l-2 border-orange-500 pl-2">
-                                    Daraz Commission & Fees
-                                </h3>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Co-funded Voucher max</Label>
-                                        <Input
-                                            type="number"
-                                            value={cofundedVoucherMax}
-                                            onChange={(e) => setCofundedVoucherMax(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Payment Fee</Label>
-                                        <Input
-                                            type="number"
-                                            value={paymentFee}
-                                            onChange={(e) => setPaymentFee(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Daraz Coins Discount Participation fee</Label>
-                                        <Input
-                                            type="number"
-                                            value={darazCoinsFee}
-                                            onChange={(e) => setDarazCoinsFee(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Free Shipping Max Fee</Label>
-                                        <Input
-                                            type="number"
-                                            value={freeShippingFee}
-                                            onChange={(e) => setFreeShippingFee(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Commission Fee</Label>
-                                        <Input
-                                            type="number"
-                                            value={commissionFee}
-                                            onChange={(e) => setCommissionFee(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">General Sales Tax Withholding</Label>
-                                        <Input
-                                            type="number"
-                                            value={gstWithholding}
-                                            onChange={(e) => setGstWithholding(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                    <div className="space-y-1.5">
-                                        <Label className="text-gray-600 dark:text-gray-400 font-semibold block text-[13px]">Handling Fee</Label>
-                                        <Input
-                                            type="number"
-                                            value={handlingFee}
-                                            onChange={(e) => setHandlingFee(e.target.value)}
-                                            placeholder="0.00"
-                                            disabled={isViewMode}
-                                            className="h-9 text-[13px]"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Calculation Summary Cards */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                                {/* Total Commission & Fees Card */}
-                                <div className="bg-orange-50/50 dark:bg-orange-950/20 border border-orange-100 dark:border-orange-900/50 p-4 rounded-xl flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block">Total Commission & Fees</span>
-                                        <span className="text-lg font-extrabold text-orange-600 dark:text-orange-400">
-                                            Rs. {totalFees.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                        </span>
-                                    </div>
-                                    <div className="text-[11px] text-gray-400 max-w-[150px] text-right leading-snug">
-                                        Sum of voucher, payment, coins discount, shipping, commission, and handling.
-                                    </div>
-                                </div>
-
-                                {/* TDS Card */}
-                                <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/50 p-4 rounded-xl flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block">TDS</span>
-                                        <span className="text-lg font-extrabold text-blue-600 dark:text-blue-400">
-                                            Rs. {(parseFloat(gstWithholding) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                        </span>
-                                    </div>
-                                    <div className="text-[11px] text-gray-400 max-w-[150px] text-right leading-snug">
-                                        General Sales Tax Withholding amount.
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Actions footer */}
-                            <DialogFooter className="border-t dark:border-zinc-800 pt-4 mt-6 flex gap-2 justify-end">
-                                {isViewMode ? (
-                                    <Button
-                                        variant="outline"
-                                        onClick={() => setEditingRow(null)}
-                                    >
-                                        Close
-                                    </Button>
-                                ) : (
-                                    <>
-                                        <Button
-                                            variant="outline"
-                                            onClick={() => setEditingRow(null)}
-                                            disabled={saveMutation.isPending}
-                                        >
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            onClick={handleSave}
-                                            disabled={saveMutation.isPending || loadingSalesEst}
-                                            className="bg-orange-600 hover:bg-orange-700 text-white font-bold transition-all shadow-md hover:shadow"
-                                        >
-                                            {saveMutation.isPending ? 'Saving...' : 'Save Settlement'}
-                                        </Button>
-                                    </>
-                                )}
-                            </DialogFooter>
-                        </div>
-                    )}
-                </DialogContent>
-            </Dialog>
         </div>
     )
 }

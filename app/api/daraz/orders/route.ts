@@ -3,6 +3,7 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import axios from 'axios'
 import { syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
+import { processPendingDelayedMessagesAction } from '@/features/chat/actions/chat-actions'
 
 export const dynamic = 'force-dynamic'
 
@@ -695,6 +696,50 @@ export async function GET(request: NextRequest) {
                         console.error(`Auto-sync finance failed for ${orderNumber}`, e)
                     }
                 }
+            }
+
+            // Step 9: Queue and process automated chat greetings for pending orders
+            try {
+                const { data: chatSettings } = await supabase
+                    .from('daraz_chat_settings')
+                    .select('*')
+                    .eq('store_id', storeId)
+                    .maybeSingle()
+
+                if (chatSettings?.auto_reply_on_new_order) {
+                    const pendingOrders = finalOrders.filter(o => {
+                        const status = (o.status || '').toLowerCase()
+                        return status === 'pending'
+                    })
+
+                    for (const pOrder of pendingOrders) {
+                        const pOrderId = String(pOrder.order_id)
+                        const delayMinutes = chatSettings.new_order_delay_minutes ?? 1
+                        const scheduledAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
+
+                        // Check existing queue
+                        const { data: existing } = await supabase
+                            .from('daraz_delayed_messages')
+                            .select('id')
+                            .eq('store_id', storeId)
+                            .eq('order_id', pOrderId)
+                            .limit(1)
+
+                        if (!existing || existing.length === 0) {
+                            await supabase.from('daraz_delayed_messages').insert({
+                                store_id: storeId,
+                                order_id: pOrderId,
+                                txt: chatSettings.new_order_template,
+                                scheduled_at: scheduledAt,
+                                status: 'pending'
+                            })
+                        }
+                    }
+
+                    processPendingDelayedMessagesAction().catch(() => {})
+                }
+            } catch (e) {
+                console.error('[DarazSync] Auto-reply message queueing error:', e)
             }
         }
 

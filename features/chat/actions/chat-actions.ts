@@ -246,7 +246,11 @@ export async function syncDarazChatSessions(storeId: string) {
             await syncDarazChatMessages(storeId, session.session_id)
         }
 
-        revalidatePath('/dashboard/chat-ai')
+        try {
+            revalidatePath('/dashboard/chat-ai')
+        } catch {
+            // Ignore revalidatePath error outside request context (e.g. background tasks / cron)
+        }
         return { success: true, count: sessionList.length }
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
@@ -426,7 +430,7 @@ export async function sendChatMessage(
             .from('daraz_chat_sessions')
             .select('buyer_id')
             .eq('session_id', sessionId)
-            .single()
+            .maybeSingle()
 
         const msgPayload = {
             message_id: messageId,
@@ -466,7 +470,11 @@ export async function sendChatMessage(
             })
             .eq('session_id', sessionId)
 
-        revalidatePath('/dashboard/chat-ai')
+        try {
+            revalidatePath('/dashboard/chat-ai')
+        } catch {
+            // Ignore revalidatePath error outside request context
+        }
         return { success: true, messageId }
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
@@ -499,7 +507,49 @@ export async function openSessionByOrderId(storeId: string, orderId: string): Pr
             throw new Error(`Daraz API Error: ${response.data.message || response.data.msg}`)
         }
 
-        return response.data.session_id || null
+        const sessionId = response.data?.session_id || response.data?.data?.session_id || null
+
+        // Self-heal: Ensure session row exists in daraz_chat_sessions so that sendChatMessage update works
+        if (sessionId) {
+            const supabase = await createAdminClient()
+            let buyerId = '';
+            const parts = String(sessionId).split('_');
+            if (parts.length >= 4) {
+                if (parts[1] === '1') buyerId = parts[0];
+                else if (parts[3] === '1') buyerId = parts[2];
+            }
+
+            const { data: existingSession } = await supabase
+                .from('daraz_chat_sessions')
+                .select('session_id')
+                .eq('session_id', sessionId)
+                .maybeSingle()
+
+            if (!existingSession) {
+                let sessionTitle = `Buyer ${buyerId || 'Customer'}`
+                const { data: orderData } = await supabase
+                    .from('daraz_orders')
+                    .select('customer_name, shipping_name, customer_first_name, customer_last_name')
+                    .eq('order_id', String(orderId))
+                    .maybeSingle()
+
+                if (orderData) {
+                    const resolvedName = orderData.customer_name || orderData.shipping_name || `${orderData.customer_first_name || ''} ${orderData.customer_last_name || ''}`.trim()
+                    if (resolvedName) sessionTitle = resolvedName
+                }
+
+                await supabase.from('daraz_chat_sessions').upsert({
+                    session_id: sessionId,
+                    store_id: storeId,
+                    buyer_id: buyerId || 'buyer',
+                    title: sessionTitle,
+                    unread_count: 0,
+                    updated_at: new Date().toISOString()
+                }, { onConflict: 'session_id' })
+            }
+        }
+
+        return sessionId
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
         console.error(`[ChatSync] Open session failed for order ${orderId}:`, errorMessage)
@@ -775,5 +825,106 @@ Response:`
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
         console.error(`[AutoReply] Auto-reply processor encountered an error:`, errorMessage)
+    }
+}
+
+// 10. Process Queue of Delayed Auto-Messages & Follow Invitations (Batch Limited for Fast Execution)
+export async function processPendingDelayedMessagesAction(limit = 10) {
+    try {
+        const supabase = await createAdminClient()
+        const { data: pending, error } = await supabase
+            .from('daraz_delayed_messages')
+            .select('*')
+            .eq('status', 'pending')
+            .lte('scheduled_at', new Date().toISOString())
+            .order('scheduled_at', { ascending: true })
+            .limit(limit)
+
+        if (error || !pending || pending.length === 0) {
+            return { success: true, processed: 0 }
+        }
+
+        console.log(`[DelayedMessages] Processing ${pending.length} pending automated messages...`)
+        let successCount = 0
+
+        for (const task of pending) {
+            try {
+                await supabase
+                    .from('daraz_delayed_messages')
+                    .update({ status: 'processing', updated_at: new Date().toISOString() })
+                    .eq('id', task.id)
+
+                const sessionId = await openSessionByOrderId(task.store_id, task.order_id)
+                if (!sessionId) {
+                    throw new Error(`Could not open conversation session for order ${task.order_id}`)
+                }
+
+                // A. Send text greeting template
+                if (task.txt) {
+                    const res = await sendChatMessage(task.store_id, sessionId, '1', task.txt, undefined, undefined, true)
+                    if (!res.success) {
+                        throw new Error(res.error || 'Failed to send greeting text message')
+                    }
+                }
+
+                // B. Send follow store button invitation card (Template 10010)
+                const resFollow = await sendChatMessage(task.store_id, sessionId, '10010', undefined, undefined, undefined, true)
+                if (!resFollow.success) {
+                    throw new Error(resFollow.error || 'Failed to send follow store invitation')
+                }
+
+                await supabase
+                    .from('daraz_delayed_messages')
+                    .update({
+                        status: 'sent',
+                        session_id: sessionId,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('id', task.id)
+
+                successCount++
+                console.log(`[DelayedMessages] ✅ Sent auto-message & follow invitation for order ${task.order_id}`)
+            } catch (taskError: any) {
+                console.error(`[DelayedMessages] ❌ Failed task ${task.id} for order ${task.order_id}:`, taskError.message)
+                
+                const isTemporaryError = taskError.message.includes('order not found') || 
+                                         taskError.message.includes('too many requests') || 
+                                         taskError.message.includes('timeout')
+                
+                let retryCount = 0
+                if (task.error_message && task.error_message.includes('Retry:')) {
+                    const match = task.error_message.match(/Retry:\s*(\d+)/)
+                    if (match) retryCount = parseInt(match[1], 10)
+                }
+
+                if (isTemporaryError && retryCount < 3) {
+                    const nextRun = new Date(Date.now() + 3 * 60 * 1000).toISOString()
+                    await supabase
+                        .from('daraz_delayed_messages')
+                        .update({
+                            status: 'pending',
+                            error_message: `Retry: ${retryCount + 1} - ${taskError.message}`,
+                            scheduled_at: nextRun,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', task.id)
+                } else {
+                    await supabase
+                        .from('daraz_delayed_messages')
+                        .update({
+                            status: 'failed',
+                            error_message: taskError.message,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', task.id)
+                }
+            }
+        }
+
+        try { revalidatePath('/dashboard/chat-ai') } catch {}
+        return { success: true, processed: successCount }
+    } catch (err: any) {
+        console.error('[DelayedMessages] Error in processor action:', err.message)
+        return { success: false, error: err.message }
     }
 }

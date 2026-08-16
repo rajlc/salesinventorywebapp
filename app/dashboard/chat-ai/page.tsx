@@ -12,6 +12,7 @@ import {
     getChatRules,
     addChatRule,
     deleteChatRule,
+    processPendingDelayedMessagesAction,
     type ChatSettings
 } from '@/features/chat/actions/chat-actions'
 import {
@@ -543,6 +544,9 @@ function ChatAiDashboardContent() {
         setSyncing(true)
         toast.info('Syncing chat sessions from Daraz...')
         try {
+            // Process any pending automated order greeting & follow invitation messages
+            await processPendingDelayedMessagesAction().catch(console.error)
+
             const result = await syncDarazChatSessions(activeStoreId)
             if (result.success) {
                 toast.success(`Successfully synced ${result.count} chats!`)
