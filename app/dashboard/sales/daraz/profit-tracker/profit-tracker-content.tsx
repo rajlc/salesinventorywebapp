@@ -311,15 +311,17 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         const fyEnd = new Date(currentFiscalYear.end_date + 'T23:59:59').getTime()
 
         return payoutData.filter((item: any) => {
-            const rawStr = item.created_at || item.statement || ''
+            const rawStr = (item.created_at || item.statement || '').trim()
             if (!rawStr) return true
 
             let t = 0
-            if (rawStr.includes('-')) {
-                const parts = rawStr.split('-')
+            if (rawStr.includes(' - ')) {
+                // Range format: "03 Aug 2026 - 09 Aug 2026"
+                const parts = rawStr.split(' - ')
                 const d = new Date(parts[0].trim())
                 if (!isNaN(d.getTime())) t = d.getTime()
             } else {
+                // ISO / SQL format: "2026-08-10 00:23:07" or "2026-08-10"
                 const d = new Date(rawStr)
                 if (!isNaN(d.getTime())) t = d.getTime()
             }
@@ -511,7 +513,50 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         return groups
     }, {})
 
-    // Weekly Grouping Logic
+    const monthlyMap: Record<string, { 
+        totalProfit: number, 
+        totalRevenue: number, 
+        totalCost: number,
+        totalOrders: number,
+        totalUnsynced: number,
+        statsBySeller: Record<string, { profit: number, revenue: number, cost: number, count: number, missing: number }> 
+    }> = {};
+
+    Object.keys(stats).forEach(date => {
+        const monthKey = date.substring(0, 7);
+        if (!monthlyMap[monthKey]) {
+            monthlyMap[monthKey] = {
+                totalProfit: 0,
+                totalRevenue: 0,
+                totalCost: 0,
+                totalOrders: 0,
+                totalUnsynced: 0,
+                statsBySeller: {}
+            };
+        }
+
+        const dayStat = stats[date];
+        monthlyMap[monthKey].totalProfit += (dayStat.totalProfit || 0);
+        monthlyMap[monthKey].totalRevenue += (dayStat.totalRevenue || 0);
+
+        Object.entries(dayStat.statsBySeller || {}).forEach(([seller, s]: [string, any]) => {
+            if (!monthlyMap[monthKey].statsBySeller[seller]) {
+                monthlyMap[monthKey].statsBySeller[seller] = { profit: 0, revenue: 0, cost: 0, count: 0, missing: 0 };
+            }
+            monthlyMap[monthKey].statsBySeller[seller].profit += (s.profit || 0);
+            monthlyMap[monthKey].statsBySeller[seller].revenue += (s.revenue || 0);
+            monthlyMap[monthKey].statsBySeller[seller].cost += (s.cost || 0);
+            monthlyMap[monthKey].statsBySeller[seller].missing += (s.missing || 0);
+            monthlyMap[monthKey].statsBySeller[seller].count += (s.count || 0);
+
+            monthlyMap[monthKey].totalCost += (s.cost || 0);
+            monthlyMap[monthKey].totalOrders += (s.count || 0);
+            monthlyMap[monthKey].totalUnsynced += (s.missing || 0);
+        });
+    });
+
+    const sortedMonthlyKeys = Object.keys(monthlyMap).sort((a, b) => b.localeCompare(a));
+
     const weeklyMap: Record<string, { 
         start: Date, 
         end: Date, 
@@ -586,21 +631,40 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
             stores: Record<string, { storeName: string, count: number, receivable: number, cost: number, returned: number, profit: number }>
         }> = {};
 
+        const STORE_MAP: Record<string, string> = {
+            'npdznlue6t': 'Bagmati Traders',
+            'npdznmnap2': 'BTAS',
+            'npdznmij3v': 'Balaju Shop',
+            'npdzncosm': 'Cosmetic Shop',
+            'bagmati traders': 'Bagmati Traders',
+            'btas': 'BTAS',
+            'balaju shop': 'Balaju Shop',
+            'cosmetic shop': 'Cosmetic Shop'
+        };
+
         // 1. Process Payout Statements for the selected Fiscal Year
         (filteredPayoutData || []).forEach((item: any) => {
-            const rawStr = item.created_at || item.statement || ''
+            const rawPeriod = (item.statement || item.created_at || '').trim()
             let startDate: Date | null = null
             let endDate: Date | null = null
 
-            if (rawStr.includes('-')) {
-                const parts = rawStr.split('-')
+            if (rawPeriod.includes(' - ')) {
+                const parts = rawPeriod.split(' - ')
                 const d1 = new Date(parts[0].trim())
                 const d2 = new Date(parts[1].trim())
                 if (!isNaN(d1.getTime())) startDate = d1
                 if (!isNaN(d2.getTime())) endDate = d2
-            } else {
-                const d = new Date(rawStr)
-                if (!isNaN(d.getTime())) startDate = d
+            } else if (rawPeriod) {
+                const d = new Date(rawPeriod)
+                if (!isNaN(d.getTime())) {
+                    // Daraz statements are generated on Monday for the preceding Monday-to-Sunday cycle
+                    const endSun = new Date(d)
+                    endSun.setDate(d.getDate() - 1)
+                    const startMon = new Date(endSun)
+                    startMon.setDate(endSun.getDate() - 6)
+                    startDate = startMon
+                    endDate = endSun
+                }
             }
 
             if (!startDate) startDate = new Date()
@@ -626,10 +690,8 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
 
             const { netClosingCalc, returnedAmt } = getStatementBreakdown(item)
 
-            const rawStore = item.store_name || item.seller_account
-            const storeLabel = (rawStore && rawStore !== 'All')
-                ? rawStore
-                : (item.statement_number ? item.statement_number.split('-')[0] : 'Bagmati Traders')
+            const rawStore = (item.store_name || item.seller_account || (item.statement_number ? item.statement_number.split('-')[0] : '') || '').toLowerCase()
+            const storeLabel = STORE_MAP[rawStore] || item.store_name || item.seller_account || 'Bagmati Traders'
 
             if (!map[weekKey].stores[storeLabel]) {
                 map[weekKey].stores[storeLabel] = {
@@ -676,9 +738,10 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
             map[wKey].totalCost += w.totalCost
 
             Object.entries(w.statsBySeller || {}).forEach(([seller, s]: [string, any]) => {
-                if (!map[wKey].stores[seller]) {
-                    map[wKey].stores[seller] = {
-                        storeName: seller,
+                const mappedSeller = STORE_MAP[seller.toLowerCase()] || seller
+                if (!map[wKey].stores[mappedSeller]) {
+                    map[wKey].stores[mappedSeller] = {
+                        storeName: mappedSeller,
                         count: 0,
                         receivable: 0,
                         cost: 0,
@@ -686,8 +749,8 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                         profit: 0
                     }
                 }
-                map[wKey].stores[seller].count += (s.count || 0)
-                map[wKey].stores[seller].cost += (s.cost || 0)
+                map[wKey].stores[mappedSeller].count += (s.count || 0)
+                map[wKey].stores[mappedSeller].cost += (s.cost || 0)
             })
         })
 
@@ -698,7 +761,9 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         let grandReturned = 0
         let grandProfit = 0
 
-        Object.keys(map).forEach(wKey => {
+        const sortedKeys = Object.keys(map).sort((a, b) => b.localeCompare(a))
+
+        sortedKeys.forEach(wKey => {
             const w = map[wKey]
             w.totalProfit = w.totalReceivable - w.totalCost
 
@@ -714,8 +779,6 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
             grandProfit += w.totalProfit
         })
 
-        const sortedKeys = Object.keys(map).sort((a, b) => b.localeCompare(a))
-
         return {
             sortedKeys,
             map,
@@ -727,7 +790,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                 profit: Math.round(grandProfit * 100) / 100
             }
         }
-    }, [filteredPayoutData, weeklyMap, currentFiscalYear, activeSubTab])
+    }, [activeSubTab, filteredPayoutData, weeklyMap, currentFiscalYear])
 
     const sortedDateKeys = Object.keys(groupedOrders).sort((a, b) => {
         if (a === 'Unknown Date') return 1

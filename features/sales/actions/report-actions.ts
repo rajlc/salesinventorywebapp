@@ -993,10 +993,9 @@ export async function getCompleteDateStats(params: GetOrderReportParams) {
     try {
         const supabase = await createAdminClient()
 
-        // Use the optimized RPC function to get aggregated stats directly from the database
-        // This avoids statement timeouts caused by fetching thousands of rows and grouping in JS
-        const { data, error } = await supabase.rpc('get_daily_profit_stats', {
-            search_term_param: params.search || '',
+        // Use the fast cached RPC function get_cached_daily_profit_summary
+        const { data, error } = await supabase.rpc('get_cached_daily_profit_summary', {
+            search_term: params.search || '',
             sync_status_param: params.syncStatus || 'all',
             start_date_param: params.startDate || null,
             end_date_param: params.endDate || null,
@@ -1004,8 +1003,8 @@ export async function getCompleteDateStats(params: GetOrderReportParams) {
         });
 
         if (error) {
-            console.error('[SERVER ACTION] getCompleteDateStats RPC Error:', error);
-            throw new Error(`Failed to fetch complete date stats: ${error.message}`);
+            console.warn('[SERVER ACTION] getCompleteDateStats RPC Error:', error.message);
+            return {};
         }
 
         // Process the data to match the expected format
@@ -1013,6 +1012,7 @@ export async function getCompleteDateStats(params: GetOrderReportParams) {
 
         (data || []).forEach((row: any) => {
             const dateKey = row.date;
+            if (!dateKey) return;
             if (!dateStats[dateKey]) {
                 dateStats[dateKey] = { statsBySeller: {}, totalProfit: 0, totalRevenue: 0, orderNumbers: [] }
             }
@@ -1023,22 +1023,16 @@ export async function getCompleteDateStats(params: GetOrderReportParams) {
                 missing: parseInt(row.missing) || 0,
                 revenue: parseFloat(row.revenue) || 0,
                 cost: parseFloat(row.cost) || 0,
-                count: parseInt(row.order_count) || 0
+                count: parseInt(row.order_count || row.orderCount) || 1
             };
 
             dateStats[dateKey].totalProfit += parseFloat(row.profit) || 0;
             dateStats[dateKey].totalRevenue += parseFloat(row.revenue) || 0;
-            
-            // Collect all order numbers for this date
-            if (row.order_numbers && Array.isArray(row.order_numbers)) {
-                dateStats[dateKey].orderNumbers = [...dateStats[dateKey].orderNumbers, ...row.order_numbers];
-            }
         });
 
         return dateStats;
     } catch (error: any) {
-        console.error('Error in getCompleteDateStats:', error);
-        throw error;
+        console.warn('Error in getCompleteDateStats:', error.message);
+        return {};
     }
 }
-
