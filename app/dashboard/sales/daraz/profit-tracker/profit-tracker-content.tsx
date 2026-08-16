@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useState, useEffect } from 'react'
+import { Fragment, useState, useEffect, useMemo } from 'react'
 import {
     Card,
     Table,
@@ -9,6 +9,7 @@ import {
     TableHead,
     TableHeader,
     TableRow,
+    TableFooter,
     Button,
     Dialog,
     DialogContent,
@@ -16,13 +17,16 @@ import {
     DialogTitle,
     DialogTrigger,
 } from '@/components/ui-shim'
-import { Search, Eye, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List } from 'lucide-react'
+import { Search, Eye, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText } from 'lucide-react'
 import Link from 'next/link'
 import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats } from '@/features/sales/actions/report-actions'
 import { format, startOfWeek, endOfWeek, getWeek } from 'date-fns'
 import { BulkSyncButton } from './bulk-sync-button'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
+import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
+import { fetchDarazPayoutStatus } from '@/features/sales/actions/daraz-finance-service'
+import { getStatementBreakdown } from '@/app/dashboard/account/pan-vat-billing/daraz-finance-card'
 
 // Helper component for Limit Selector using props
 function LimitSelector({ currentLimit, onLimitChange }: { currentLimit: number, onLimitChange: (limit: number) => void }) {
@@ -257,16 +261,73 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         if (typeof window === 'undefined') return 'All'
         return searchParams.get('sellerAccount') || 'All'
     })
-    const [activeSubTab, setActiveSubTab] = useState<'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly'>('orders')
+    const [activeSubTab, setActiveSubTab] = useState<'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly' | 'report-api'>('orders')
     const [selectedWeekRange, setSelectedWeekRange] = useState<{ start: string, end: string } | null>(null)
 
-    const handleSubTabChange = (tab: 'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly') => {
+    const handleSubTabChange = (tab: 'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly' | 'report-api') => {
         if (tab !== activeSubTab) {
             setSearch('')
             setPage(1)
             setActiveSubTab(tab)
         }
     }
+
+    // Fetch Fiscal Years & Active Fiscal Year for Report By Api
+    const { data: fiscalYears = [] } = useFiscalYears()
+    const { data: activeFiscalYear } = useActiveFiscalYear()
+    const [selectedFYId, setSelectedFYId] = useState<string>('all')
+
+    useEffect(() => {
+        if (activeFiscalYear && selectedFYId === 'all') {
+            setSelectedFYId(activeFiscalYear.id)
+        }
+    }, [activeFiscalYear])
+
+    const currentFiscalYear = useMemo(() => {
+        if (selectedFYId && selectedFYId !== 'all') {
+            return fiscalYears.find(fy => fy.id === selectedFYId) || null
+        }
+        return activeFiscalYear || fiscalYears.find(fy => fy.is_active) || fiscalYears[0] || null
+    }, [selectedFYId, fiscalYears, activeFiscalYear])
+
+    // Query Daraz Payout Status API for "Report By Api" tab
+    const { data: payoutData = [], isLoading: isPayoutLoading } = useQuery({
+        queryKey: ['daraz-payout-status-api-tracker'],
+        queryFn: async () => {
+            return fetchDarazPayoutStatus('All')
+        },
+        enabled: activeSubTab === 'report-api',
+        staleTime: 0,
+    })
+
+    // Filter Payout Statements by Selected Fiscal Year Date Range
+    const filteredPayoutData = useMemo(() => {
+        if (!payoutData || payoutData.length === 0) return []
+        if (!currentFiscalYear || !currentFiscalYear.start_date || !currentFiscalYear.end_date) {
+            return payoutData
+        }
+
+        const fyStart = new Date(currentFiscalYear.start_date).getTime()
+        const fyEnd = new Date(currentFiscalYear.end_date + 'T23:59:59').getTime()
+
+        return payoutData.filter((item: any) => {
+            const rawStr = item.created_at || item.statement || ''
+            if (!rawStr) return true
+
+            let t = 0
+            if (rawStr.includes('-')) {
+                const parts = rawStr.split('-')
+                const d = new Date(parts[0].trim())
+                if (!isNaN(d.getTime())) t = d.getTime()
+            } else {
+                const d = new Date(rawStr)
+                if (!isNaN(d.getTime())) t = d.getTime()
+            }
+
+            if (t === 0) return true
+            return t >= fyStart && t <= fyEnd
+        })
+    }, [payoutData, currentFiscalYear])
 
     const [availableSellers, setAvailableSellers] = useState<string[]>([])
 
@@ -508,6 +569,166 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
 
     const sortedWeeklyKeys = Object.keys(weeklyMap).sort((a, b) => b.localeCompare(a));
 
+    // Combine Report (Payout Statements) & Profit Tracker (Weekly Profit Details) by Week Range & Store for "Report By Api"
+    const apiReportWeeklyData = useMemo(() => {
+        if (activeSubTab !== 'report-api') return { sortedKeys: [], map: {}, totals: { orders: 0, receivable: 0, cost: 0, returned: 0, profit: 0 } }
+
+        const map: Record<string, {
+            weekLabel: string
+            weekNum: number
+            start: Date
+            end: Date
+            totalOrders: number
+            totalReceivable: number
+            totalCost: number
+            totalReturned: number
+            totalProfit: number
+            stores: Record<string, { storeName: string, count: number, receivable: number, cost: number, returned: number, profit: number }>
+        }> = {};
+
+        // 1. Process Payout Statements for the selected Fiscal Year
+        (filteredPayoutData || []).forEach((item: any) => {
+            const rawStr = item.created_at || item.statement || ''
+            let startDate: Date | null = null
+            let endDate: Date | null = null
+
+            if (rawStr.includes('-')) {
+                const parts = rawStr.split('-')
+                const d1 = new Date(parts[0].trim())
+                const d2 = new Date(parts[1].trim())
+                if (!isNaN(d1.getTime())) startDate = d1
+                if (!isNaN(d2.getTime())) endDate = d2
+            } else {
+                const d = new Date(rawStr)
+                if (!isNaN(d.getTime())) startDate = d
+            }
+
+            if (!startDate) startDate = new Date()
+            const weekStart = startOfWeek(startDate, { weekStartsOn: 1 })
+            const weekEnd = endDate || endOfWeek(startDate, { weekStartsOn: 1 })
+            const weekKey = format(weekStart, 'yyyy-MM-dd')
+            const weekNum = getWeek(weekStart, { weekStartsOn: 1 })
+
+            if (!map[weekKey]) {
+                map[weekKey] = {
+                    weekLabel: `${format(weekStart, 'MMM d')} - ${format(weekEnd, 'MMM d, yyyy')}`,
+                    weekNum,
+                    start: weekStart,
+                    end: weekEnd,
+                    totalOrders: 0,
+                    totalReceivable: 0,
+                    totalCost: 0,
+                    totalReturned: 0,
+                    totalProfit: 0,
+                    stores: {}
+                }
+            }
+
+            const { netClosingCalc, returnedAmt } = getStatementBreakdown(item)
+
+            const rawStore = item.store_name || item.seller_account
+            const storeLabel = (rawStore && rawStore !== 'All')
+                ? rawStore
+                : (item.statement_number ? item.statement_number.split('-')[0] : 'Bagmati Traders')
+
+            if (!map[weekKey].stores[storeLabel]) {
+                map[weekKey].stores[storeLabel] = {
+                    storeName: storeLabel,
+                    count: 0,
+                    receivable: 0,
+                    cost: 0,
+                    returned: 0,
+                    profit: 0
+                }
+            }
+
+            map[weekKey].stores[storeLabel].receivable += netClosingCalc
+            map[weekKey].stores[storeLabel].returned += returnedAmt
+            map[weekKey].totalReceivable += netClosingCalc
+            map[weekKey].totalReturned += returnedAmt
+        })
+
+        // 2. Merge order count and purchase cost from weeklyMap (within FY)
+        const fyStart = currentFiscalYear?.start_date ? new Date(currentFiscalYear.start_date).getTime() : 0
+        const fyEnd = currentFiscalYear?.end_date ? new Date(currentFiscalYear.end_date + 'T23:59:59').getTime() : Infinity
+
+        Object.keys(weeklyMap).forEach((wKey) => {
+            const w = weeklyMap[wKey]
+            const wTime = w.start.getTime()
+            if (fyStart && (wTime < fyStart || wTime > fyEnd)) return
+
+            if (!map[wKey]) {
+                map[wKey] = {
+                    weekLabel: `${format(w.start, 'MMM d')} - ${format(w.end, 'MMM d, yyyy')}`,
+                    weekNum: w.weekNum,
+                    start: w.start,
+                    end: w.end,
+                    totalOrders: 0,
+                    totalReceivable: 0,
+                    totalCost: 0,
+                    totalReturned: 0,
+                    totalProfit: 0,
+                    stores: {}
+                }
+            }
+
+            map[wKey].totalOrders += w.totalOrders
+            map[wKey].totalCost += w.totalCost
+
+            Object.entries(w.statsBySeller || {}).forEach(([seller, s]: [string, any]) => {
+                if (!map[wKey].stores[seller]) {
+                    map[wKey].stores[seller] = {
+                        storeName: seller,
+                        count: 0,
+                        receivable: 0,
+                        cost: 0,
+                        returned: 0,
+                        profit: 0
+                    }
+                }
+                map[wKey].stores[seller].count += (s.count || 0)
+                map[wKey].stores[seller].cost += (s.cost || 0)
+            })
+        })
+
+        // 3. Compute profit for each store and week summary (Profit = Receivable Amount - Purchase Cost)
+        let grandOrders = 0
+        let grandReceivable = 0
+        let grandCost = 0
+        let grandReturned = 0
+        let grandProfit = 0
+
+        Object.keys(map).forEach(wKey => {
+            const w = map[wKey]
+            w.totalProfit = w.totalReceivable - w.totalCost
+
+            Object.keys(w.stores).forEach(sKey => {
+                const st = w.stores[sKey]
+                st.profit = st.receivable - st.cost
+            })
+
+            grandOrders += w.totalOrders
+            grandReceivable += w.totalReceivable
+            grandCost += w.totalCost
+            grandReturned += w.totalReturned
+            grandProfit += w.totalProfit
+        })
+
+        const sortedKeys = Object.keys(map).sort((a, b) => b.localeCompare(a))
+
+        return {
+            sortedKeys,
+            map,
+            totals: {
+                orders: grandOrders,
+                receivable: Math.round(grandReceivable * 100) / 100,
+                cost: Math.round(grandCost * 100) / 100,
+                returned: Math.round(grandReturned * 100) / 100,
+                profit: Math.round(grandProfit * 100) / 100
+            }
+        }
+    }, [filteredPayoutData, weeklyMap, currentFiscalYear, activeSubTab])
+
     const sortedDateKeys = Object.keys(groupedOrders).sort((a, b) => {
         if (a === 'Unknown Date') return 1
         if (b === 'Unknown Date') return -1
@@ -582,6 +803,16 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                             >
                                 <List className="h-3.5 w-3.5" />
                                 <span>Monthly Details</span>
+                            </button>
+                            <button
+                                onClick={() => handleSubTabChange('report-api')}
+                                className={`flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 whitespace-nowrap ${activeSubTab === 'report-api'
+                                    ? 'bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-xs font-bold'
+                                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 font-medium'
+                                    }`}
+                            >
+                                <FileSpreadsheet className="h-3.5 w-3.5" />
+                                <span>Report By Api</span>
                             </button>
                         </div>
 
@@ -1208,6 +1439,146 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                     })()}
                                 </TableBody>
                             </Table>
+                        </div>
+                    </Card>
+                )}
+
+                {/* 6. REPORT BY API VIEW */}
+                {activeSubTab === 'report-api' && (
+                    <Card className="overflow-hidden border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
+                        <div className="p-4 border-b border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-800/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div>
+                                <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">Report By API - Weekly Breakdown</h3>
+                                <p className="text-xs text-gray-500">
+                                    Weekly payout statement receivables, returned orders, and order purchase costs matched per store
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-gray-700 dark:text-gray-300">Fiscal Year:</span>
+                                <select
+                                    value={selectedFYId}
+                                    onChange={(e) => setSelectedFYId(e.target.value)}
+                                    className="h-8 rounded-lg border border-gray-300 bg-white px-3 py-1 text-xs font-semibold text-gray-900 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-gray-100 shadow-2xs"
+                                >
+                                    <option value="all">All Fiscal Years</option>
+                                    {fiscalYears.map((fy: any) => (
+                                        <option key={fy.id} value={fy.id}>
+                                            {fy.name} {fy.is_active ? '(Running)' : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+                        <div className="overflow-x-auto">
+                            {isPayoutLoading ? (
+                                <div className="py-12 text-center flex flex-col items-center justify-center space-y-2">
+                                    <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+                                    <p className="text-xs text-gray-500">Loading Report & Payout Data...</p>
+                                </div>
+                            ) : apiReportWeeklyData.sortedKeys.length === 0 ? (
+                                <div className="py-12 text-center text-gray-500 text-xs">
+                                    No Report By API statement details found for the selected Fiscal Year.
+                                </div>
+                            ) : (
+                                <Table>
+                                    <TableHeader className="bg-gray-50 dark:bg-zinc-800/60">
+                                        <TableRow>
+                                            <TableHead className="text-[11px] font-bold uppercase">Week Range</TableHead>
+                                            <TableHead className="text-center text-[11px] font-bold uppercase">Orders</TableHead>
+                                            <TableHead className="text-right text-[11px] font-bold uppercase text-blue-600 dark:text-blue-400">Receivable Amount</TableHead>
+                                            <TableHead className="text-right text-[11px] font-bold uppercase text-purple-600 dark:text-purple-400">Purchase Cost</TableHead>
+                                            <TableHead className="text-right text-[11px] font-bold uppercase text-amber-600 dark:text-amber-400">Returned Orders</TableHead>
+                                            <TableHead className="text-right text-[11px] font-bold uppercase text-emerald-600 dark:text-emerald-400">Profit</TableHead>
+                                        </TableRow>
+                                    </TableHeader>
+                                    <TableBody className="text-xs">
+                                        {apiReportWeeklyData.sortedKeys.map((weekKey) => {
+                                            const w = apiReportWeeklyData.map[weekKey]
+                                            return (
+                                                <Fragment key={weekKey}>
+                                                    {/* Main Week Head Summary Row */}
+                                                    <TableRow className="bg-gray-50/90 dark:bg-zinc-800/80 font-semibold border-b border-gray-200 dark:border-zinc-700">
+                                                        <TableCell className="py-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-bold text-gray-900 dark:text-gray-100">
+                                                                    {w.weekLabel}
+                                                                </span>
+                                                                <span className="text-[11px] text-gray-500 font-medium">
+                                                                    Week {w.weekNum}
+                                                                </span>
+                                                            </div>
+                                                        </TableCell>
+
+                                                        <TableCell className="text-center font-bold text-gray-900 dark:text-gray-100 py-3">
+                                                            {w.totalOrders}
+                                                        </TableCell>
+
+                                                        <TableCell className="text-right font-mono font-bold text-blue-600 dark:text-blue-400 py-3">
+                                                            NPR {w.totalReceivable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                        </TableCell>
+
+                                                        <TableCell className="text-right font-mono font-semibold text-purple-600 dark:text-purple-400 py-3">
+                                                            Rs. {w.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                        </TableCell>
+
+                                                        <TableCell className="text-right font-mono font-semibold text-amber-600 dark:text-amber-400 py-3">
+                                                            NPR {w.totalReturned.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                        </TableCell>
+
+                                                        <TableCell className={`text-right font-mono font-bold py-3 ${w.totalProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
+                                                            Rs. {w.totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                        </TableCell>
+                                                    </TableRow>
+
+                                                    {/* Per-Store Sub Rows */}
+                                                    {Object.entries(w.stores || {}).map(([seller, st]: [string, any]) => (
+                                                        <TableRow key={`${weekKey}-${seller}`} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30 text-xs border-b border-gray-100 dark:border-zinc-800/50">
+                                                            <TableCell className="pl-6 py-2.5 font-medium text-gray-700 dark:text-gray-300">
+                                                                <span>{seller}</span>
+                                                            </TableCell>
+                                                            <TableCell className="text-center text-gray-600 dark:text-gray-400 py-2.5">{st.count || 0}</TableCell>
+                                                            <TableCell className="text-right font-mono text-blue-600/90 dark:text-blue-400/90 py-2.5">
+                                                                NPR {st.receivable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                            </TableCell>
+                                                            <TableCell className="text-right font-mono text-purple-600/80 dark:text-purple-400/80 py-2.5">
+                                                                Rs. {st.cost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                            </TableCell>
+                                                            <TableCell className="text-right font-mono text-amber-600/90 dark:text-amber-400/90 py-2.5">
+                                                                NPR {st.returned.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                            </TableCell>
+                                                            <TableCell className={`text-right font-mono font-semibold py-2.5 ${st.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
+                                                                Rs. {st.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                            </TableCell>
+                                                        </TableRow>
+                                                    ))}
+                                                </Fragment>
+                                            )
+                                        })}
+                                    </TableBody>
+                                    <TableFooter className="bg-gray-100 dark:bg-zinc-800/90 border-t-2 border-gray-300 dark:border-zinc-700 font-extrabold text-xs">
+                                        <TableRow>
+                                            <TableCell className="font-bold text-gray-900 dark:text-gray-100 py-3.5">
+                                                Total ({apiReportWeeklyData.sortedKeys.length} Weeks)
+                                            </TableCell>
+                                            <TableCell className="text-center font-bold text-gray-900 dark:text-gray-100 py-3.5">
+                                                {apiReportWeeklyData.totals.orders}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono font-extrabold text-blue-600 dark:text-blue-400 text-sm py-3.5">
+                                                NPR {apiReportWeeklyData.totals.receivable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono font-extrabold text-purple-600 dark:text-purple-400 text-sm py-3.5">
+                                                Rs. {apiReportWeeklyData.totals.cost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono font-extrabold text-amber-600 dark:text-amber-400 text-sm py-3.5">
+                                                NPR {apiReportWeeklyData.totals.returned.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </TableCell>
+                                            <TableCell className={`text-right font-mono font-extrabold text-sm py-3.5 ${apiReportWeeklyData.totals.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
+                                                Rs. {apiReportWeeklyData.totals.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </TableCell>
+                                        </TableRow>
+                                    </TableFooter>
+                                </Table>
+                            )}
                         </div>
                     </Card>
                 )}

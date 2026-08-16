@@ -222,7 +222,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
     const [activeMainModule, setActiveMainModule] = useState<'financial-breakdown' | 'finance-by-api'>('financial-breakdown')
 
     // Sub-tab navigation under Financial Breakdown
-    const [activeSubTab, setActiveSubTab] = useState<'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly'>('orders')
+    const [activeSubTab, setActiveSubTab] = useState<'orders' | 'accounts' | 'daily' | 'weekly' | 'monthly' | 'report-api'>('orders')
 
     // Sub-tab navigation under Finance By API
     const [activeApiSubTab, setActiveApiSubTab] = useState<'transactions' | 'payouts' | 'report'>('transactions')
@@ -418,12 +418,13 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
         })
     }, [payoutData, currentFiscalYear])
 
-    // Report Summary Totals (Sales Amount, Commission Fees, TDS, Returned Orders) for Fiscal Year
+    // Report Summary Totals (Sales Amount, Commission Fees, TDS, Returned Orders, Receivable Amount) for Fiscal Year
     const reportTotals = useMemo(() => {
         let salesTotal = 0
         let commissionTotal = 0
         let tdsTotal = 0
         let returnedTotal = 0
+        let receivableTotal = 0
 
         filteredPayoutData.forEach((item: any) => {
             const b = getStatementBreakdown(item)
@@ -432,13 +433,15 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
             commissionTotal += b.commFeesAmt
             tdsTotal += b.tdsAmt
             returnedTotal += b.returnedAmt
+            receivableTotal += (b.netClosingCalc || 0)
         })
 
         return {
             salesTotal: Math.round(salesTotal * 100) / 100,
             commissionTotal: Math.round(commissionTotal * 100) / 100,
             tdsTotal: Math.round(tdsTotal * 100) / 100,
-            returnedTotal: Math.round(returnedTotal * 100) / 100
+            returnedTotal: Math.round(returnedTotal * 100) / 100,
+            receivableTotal: Math.round(receivableTotal * 100) / 100
         }
     }, [filteredPayoutData])
 
@@ -1423,6 +1426,17 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                 <BarChart3 className="h-3.5 w-3.5" />
                                 Monthly Details
                             </button>
+
+                            <button
+                                onClick={() => setActiveSubTab('report-api')}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeSubTab === 'report-api'
+                                    ? 'bg-white dark:bg-zinc-900 text-orange-600 dark:text-orange-400 shadow-xs'
+                                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+                                    }`}
+                            >
+                                <FileSpreadsheet className="h-3.5 w-3.5" />
+                                Report By Api
+                            </button>
                         </div>
 
                         {/* Filter Inputs for Order Details */}
@@ -2189,12 +2203,13 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                                 <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wider text-rose-600">Commission Fees</TableHead>
                                                 <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wider text-red-600">TDS (Withholding)</TableHead>
                                                 <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wider text-amber-600">Returned Orders</TableHead>
+                                                <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wider text-blue-600">Receiveable Amount</TableHead>
                                                 <TableHead className="text-center w-20 text-[11px] font-semibold uppercase tracking-wider">Action</TableHead>
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
                                             {(filteredPayoutData || []).map((item: any, idx: number) => {
-                                                const { salesAmt, commFeesAmt, tdsAmt, returnedAmt } = getStatementBreakdown(item)
+                                                const { salesAmt, commFeesAmt, tdsAmt, returnedAmt, netClosingCalc } = getStatementBreakdown(item)
 
                                                 const rawStore = item.store_name || item.seller_account
                                                 const storeLabel = (rawStore && rawStore !== 'All')
@@ -2235,6 +2250,9 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                                         </TableCell>
                                                         <TableCell className="text-right font-mono font-semibold text-amber-600">
                                                             NPR {returnedAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                        </TableCell>
+                                                        <TableCell className="text-right font-mono font-semibold text-blue-600">
+                                                            NPR {netClosingCalc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                                         </TableCell>
                                                         <TableCell className="text-center">
                                                             <Button
@@ -2278,6 +2296,9 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                                 </TableCell>
                                                 <TableCell className="text-right font-mono font-extrabold text-amber-600 text-sm">
                                                     NPR {reportTotals.returnedTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </TableCell>
+                                                <TableCell className="text-right font-mono font-extrabold text-blue-600 text-sm">
+                                                    NPR {reportTotals.receivableTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                                 </TableCell>
                                                 <TableCell className="text-center"></TableCell>
                                             </TableRow>
