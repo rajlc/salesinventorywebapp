@@ -390,12 +390,39 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
         throw new Error(`Failed to fetch profit tracker data: ${error.message}`);
     }
 
+    const orderPrimaryIds = (data || []).map((o: any) => o.order_primary_id).filter(Boolean);
+    const orderNumbers = (data || []).map((o: any) => o.order_number).filter(Boolean);
+
+    let itemsByOrderMap: Record<string, any[]> = {};
+    if (orderPrimaryIds.length > 0 || orderNumbers.length > 0) {
+        try {
+            const { data: orderItems } = await supabase
+                .from('daraz_order_items')
+                .select('order_id, order_number, name, product_name, item_name, seller_sku')
+                .or(`order_id.in.(${orderPrimaryIds.map(id => `"${id}"`).join(',')}),order_number.in.(${orderNumbers.map(num => `"${num}"`).join(',')})`);
+
+            if (orderItems && orderItems.length > 0) {
+                orderItems.forEach((item: any) => {
+                    const key = item.order_id || item.order_number;
+                    if (key) {
+                        if (!itemsByOrderMap[key]) itemsByOrderMap[key] = [];
+                        itemsByOrderMap[key].push(item);
+                    }
+                });
+            }
+        } catch (itemErr) {
+            console.error('Failed to batch fetch daraz_order_items:', itemErr);
+        }
+    }
+
     let formattedData = (data || []).map((order: any) => {
         const hasValidPurchaseCost = order.total_purchase_cost !== null && order.total_purchase_cost > 0;
         const hasDarazFees = order.daraz_fees !== null && order.daraz_fees !== undefined && order.daraz_fees > 0;
         const isSynced = hasValidPurchaseCost && hasDarazFees;
         const calculatedSyncStatus = isSynced ? 'synced' : 'not_synced';
         const deliveredByDaraz = order.delivered_by_daraz || order.delivered_at;
+
+        const fetchedItems = itemsByOrderMap[order.order_primary_id] || itemsByOrderMap[order.order_number] || order.items_summary || [];
 
         return {
             order_primary_id: order.order_primary_id,
@@ -406,8 +433,8 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
             delivered_by_daraz: deliveredByDaraz,
             created_at: order.created_at,
             seller_account: order.seller_account,
-            products: order.items_summary || [],
-            items_summary: order.items_summary || [],
+            products: fetchedItems,
+            items_summary: fetchedItems,
             total_revenue: order.total_revenue || 0,
             total_purchase_cost: order.total_purchase_cost || 0,
             daraz_fees: order.daraz_fees || 0,
