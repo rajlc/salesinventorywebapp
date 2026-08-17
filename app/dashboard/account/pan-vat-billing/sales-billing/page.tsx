@@ -1,6 +1,6 @@
 'use client'
 
-import { ArrowLeft, Plus } from 'lucide-react'
+import { ArrowLeft, Plus, Zap } from 'lucide-react'
 import Link from 'next/link'
 import { useState } from 'react'
 
@@ -8,15 +8,20 @@ import { StockAnalysisPage } from '@/features/stock-analysis/components/StockAna
 import { AddSalesBillModal } from '@/features/sales/components/AddSalesBillModal'
 import { SalesBillList } from '@/features/sales/components/SalesBillList'
 import { SalesBillDetailModal } from '@/features/sales/components/SalesBillDetailModal'
+import { BillGenerateModal } from '@/features/sales/components/BillGenerateModal'
 import { SalesBill } from '@/features/sales/actions/sales-bill-actions'
 import { SalesAnalysisPage } from '@/features/sales/components/SalesAnalysisPage'
 
 export default function SalesBillingPage() {
     const [activeTab, setActiveTab] = useState<'bill-entry' | 'stock-analysis' | 'sales-analysis'>('bill-entry')
     const [isAddSalesBillModalOpen, setIsAddSalesBillModalOpen] = useState(false)
+    const [isBillGenerateModalOpen, setIsBillGenerateModalOpen] = useState(false)
     const [selectedBillId, setSelectedBillId] = useState<string | null>(null)
     const [galleryBillIds, setGalleryBillIds] = useState<string[] | undefined>(undefined)
     const [billToEdit, setBillToEdit] = useState<SalesBill | undefined>(undefined)
+
+    // Frozen products from StockAnalysisPage — shared with BillGenerateModal
+    const [frozenProducts, setFrozenProducts] = useState<Set<string>>(new Set())
 
     const handleEditBill = (bill: SalesBill) => {
         setSelectedBillId(null)
@@ -81,19 +86,31 @@ export default function SalesBillingPage() {
                     </button>
                 </div>
 
-                {/* Add Buttons */}
+                {/* Add / Generate Buttons */}
                 <div className="flex items-center gap-2">
                     {activeTab === 'bill-entry' && (
-                        <button
-                            onClick={() => {
-                                setBillToEdit(undefined)
-                                setIsAddSalesBillModalOpen(true)
-                            }}
-                            className="flex items-center gap-1 px-2 py-1 text-[13px] bg-blue-600 text-white hover:bg-blue-700 rounded transition-colors whitespace-nowrap"
-                        >
-                            <Plus size={14} />
-                            Add Sales Bill
-                        </button>
+                        <>
+                            {/* Bill Generate button */}
+                            <button
+                                onClick={() => setIsBillGenerateModalOpen(true)}
+                                className="flex items-center gap-1 px-2 py-1 text-[13px] bg-emerald-600 text-white hover:bg-emerald-700 rounded transition-colors whitespace-nowrap shadow-sm"
+                            >
+                                <Zap size={14} />
+                                Bill Generate
+                            </button>
+
+                            {/* Add Sales Bill button */}
+                            <button
+                                onClick={() => {
+                                    setBillToEdit(undefined)
+                                    setIsAddSalesBillModalOpen(true)
+                                }}
+                                className="flex items-center gap-1 px-2 py-1 text-[13px] bg-blue-600 text-white hover:bg-blue-700 rounded transition-colors whitespace-nowrap"
+                            >
+                                <Plus size={14} />
+                                Add Sales Bill
+                            </button>
+                        </>
                     )}
                 </div>
             </div>
@@ -108,7 +125,7 @@ export default function SalesBillingPage() {
                         }}
                     />
                 ) : activeTab === 'stock-analysis' ? (
-                    <StockAnalysisPage />
+                    <StockAnalysisPage onFrozenChange={setFrozenProducts} />
                 ) : (
                     <SalesAnalysisPage />
                 )}
@@ -119,6 +136,13 @@ export default function SalesBillingPage() {
                 <AddSalesBillModal
                     onClose={handleCloseAddModal}
                     billToEdit={billToEdit}
+                />
+            )}
+
+            {isBillGenerateModalOpen && (
+                <BillGenerateModal
+                    onClose={() => setIsBillGenerateModalOpen(false)}
+                    frozenProducts={frozenProducts}
                 />
             )}
 

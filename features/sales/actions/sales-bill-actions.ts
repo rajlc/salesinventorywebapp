@@ -336,3 +336,62 @@ export async function checkDuplicateInvoice(invoiceNo: string, date: string, exc
 
     return data.length > 0
 }
+
+// Get the next N suggested invoice numbers for a given date (unique within the fiscal year)
+export async function getNextNInvoiceNumbers(date: string, count: number): Promise<string[]> {
+    const supabase = await createClient()
+
+    // Get fiscal year date range
+    const { data: fy } = await supabase
+        .from('fiscal_years')
+        .select('start_date, end_date')
+        .lte('start_date', date)
+        .gte('end_date', date)
+        .single()
+
+    if (!fy) {
+        // Fallback: just return 001, 002, ...
+        return Array.from({ length: count }, (_, i) => String(i + 1).padStart(3, '0'))
+    }
+
+    const { data } = await supabase
+        .from('sales_bills')
+        .select('invoice_no')
+        .eq('is_deleted', false)
+        .gte('bill_date_ad', fy.start_date)
+        .lte('bill_date_ad', fy.end_date)
+
+    // Collect all used numeric invoice numbers in this FY
+    const usedNums = new Set<number>()
+    ;(data || []).forEach(bill => {
+        const num = parseInt(bill.invoice_no, 10)
+        if (!isNaN(num)) usedNums.add(num)
+    })
+
+    // Find next N consecutive available numbers
+    const result: string[] = []
+    let candidate = 1
+    while (result.length < count) {
+        if (!usedNums.has(candidate)) {
+            result.push(String(candidate).padStart(3, '0'))
+            usedNums.add(candidate) // Reserve it so we don't suggest it twice
+        }
+        candidate++
+        if (candidate > 99999) break // Safety guard
+    }
+
+    return result
+}
+
+// Bulk-create multiple Sales bills (used by Bill Generate modal)
+export async function bulkCreateSalesBills(bills: CreateSalesBillParams[]): Promise<SalesBill[]> {
+    const results: SalesBill[] = []
+
+    for (const bill of bills) {
+        const created = await createSalesBill(bill)
+        results.push(created)
+    }
+
+    revalidatePath('/dashboard/account/pan-vat-billing/sales-billing')
+    return results
+}

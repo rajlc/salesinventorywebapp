@@ -15,6 +15,12 @@ export interface StockAnalysisItem {
     unit?: string
 }
 
+// Internal type includes all-time purchase totals for rate fallback (not exposed in the interface)
+interface InternalEntry extends StockAnalysisItem {
+    _all_time_purchase_stock: number
+    _all_time_purchase_amount: number
+}
+
 export async function getStockAnalysisData(filters?: {
     fiscalYearId?: string
     companyId?: string
@@ -37,12 +43,6 @@ export async function getStockAnalysisData(filters?: {
         startDate = fy.start_date
         endDate = fy.end_date
     } else {
-        // Default to active fiscal year if not provided or 'all' (though 'all' logic might differ, 
-        // usually stock analysis is per period. If 'all', we might just show everything up to now.)
-        // For 'all', we effectively want startDate = min_date and endDate = max_date.
-        // But the prompt implies "Running Stock = Opening + Purchase ... [When fiscal year is change lock this]"
-        // So let's default to Active FY if 'all' or undefined to be safe, or handle 'all' as "All Time"
-
         // If 'all' is explicitly passed, we set a very old start date
         if (filters?.fiscalYearId === 'all') {
             startDate = '2000-01-01'
@@ -55,7 +55,7 @@ export async function getStockAnalysisData(filters?: {
         }
     }
 
-    // 2. Fetch All Valid Purchase Items to Aggregate
+    // 2. Fetch All Valid Purchase Items to Aggregate (no date filter — we need all-time for rate fallback)
     let purchaseQuery = supabase
         .from('pan_vat_bill_items')
         .select(`
@@ -114,7 +114,7 @@ export async function getStockAnalysisData(filters?: {
     }
 
     // 4. Aggregate Data in Memory (Grouping by Particulars)
-    const productMap = new Map<string, StockAnalysisItem>()
+    const productMap = new Map<string, InternalEntry>()
 
     // Aggregate Purchases
     for (const item of allPurchaseItems) {
@@ -131,13 +131,21 @@ export async function getStockAnalysisData(filters?: {
                 sales_qty: 0,
                 running_stock: 0,
                 weighted_average_rate: 0,
-                unit: item.unit || 'Pcs'
+                unit: item.unit || 'Pcs',
+                _all_time_purchase_stock: 0,
+                _all_time_purchase_amount: 0,
             })
         }
 
         const entry = productMap.get(productName)!
 
         if (item.hs_code) entry.hs_code = item.hs_code
+
+        // Always accumulate all-time purchase totals (for rate fallback)
+        if (item.quantity > 0 && item.amount > 0) {
+            entry._all_time_purchase_stock += item.quantity
+            entry._all_time_purchase_amount += item.amount
+        }
 
         if (billDate < startDate) {
             entry.opening_stock += item.quantity
@@ -161,7 +169,9 @@ export async function getStockAnalysisData(filters?: {
                 purchase_amount: 0,
                 sales_qty: 0,
                 running_stock: 0,
-                weighted_average_rate: 0
+                weighted_average_rate: 0,
+                _all_time_purchase_stock: 0,
+                _all_time_purchase_amount: 0,
             })
         }
 
@@ -181,14 +191,22 @@ export async function getStockAnalysisData(filters?: {
         // Running Stock = Opening + Purchase - Sales
         entry.running_stock = entry.opening_stock + entry.purchase_stock - entry.sales_qty
 
-        // Calculate Rate for Valuation
+        // Purchase Rate (weighted average):
+        // - Primary: use purchases within the selected period
+        // - Fallback: if no purchases in this period (opening stock from older FYs),
+        //   use all-time weighted average so the rate column is never 0 for products with history
         if (entry.purchase_stock > 0) {
             entry.weighted_average_rate = entry.purchase_amount / entry.purchase_stock
+        } else if (entry._all_time_purchase_stock > 0) {
+            // All-time fallback rate (historical cost price)
+            entry.weighted_average_rate = entry._all_time_purchase_amount / entry._all_time_purchase_stock
         } else {
             entry.weighted_average_rate = 0
         }
 
-        return entry
+        // Strip internal fields from the returned object
+        const { _all_time_purchase_stock, _all_time_purchase_amount, ...publicEntry } = entry
+        return publicEntry as StockAnalysisItem
     })
 
     // Sort by name
