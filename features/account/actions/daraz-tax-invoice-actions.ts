@@ -154,7 +154,7 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
             const returnHandling = getFee(group, 'handling fee for return')
             const handlingNet = Math.max(0, Math.round((handlingCharge + returnHandling) * 100) / 100)
 
-            const isBagmati = key.toLowerCase().includes('bagmati') || (stmt.storeName && stmt.storeName.toLowerCase().includes('bagmati')) || (stmt.statementNumber && stmt.statementNumber.includes('NPDZNLUE6T'))
+            const isBagmati = key.toLowerCase().includes('bagmati') || key.toLowerCase().includes('npdznlue6t')
 
             const merchantCharge = isBagmati ? getFee(group, 'merchant managed services charge') : 0
             const merchantNet = isBagmati ? Math.max(0, Math.round(merchantCharge * 100) / 100) : 0
