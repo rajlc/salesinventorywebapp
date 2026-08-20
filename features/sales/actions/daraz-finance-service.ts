@@ -683,7 +683,8 @@ export async function fetchDarazStatementLineItems(
     while (true) {
         let chunkQuery = supabase
             .from('daraz_finance_transactions')
-            .select('*')
+            // Select only the columns used downstream — avoids transferring unused fields on each 1000-row page
+            .select('id, statement, store_id, fee_name, fee_amount, order_no, transaction_date, transaction_type, created_at')
 
         if (period && period.includes(' - ')) {
             chunkQuery = chunkQuery.or(`statement.eq."${statementNumber}",statement.eq."${period}",statement.ilike."%${period}%"`)

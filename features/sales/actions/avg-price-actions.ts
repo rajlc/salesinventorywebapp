@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, unstable_cache } from 'next/cache'
 import { getGoogleSheetsClient } from '@/lib/google-sheets'
 import axios from 'axios'
 import crypto from 'crypto'
@@ -212,7 +212,19 @@ async function fetchAllRows(
     }
 }
 
+// Cache key varies by `days` param. TTL = 90 seconds.
+// This prevents the 8-parallel full-table-scan storm from firing on every page render.
+const _getDarazAvgPricesCached = unstable_cache(
+    async (days: number | string) => _getDarazAvgPricesInner(days),
+    ['daraz-avg-prices'],
+    { revalidate: 90 }
+)
+
 export async function getDarazAvgPrices(days: number | string = 60) {
+    return _getDarazAvgPricesCached(days)
+}
+
+async function _getDarazAvgPricesInner(days: number | string = 60) {
     const supabase = await createClient()
 
     const daysNum = typeof days === 'number' ? days : 60
@@ -611,26 +623,26 @@ export async function bulkUpdateDarazAvgPrice(updates: { product_id: string, mar
 
     if (!updates || updates.length === 0) return { success: true }
 
-    const BATCH_SIZE = 50;
-    for (let i = 0; i < updates.length; i += BATCH_SIZE) {
-        const batch = updates.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(async (update) => {
-            const { data: existing } = await supabase
-                .from('daraz_avg_prices')
-                .select('product_id')
-                .eq('product_id', update.product_id)
-                .maybeSingle()
-            
-            const payload: any = {}
-            if (update.market_price !== undefined) payload.market_price = update.market_price
-            if (update.campaign_price !== undefined) payload.campaign_price = update.campaign_price
+    // Single upsert replaces N×2 (SELECT + UPDATE/INSERT) loop.
+    // Requires unique index on daraz_avg_prices(product_id) — see migration 20260820_add_missing_indexes.sql
+    const rows = updates.map(update => {
+        const row: any = { product_id: update.product_id }
+        if (update.market_price !== undefined) row.market_price = update.market_price
+        if (update.campaign_price !== undefined) row.campaign_price = update.campaign_price
+        return row
+    })
 
-            if (existing) {
-                await supabase.from('daraz_avg_prices').update(payload).eq('product_id', update.product_id)
-            } else {
-                await supabase.from('daraz_avg_prices').insert([{ product_id: update.product_id, ...payload }])
-            }
-        }));
+    // Process in batches of 500 to stay within Supabase request size limits
+    const BATCH_SIZE = 500
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+        const batch = rows.slice(i, i + BATCH_SIZE)
+        const { error } = await supabase
+            .from('daraz_avg_prices')
+            .upsert(batch, { onConflict: 'product_id', ignoreDuplicates: false })
+        if (error) {
+            console.error('[bulkUpdateDarazAvgPrice] Upsert error:', error.message)
+            throw new Error(error.message)
+        }
     }
 
     revalidatePath('/dashboard/sales/daraz/average-sales-price')

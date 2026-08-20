@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import { syncSingleDarazOrderAction } from '@/features/sales/actions/daraz-sync-order'
-import { processIncomingMessageAutoReply, processPendingDelayedMessagesAction } from '@/features/chat/actions/chat-actions'
+import { processIncomingMessageAutoReply } from '@/features/chat/actions/chat-actions'
 
 // Signature verification using HMAC-SHA256
 function verifySignature(appKey: string, body: string, appSecret: string, receivedSignature: string): boolean {
@@ -161,11 +161,6 @@ export async function POST(request: NextRequest) {
                         console.error('[Webhook] Failed to queue automated chat message:', queueErr.message)
                     }
                 }
-
-                // Process any due delayed messages immediately
-                processPendingDelayedMessagesAction().catch(err => {
-                    console.error('[Webhook] Background processPendingDelayedMessagesAction error:', err)
-                })
 
                 return NextResponse.json({
                     success: true,

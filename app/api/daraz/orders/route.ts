@@ -3,7 +3,6 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import axios from 'axios'
 import { syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
-import { processPendingDelayedMessagesAction } from '@/features/chat/actions/chat-actions'
 
 export const dynamic = 'force-dynamic'
 
@@ -736,7 +735,6 @@ export async function GET(request: NextRequest) {
                         }
                     }
 
-                    processPendingDelayedMessagesAction().catch(() => {})
                 }
             } catch (e) {
                 console.error('[DarazSync] Auto-reply message queueing error:', e)

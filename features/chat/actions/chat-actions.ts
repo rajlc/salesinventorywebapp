@@ -832,15 +832,27 @@ Response:`
 export async function processPendingDelayedMessagesAction(limit = 10) {
     try {
         const supabase = await createAdminClient()
-        const { data: pending, error } = await supabase
-            .from('daraz_delayed_messages')
-            .select('*')
-            .eq('status', 'pending')
-            .lte('scheduled_at', new Date().toISOString())
-            .order('scheduled_at', { ascending: true })
-            .limit(limit)
 
-        if (error || !pending || pending.length === 0) {
+        // First: reset any tasks stuck in 'processing' for >5 minutes
+        // (handles crashed workers from previous runs)
+        await supabase.rpc('reset_stuck_delayed_messages').then(({ error }) => {
+            if (error) console.warn('[DelayedMessages] reset_stuck warning:', error.message)
+        })
+
+        // Atomically claim pending tasks using FOR UPDATE SKIP LOCKED.
+        // This prevents the race condition where multiple concurrent callers
+        // (cron + webhook + sync) process the same message twice.
+        const { data: claimed, error } = await supabase
+            .rpc('claim_pending_delayed_messages', { p_limit: limit })
+
+        if (error) {
+            // RPC might not exist yet (before migration runs) — fall back gracefully
+            console.error('[DelayedMessages] claim RPC error (migration may be pending):', error.message)
+            return { success: false, error: error.message }
+        }
+
+        const pending = claimed as any[] | null
+        if (!pending || pending.length === 0) {
             return { success: true, processed: 0 }
         }
 
@@ -849,11 +861,6 @@ export async function processPendingDelayedMessagesAction(limit = 10) {
 
         for (const task of pending) {
             try {
-                await supabase
-                    .from('daraz_delayed_messages')
-                    .update({ status: 'processing', updated_at: new Date().toISOString() })
-                    .eq('id', task.id)
-
                 const sessionId = await openSessionByOrderId(task.store_id, task.order_id)
                 if (!sessionId) {
                     throw new Error(`Could not open conversation session for order ${task.order_id}`)
@@ -886,11 +893,11 @@ export async function processPendingDelayedMessagesAction(limit = 10) {
                 console.log(`[DelayedMessages] ✅ Sent auto-message & follow invitation for order ${task.order_id}`)
             } catch (taskError: any) {
                 console.error(`[DelayedMessages] ❌ Failed task ${task.id} for order ${task.order_id}:`, taskError.message)
-                
-                const isTemporaryError = taskError.message.includes('order not found') || 
-                                         taskError.message.includes('too many requests') || 
+
+                const isTemporaryError = taskError.message.includes('order not found') ||
+                                         taskError.message.includes('too many requests') ||
                                          taskError.message.includes('timeout')
-                
+
                 let retryCount = 0
                 if (task.error_message && task.error_message.includes('Retry:')) {
                     const match = task.error_message.match(/Retry:\s*(\d+)/)

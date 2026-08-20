@@ -1862,13 +1862,14 @@ export async function syncDarazOrderProducts(orderId: string) {
 
 export async function getUniqueSellerAccounts() {
     const supabase = await createClient()
+    // Only select the one column we need — no full row fetch
     const { data } = await supabase
-        .from('daraz_orders_with_totals')
+        .from('daraz_order_items')
         .select('seller_account')
         .not('seller_account', 'is', null)
 
-    // return unique
-    const accounts = [...new Set((data || []).map(d => d.seller_account))]
+    // Deduplicate in JS — cheaper than a view scan
+    const accounts = [...new Set((data || []).map(d => d.seller_account))] as string[]
     return accounts.sort()
 }
 
@@ -1876,66 +1877,30 @@ export async function getOrderStatusSummary() {
     const supabase = await createClient()
 
     try {
-        // Get unique seller accounts
-        const sellerAccounts = await getUniqueSellerAccounts()
+        // Single RPC call replaces N×M loop (was: 40+ queries, now: 1 query)
+        // The get_order_status_summary() Postgres function uses GROUP BY with
+        // conditional COUNT filters — all computed server-side in one pass.
+        const { data, error } = await supabase.rpc('get_order_status_summary')
 
-
-        const statuses = ['Pending', 'Packed', 'Ready to Ship', 'Shipped', 'Delivered',
-            'Returning to Seller', 'Returned Delivered', 'Customer Return',
-            'Customer Return Delivered', 'Unpaid']
-
-        const summary: any[] = []
-
-        // For each seller account, query counts for each status using getAllDarazOrders
-        for (const account of sellerAccounts) {
-            const row: any = {
-                seller_account: account,
-                unpaid: 0,
-                pending: 0,
-                packed: 0,
-                ready_to_ship: 0,
-                shipped: 0,
-                delivered: 0,
-                returning_to_seller: 0,
-                returned_delivered: 0,
-                customer_return: 0,
-                customer_return_delivered: 0
-            }
-
-            // Query each status to get exact count that matches filtered view
-            // We run these in parallel for the current account to speed it up
-            await Promise.all(statuses.map(async (status) => {
-                const result = await getAllDarazOrders({
-                    page: 1,
-                    limit: 1, // We only need the count, not the data
-                    status: status,
-                    sellerAccount: account
-                })
-
-                const count = result.pagination.total
-
-                // Map status to summary field
-                if (status === 'Unpaid') row.unpaid = count
-                else if (status === 'Pending') row.pending = count
-                else if (status === 'Packed') row.packed = count
-                else if (status === 'Ready to Ship') row.ready_to_ship = count
-                else if (status === 'Shipped') row.shipped = count
-                else if (status === 'Delivered') row.delivered = count
-                else if (status === 'Returning to Seller') row.returning_to_seller = count
-                else if (status === 'Returned Delivered') row.returned_delivered = count
-                else if (status === 'Customer Return') row.customer_return = count
-                else if (status === 'Customer Return Delivered') row.customer_return_delivered = count
-            }))
-
-            summary.push(row)
+        if (error) {
+            console.error('[getOrderStatusSummary] RPC error:', error.message)
+            return []
         }
 
-
-
-
-        const result = summary.sort((a, b) => a.seller_account.localeCompare(b.seller_account))
-
-        return result
+        // Normalise the returned rows to match the expected shape
+        return (data || []).map((row: any) => ({
+            seller_account: row.seller_account,
+            pending: Number(row.pending || 0),
+            packed: Number(row.packed || 0),
+            ready_to_ship: Number(row.ready_to_ship || 0),
+            shipped: Number(row.shipped || 0),
+            delivered: Number(row.delivered || 0),
+            returning_to_seller: Number(row.returning_to_seller || 0),
+            returned_delivered: Number(row.returned_delivered || 0),
+            customer_return: Number(row.customer_return || 0),
+            customer_return_delivered: Number(row.customer_return_delivered || 0),
+            unpaid: Number(row.unpaid || 0),
+        }))
     } catch (error) {
         console.error('Error in getOrderStatusSummary:', error)
         return []
