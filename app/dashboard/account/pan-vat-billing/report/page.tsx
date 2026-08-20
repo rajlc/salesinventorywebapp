@@ -245,7 +245,7 @@ export default function PanVatReportPage() {
 
         if (match && match.length > 0) {
             if (!isBagmati) {
-                return match.filter(t => !t.desc.toLowerCase().includes('merchant managed'))
+                return match.filter((t: { desc: string }) => !t.desc.toLowerCase().includes('merchant managed'))
             }
             return match
         }
