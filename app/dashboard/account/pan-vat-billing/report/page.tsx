@@ -24,7 +24,11 @@ import {
     Copy,
     Check,
     Filter,
-    X
+    X,
+    Lock,
+    Unlock,
+    Edit3,
+    ShieldCheck
 } from 'lucide-react'
 import Link from 'next/link'
 import { Card, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, TableFooter, Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui-shim'
@@ -41,9 +45,11 @@ import { fetchDarazPayoutStatus } from '@/features/sales/actions/daraz-finance-s
 import {
     getStoredDarazTaxInvoices,
     createDarazTaxInvoice,
+    saveOrUpdateDarazTaxInvoice,
     updateDarazTaxInvoiceVerification,
     deleteDarazTaxInvoice,
-    syncStatementTaxInvoicesToDB
+    syncStatementTaxInvoicesToDB,
+    getLiveDarazStatementTaxMap
 } from '@/features/account/actions/daraz-tax-invoice-actions'
 
 export default function PanVatReportPage() {
@@ -83,6 +89,26 @@ export default function PanVatReportPage() {
             return `${format(mon, 'dd MMM yyyy')} - ${format(sun, 'dd MMM yyyy')}`
         } catch {
             return ''
+        }
+    }
+
+    const formatStatementPeriod = (item: any): string => {
+        const raw = item.created_at || item.statement || ''
+        if (!raw) return 'Weekly Period'
+        if (raw.includes(' - ')) return raw
+
+        const d = new Date(raw)
+        if (isNaN(d.getTime())) return raw
+
+        const endSun = new Date(d)
+        endSun.setDate(d.getDate() - 1)
+        const startMon = new Date(endSun)
+        startMon.setDate(endSun.getDate() - 6)
+
+        try {
+            return `${format(startMon, 'dd MMM yyyy')} - ${format(endSun, 'dd MMM yyyy')}`
+        } catch {
+            return raw
         }
     }
 
@@ -186,6 +212,68 @@ export default function PanVatReportPage() {
         staleTime: 0
     })
 
+    const statementQueryParams = useMemo(() => {
+        return (payoutData || []).map((item: any) => ({
+            statementNumber: item.statement_number || '',
+            storeId: item.store_id,
+            period: formatStatementPeriod(item),
+            itemRevenue: parseFloat(String(item.item_revenue || '0').replace(/[^0-9.]/g, '')) || 0,
+            storeName: item.store_name || item.seller_account
+        }))
+    }, [payoutData])
+
+    // Fetch Live Statement Tax Invoices from DB Transactions / API
+    const { data: liveTaxMap = {} } = useQuery({
+        queryKey: ['daraz-live-tax-map', statementQueryParams],
+        queryFn: () => getLiveDarazStatementTaxMap(statementQueryParams),
+        staleTime: 0
+    })
+
+    // Helper to get exact tax invoices for a statement
+    const getTaxItemsForStatement = (item: any, storeLabel: string) => {
+        const stmtNo = (item.statement_number || '').trim().toLowerCase()
+        const stmtRaw = (item.statement || item.created_at || '').trim().toLowerCase()
+        const storeLower = storeLabel.trim().toLowerCase()
+
+        const match = 
+            (stmtNo && liveTaxMap[`${stmtNo}_${storeLower}`]) ||
+            (stmtNo && liveTaxMap[stmtNo]) ||
+            (stmtRaw && liveTaxMap[`${stmtRaw}_${storeLower}`]) ||
+            (stmtRaw && liveTaxMap[stmtRaw])
+
+        const isBagmati = storeLower.includes('bagmati') || stmtNo.includes('npdznlue6t')
+
+        if (match && match.length > 0) {
+            if (!isBagmati) {
+                return match.filter(t => !t.desc.toLowerCase().includes('merchant managed'))
+            }
+            return match
+        }
+
+        const b = getStatementBreakdown(item)
+        const raw = [
+            { desc: 'Tax Invoice - Co Funded Voucher Max', net: Math.max(0, Math.round((Math.abs(b.coFundedVoucher) - Math.abs(b.voucherReversal)) * 100) / 100) },
+            { desc: 'Tax Invoice - Payment Fee', net: Math.max(0, Math.round((Math.abs(b.paymentFee) - Math.abs(b.paymentFeeRefunded)) * 100) / 100) },
+            { desc: 'Tax Invoice - Commission Fee', net: Math.max(0, Math.round((Math.abs(b.commissionFee) - Math.abs(b.commissionRefunded)) * 100) / 100) },
+            { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: Math.max(0, Math.round((Math.abs(b.coinsFee) - Math.abs(b.coinsFeeRefunded)) * 100) / 100) },
+            { desc: 'Tax Invoice - Handling Fee', net: Math.max(0, Math.round((Math.abs(b.handlingFee) + Math.abs(b.returnHandlingFee)) * 100) / 100) },
+            ...(isBagmati && b.merchantCharge && b.merchantCharge !== 0 ? [{ desc: 'Tax Invoice - Merchant Managed Services Charge', net: Math.max(0, Math.round(Math.abs(b.merchantCharge) * 100) / 100) }] : [])
+        ]
+
+        return raw.filter(t => t.net > 0).map(t => {
+            const taxableAmt = Math.round((t.net / 1.13) * 100) / 100
+            const vatAmt = Math.round((taxableAmt * 0.13) * 100) / 100
+            const grandTotal = Math.round((taxableAmt + vatAmt) * 100) / 100
+            return {
+                desc: t.desc,
+                net: t.net,
+                taxableAmt,
+                vatAmt,
+                grandTotal
+            }
+        })
+    }
+
     // Fetch Stored Tax Invoices from DB
     const { data: storedInvoices = [], refetch: refetchStoredInvoices } = useQuery({
         queryKey: ['daraz-stored-tax-invoices', fiscalYearId, startDate, endDate, selectedCompanyId, selectedStoreFilter, verificationFilter],
@@ -232,22 +320,10 @@ export default function PanVatReportPage() {
             const datePeriod = `${format(pStart, 'dd MMM yyyy')} - ${format(pEnd, 'dd MMM yyyy')}`
             const storeLabel = item.store_name || item.seller_account || (item.statement_number ? item.statement_number.split('-')[0] : 'Bagmati Traders')
             const companyName = item.company_name || 'Bagmati Traders'
-            const b = getStatementBreakdown(item)
+            const taxItems = getTaxItemsForStatement(item, storeLabel)
 
-            const taxItems = [
-                { desc: 'Tax Invoice - Co Funded Voucher Max', net: Math.max(0, Math.round((Math.abs(b.coFundedVoucher) - Math.abs(b.voucherReversal)) * 100) / 100) },
-                { desc: 'Tax Invoice - Payment Fee', net: Math.max(0, Math.round((Math.abs(b.paymentFee) - Math.abs(b.paymentFeeRefunded)) * 100) / 100) },
-                { desc: 'Tax Invoice - Commission Fee', net: Math.max(0, Math.round((Math.abs(b.commissionFee) - Math.abs(b.commissionRefunded)) * 100) / 100) },
-                { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: Math.max(0, Math.round((Math.abs(b.coinsFee) - Math.abs(b.coinsFeeRefunded)) * 100) / 100) },
-                { desc: 'Tax Invoice - Handling Fee', net: Math.max(0, Math.round((Math.abs(b.handlingFee) + Math.abs(b.returnHandlingFee)) * 100) / 100) },
-                { desc: 'Tax Invoice - Merchant Managed Services Charge', net: Math.max(0, Math.round(Math.abs(b.merchantCharge) * 100) / 100) }
-            ]
-
-            taxItems.forEach(t => {
+            taxItems.forEach((t: any) => {
                 if (t.net <= 0) return
-                const taxableAmt = Math.round((t.net / 1.13) * 100) / 100
-                const vatAmt = Math.round((taxableAmt * 0.13) * 100) / 100
-                const grandTotal = Math.round((taxableAmt + vatAmt) * 100) / 100
 
                 itemsToSync.push({
                     statement_number: item.statement_number,
@@ -256,9 +332,9 @@ export default function PanVatReportPage() {
                     store_name: storeLabel,
                     company_name: companyName,
                     description: t.desc,
-                    taxable_amount: taxableAmt,
-                    vat_amount: vatAmt,
-                    grand_total: grandTotal,
+                    taxable_amount: t.taxableAmt,
+                    vat_amount: t.vatAmt,
+                    grand_total: t.grandTotal,
                     fiscal_year_id: fiscalYearId !== 'all' ? fiscalYearId : undefined
                 })
             })
@@ -267,7 +343,7 @@ export default function PanVatReportPage() {
         if (itemsToSync.length > 0) {
             syncStatementTaxInvoicesToDB(itemsToSync).catch(e => console.warn('Background sync tax invoices:', e))
         }
-    }, [payoutData, fiscalYearId])
+    }, [payoutData, fiscalYearId, liveTaxMap])
 
     // Helper mappings
     const sellerToCompanyMap = useMemo(() => {
@@ -562,60 +638,32 @@ export default function PanVatReportPage() {
                 }
             }
 
-            const b = getStatementBreakdown(item)
-
-            // 6 Strict Authorized Tax Invoices
-            const taxItems = [
-                {
-                    desc: 'Tax Invoice - Co Funded Voucher Max',
-                    net: Math.max(0, Math.round((Math.abs(b.coFundedVoucher) - Math.abs(b.voucherReversal)) * 100) / 100)
-                },
-                {
-                    desc: 'Tax Invoice - Payment Fee',
-                    net: Math.max(0, Math.round((Math.abs(b.paymentFee) - Math.abs(b.paymentFeeRefunded)) * 100) / 100)
-                },
-                {
-                    desc: 'Tax Invoice - Commission Fee',
-                    net: Math.max(0, Math.round((Math.abs(b.commissionFee) - Math.abs(b.commissionRefunded)) * 100) / 100)
-                },
-                {
-                    desc: 'Tax Invoice - Daraz Coins Discount Participation Fee',
-                    net: Math.max(0, Math.round((Math.abs(b.coinsFee) - Math.abs(b.coinsFeeRefunded)) * 100) / 100)
-                },
-                {
-                    desc: 'Tax Invoice - Handling Fee',
-                    net: Math.max(0, Math.round((Math.abs(b.handlingFee) + Math.abs(b.returnHandlingFee)) * 100) / 100)
-                },
-                {
-                    desc: 'Tax Invoice - Merchant Managed Services Charge',
-                    net: Math.max(0, Math.round(Math.abs(b.merchantCharge) * 100) / 100)
-                }
-            ]
+            const taxItems = getTaxItemsForStatement(item, storeLabel)
 
             const displayPeriod = formatStatementPeriod(item)
             const dateStr = format(pEnd, 'yyyy-MM-dd')
 
-            taxItems.forEach((tItem) => {
+            taxItems.forEach((tItem: any) => {
                 if (tItem.net <= 0) return
 
                 const key = `${item.statement_number}_${storeLabel}_${tItem.desc}`
                 const dbRecord = dbMap[key]
 
-                const taxableAmt = Math.round((tItem.net / 1.13) * 100) / 100
-                const vatAmt = Math.round((taxableAmt * 0.13) * 100) / 100
-                const grandTotal = Math.round((taxableAmt + vatAmt) * 100) / 100
                 const isVerified = dbRecord ? !!dbRecord.is_verified : false
+                const taxableAmt = dbRecord && dbRecord.taxable_amount !== undefined && dbRecord.is_verified ? Number(dbRecord.taxable_amount) : tItem.taxableAmt
+                const vatAmt = dbRecord && dbRecord.vat_amount !== undefined && dbRecord.is_verified ? Number(dbRecord.vat_amount) : tItem.vatAmt
+                const grandTotal = dbRecord && dbRecord.grand_total !== undefined && dbRecord.is_verified ? Number(dbRecord.grand_total) : tItem.grandTotal
 
                 rows.push({
                     id: dbRecord?.id || `daraz-tax-${idxCounter++}`,
                     dbId: dbRecord?.id,
                     statementNumber: item.statement_number,
-                    date: dateStr,
-                    datePeriod: displayPeriod,
+                    date: dbRecord?.date || dateStr,
+                    datePeriod: dbRecord?.date_period || displayPeriod,
                     storeName: storeLabel,
-                    companyName,
+                    companyName: dbRecord?.company_name || companyName,
                     invoiceNumber: dbRecord?.invoice_number || null,
-                    description: tItem.desc,
+                    description: dbRecord?.description || tItem.desc,
                     taxableAmt,
                     vatAmt,
                     grandTotal,
@@ -670,9 +718,97 @@ export default function PanVatReportPage() {
         }
 
         return rows
-    }, [payoutData, storedInvoices, selectedCompanyId, companies, startDate, endDate, selectedStoreFilter, verificationFilter])
+    }, [payoutData, storedInvoices, selectedCompanyId, companies, startDate, endDate, selectedStoreFilter, verificationFilter, liveTaxMap])
 
-    // Event Handlers for Manual Invoice & Verification
+    // State for Verify & Edit Modal
+    const [isVerifyEditModalOpen, setIsVerifyEditModalOpen] = useState(false)
+    const [activeVerifyRow, setActiveVerifyRow] = useState<{
+        id?: string
+        dbId?: string
+        statementNumber?: string | null
+        date: string
+        datePeriod: string
+        storeName: string
+        companyName: string
+        invoiceNumber: string
+        description: string
+        taxableAmount: number | string
+        vatAmount: number
+        grandTotal: number
+        isVerified: boolean
+        notes: string
+    } | null>(null)
+    const [isSavingVerify, setIsSavingVerify] = useState(false)
+
+    // Open Modal for Verifying / Editing Tax Invoice
+    const handleOpenVerifyModal = (row: any) => {
+        setActiveVerifyRow({
+            id: row.id,
+            dbId: row.dbId,
+            statementNumber: row.statementNumber || null,
+            date: row.date || todayStr,
+            datePeriod: row.datePeriod || '',
+            storeName: row.storeName || 'Bagmati Traders',
+            companyName: row.companyName || 'Bagmati Traders',
+            invoiceNumber: row.invoiceNumber || '',
+            description: row.description || '',
+            taxableAmount: row.taxableAmt || 0,
+            vatAmount: row.vatAmt || 0,
+            grandTotal: row.grandTotal || 0,
+            isVerified: row.isVerified ?? false,
+            notes: row.notes || ''
+        })
+        setIsVerifyEditModalOpen(true)
+    }
+
+    const handleVerifyTaxableChange = (val: string) => {
+        const taxable = parseFloat(val) || 0
+        const vat = Math.round((taxable * 0.13) * 100) / 100
+        const grand = Math.round((taxable + vat) * 100) / 100
+        setActiveVerifyRow(prev => prev ? ({
+            ...prev,
+            taxableAmount: val,
+            vatAmount: vat,
+            grandTotal: grand
+        }) : null)
+    }
+
+    const handleSaveVerifyModal = async (lockStatus: boolean) => {
+        if (!activeVerifyRow) return
+        const taxable = parseFloat(String(activeVerifyRow.taxableAmount)) || 0
+        if (!activeVerifyRow.description || taxable <= 0) {
+            alert('Please enter a valid description and taxable amount.')
+            return
+        }
+
+        setIsSavingVerify(true)
+        try {
+            await saveOrUpdateDarazTaxInvoice({
+                id: activeVerifyRow.dbId,
+                statement_number: activeVerifyRow.statementNumber || null,
+                date: activeVerifyRow.date,
+                date_period: activeVerifyRow.datePeriod,
+                store_name: activeVerifyRow.storeName,
+                company_name: activeVerifyRow.companyName,
+                invoice_number: activeVerifyRow.invoiceNumber || null,
+                description: activeVerifyRow.description,
+                taxable_amount: taxable,
+                vat_amount: activeVerifyRow.vatAmount,
+                grand_total: activeVerifyRow.grandTotal,
+                is_verified: lockStatus,
+                notes: activeVerifyRow.notes,
+                fiscal_year_id: fiscalYearId !== 'all' ? fiscalYearId : undefined
+            })
+            setIsVerifyEditModalOpen(false)
+            refetchStoredInvoices()
+        } catch (err: any) {
+            alert(`Error saving invoice: ${err.message}`)
+        } finally {
+            setIsSavingVerify(false)
+        }
+    }
+
+    // Event Handlers for Manual Invoice Creation
     const handleDateChange = (val: string) => {
         const p = calculateWeeklyPeriod(val)
         setNewInvoice(prev => ({
@@ -737,32 +873,6 @@ export default function PanVatReportPage() {
             alert(`Error saving invoice: ${err.message}`)
         } finally {
             setIsSubmitting(false)
-        }
-    }
-
-    const handleToggleVerification = async (row: any) => {
-        try {
-            const nextStatus = !row.isVerified
-            if (row.dbId) {
-                await updateDarazTaxInvoiceVerification(row.dbId, nextStatus)
-            } else {
-                await createDarazTaxInvoice({
-                    date: row.date || todayStr,
-                    date_period: row.datePeriod,
-                    store_name: row.storeName,
-                    company_name: row.companyName,
-                    invoice_number: row.invoiceNumber,
-                    description: row.description,
-                    taxable_amount: row.taxableAmt,
-                    vat_amount: row.vatAmt,
-                    grand_total: row.grandTotal,
-                    is_verified: nextStatus,
-                    fiscal_year_id: fiscalYearId !== 'all' ? fiscalYearId : undefined
-                })
-            }
-            refetchStoredInvoices()
-        } catch (err: any) {
-            console.error('Failed to toggle verification:', err)
         }
     }
 
@@ -1178,13 +1288,13 @@ export default function PanVatReportPage() {
                                                     </TableCell>
                                                     <TableCell className="text-center py-3">
                                                         {row.isVerified ? (
-                                                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800">
-                                                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                                                                Verified
+                                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800 shadow-xs">
+                                                                <Lock className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                                                                Verified & Locked
                                                             </span>
                                                         ) : (
-                                                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800">
-                                                                <Clock className="h-3.5 w-3.5 text-amber-600" />
+                                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800 shadow-xs">
+                                                                <Clock className="h-3 w-3 text-amber-600" />
                                                                 Pending PDF
                                                             </span>
                                                         )}
@@ -1194,14 +1304,24 @@ export default function PanVatReportPage() {
                                                             <Button
                                                                 size="sm"
                                                                 variant={row.isVerified ? "outline" : "default"}
-                                                                onClick={() => handleToggleVerification(row)}
-                                                                className={`h-7 px-2.5 text-[11px] font-bold rounded-lg ${row.isVerified
+                                                                onClick={() => handleOpenVerifyModal(row)}
+                                                                className={`h-7 px-2.5 text-[11px] font-bold rounded-lg transition-all ${row.isVerified
                                                                     ? "border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-950/40"
-                                                                    : "bg-emerald-600 hover:bg-emerald-700 text-white"
+                                                                    : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
                                                                     }`}
-                                                                title={row.isVerified ? "Mark as Unverified / Pending" : "Mark as Verified (PDF Received)"}
+                                                                title={row.isVerified ? "Edit Locked Amounts or Unlock" : "Verify & Lock Tax Invoice"}
                                                             >
-                                                                {row.isVerified ? "Unverify" : "Verify"}
+                                                                {row.isVerified ? (
+                                                                    <>
+                                                                        <Edit3 className="h-3 w-3 mr-1" />
+                                                                        Edit / Locked
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                                                                        Verify
+                                                                    </>
+                                                                )}
                                                             </Button>
 
                                                             {row.source === 'manual' && row.dbId && (
@@ -1802,6 +1922,200 @@ export default function PanVatReportPage() {
                             </Button>
                         </div>
                     </form>
+                </DialogContent>
+            </Dialog>
+
+            {/* MODAL 2: VERIFY & LOCK DARAZ TAX INVOICE */}
+            <Dialog open={isVerifyEditModalOpen} onOpenChange={setIsVerifyEditModalOpen}>
+                <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto font-['Inter',sans-serif] p-6 bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-2xl shadow-xl">
+                    <DialogHeader className="space-y-1.5 pb-3 border-b border-slate-100 dark:border-zinc-800">
+                        <div className="flex items-center justify-between">
+                            <DialogTitle className="text-lg font-black text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                                <ShieldCheck className="h-5 w-5 text-emerald-600" />
+                                Verify & Lock Tax Invoice
+                            </DialogTitle>
+                            {activeVerifyRow?.isVerified ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300">
+                                    <Lock className="h-3 w-3 text-emerald-600" />
+                                    Currently Locked
+                                </span>
+                            ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950/70 dark:text-amber-300">
+                                    <Clock className="h-3 w-3 text-amber-600" />
+                                    Pending PDF Verification
+                                </span>
+                            )}
+                        </div>
+                        <p className="text-xs text-slate-500">
+                            Edit details to match the official Daraz Tax Invoice PDF. Locking protects your custom values from automated API recalculations.
+                        </p>
+                    </DialogHeader>
+
+                    {activeVerifyRow && (
+                        <div className="space-y-4 pt-2">
+                            {/* Statement & Store Meta Info Header */}
+                            <div className="p-3.5 bg-slate-50 dark:bg-zinc-800/60 rounded-xl border border-slate-200 dark:border-zinc-700/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+                                <div>
+                                    <span className="text-slate-400 font-semibold block text-[10px] uppercase">Statement Period</span>
+                                    <span className="font-bold text-slate-800 dark:text-slate-200">{activeVerifyRow.datePeriod || 'Custom Date'}</span>
+                                </div>
+                                <div>
+                                    <span className="text-slate-400 font-semibold block text-[10px] uppercase">Store & Company</span>
+                                    <span className="font-bold text-slate-800 dark:text-slate-200">{activeVerifyRow.storeName} ({activeVerifyRow.companyName})</span>
+                                </div>
+                                {activeVerifyRow.statementNumber && (
+                                    <div>
+                                        <span className="text-slate-400 font-semibold block text-[10px] uppercase">Statement Number</span>
+                                        <span className="font-mono font-bold text-orange-600 dark:text-orange-400">{activeVerifyRow.statementNumber}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Invoice Number & Date */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="space-y-1.5">
+                                    <label className="text-[13px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                                        <FileText className="h-4 w-4 text-emerald-600" />
+                                        Invoice / Bill No (From Daraz PDF)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="e.g. DARAZ-INV-2026-00432"
+                                        value={activeVerifyRow.invoiceNumber}
+                                        onChange={(e) => setActiveVerifyRow(prev => prev ? ({ ...prev, invoiceNumber: e.target.value }) : null)}
+                                        className="w-full px-3 py-2 text-[13px] font-mono font-bold border border-slate-200 dark:border-zinc-700 rounded-xl bg-white dark:bg-zinc-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+                                    />
+                                </div>
+
+                                <div className="space-y-1.5">
+                                    <label className="text-[13px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                                        <Calendar className="h-4 w-4 text-emerald-600" />
+                                        Invoice Date
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={activeVerifyRow.date}
+                                        onChange={(e) => setActiveVerifyRow(prev => prev ? ({ ...prev, date: e.target.value }) : null)}
+                                        className="w-full px-3 py-2 text-[13px] font-medium border border-slate-200 dark:border-zinc-700 rounded-xl bg-white dark:bg-zinc-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Description / Category */}
+                            <div className="space-y-1.5">
+                                <label className="text-[13px] font-bold text-slate-700 dark:text-slate-300">
+                                    Description / Fee Category <span className="text-rose-500">*</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    value={activeVerifyRow.description}
+                                    onChange={(e) => setActiveVerifyRow(prev => prev ? ({ ...prev, description: e.target.value }) : null)}
+                                    className="w-full px-3 py-2 text-[13px] font-semibold border border-slate-200 dark:border-zinc-700 rounded-xl bg-white dark:bg-zinc-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500/30"
+                                />
+                            </div>
+
+                            {/* Financial Amounts Breakdown (Taxable, VAT 13%, Grand Total) */}
+                            <div className="p-4 bg-slate-50 dark:bg-zinc-800/60 rounded-xl border border-slate-200 dark:border-zinc-700/80 space-y-3">
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                    {/* Taxable Amount */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-slate-600 dark:text-slate-400 uppercase">
+                                            Taxable Amount <span className="text-rose-500">*</span>
+                                        </label>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            required
+                                            placeholder="0.00"
+                                            value={activeVerifyRow.taxableAmount}
+                                            onChange={(e) => handleVerifyTaxableChange(e.target.value)}
+                                            className="w-full px-3 py-2 text-[13px] font-mono font-bold border border-slate-200 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500/30"
+                                        />
+                                    </div>
+
+                                    {/* VAT 13% (Auto) */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase">
+                                            Vat 13% (Auto)
+                                        </label>
+                                        <div className="px-3 py-2 text-[13px] font-mono font-bold bg-blue-50/70 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-900/50 rounded-lg">
+                                            NPR {activeVerifyRow.vatAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        </div>
+                                    </div>
+
+                                    {/* Grand Total (Auto) */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase">
+                                            Grand Total (Auto)
+                                        </label>
+                                        <div className="px-3 py-2 text-[13px] font-mono font-black bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-900/50 rounded-lg">
+                                            NPR {activeVerifyRow.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Remarks / Notes */}
+                            <div className="space-y-1">
+                                <label className="text-[13px] font-bold text-slate-700 dark:text-slate-300">
+                                    Remarks / Verification Notes (Optional)
+                                </label>
+                                <input
+                                    type="text"
+                                    placeholder="e.g. Verified with PDF received from Daraz support"
+                                    value={activeVerifyRow.notes}
+                                    onChange={(e) => setActiveVerifyRow(prev => prev ? ({ ...prev, notes: e.target.value }) : null)}
+                                    className="w-full px-3 py-2 text-[13px] font-medium border border-slate-200 dark:border-zinc-700 rounded-xl bg-white dark:bg-zinc-800 text-slate-900 dark:text-slate-100"
+                                />
+                            </div>
+
+                            {/* Lock Warning Note */}
+                            <div className="p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/40 flex items-start gap-2.5">
+                                <Lock className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                                <p className="text-xs text-emerald-800 dark:text-emerald-300 leading-relaxed font-medium">
+                                    <strong>Lock Protection:</strong> When locked as verified, this tax invoice will never be changed or overwritten by future API syncs. You can still reopen and update it manually at any time.
+                                </p>
+                            </div>
+
+                            {/* Modal Footer Actions */}
+                            <div className="pt-3 border-t border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-2.5">
+                                <div>
+                                    {activeVerifyRow.isVerified && (
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            disabled={isSavingVerify}
+                                            onClick={() => handleSaveVerifyModal(false)}
+                                            className="px-3.5 text-xs font-bold text-amber-700 hover:bg-amber-50 border-amber-300 dark:text-amber-300 rounded-xl flex items-center gap-1.5"
+                                        >
+                                            <Unlock className="h-3.5 w-3.5" />
+                                            Unlock / Revert
+                                        </Button>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        onClick={() => setIsVerifyEditModalOpen(false)}
+                                        className="px-4 text-[13px] font-semibold rounded-xl"
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        disabled={isSavingVerify}
+                                        onClick={() => handleSaveVerifyModal(true)}
+                                        className="px-5 text-[13px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-xs flex items-center gap-1.5"
+                                    >
+                                        <Lock className="h-3.5 w-3.5" />
+                                        {isSavingVerify ? 'Saving...' : 'Lock & Mark as Verified'}
+                                    </Button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </DialogContent>
             </Dialog>
         </div>

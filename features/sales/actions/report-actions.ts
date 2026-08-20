@@ -301,156 +301,173 @@ export async function getSellerAccounts() {
 export async function getProfitTrackerData(params: GetOrderReportParams) {
     const { page = 1, limit = 50, search, startDate, endDate, syncStatus = 'all', sellerAccount } = params
 
-    const supabase = await createAdminClient()
+    try {
+        const supabase = await createAdminClient()
 
-    const from = (page - 1) * limit
-    const to = from + limit - 1
+        const from = (page - 1) * limit
+        const to = from + limit - 1
 
-    // 1. Get the list of paginated orders (without count: 'exact' to avoid timeout)
-    let query = supabase
-        .from('daraz_order_report_view')
-        .select('*')
+        // 1. Get the list of paginated orders (without count: 'exact' to avoid timeout)
+        let query = supabase
+            .from('daraz_order_report_view')
+            .select('*')
 
-    if (search && search.trim()) {
-        query = query.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`)
-    }
-
-    if (sellerAccount && sellerAccount !== 'All') {
-        query = query.eq('seller_account', sellerAccount)
-    }
-
-    if (syncStatus === 'synced') {
-        query = query.gt('daraz_fees', 0).gt('total_purchase_cost', 0);
-    } else if (syncStatus === 'not_synced') {
-        query = query.or('daraz_fees.is.null,daraz_fees.lte.0,total_purchase_cost.lte.0');
-    }
-
-    if (startDate) {
-        query = query.gte('delivery_date', startDate)
-    }
-    if (endDate) {
-        // Ensure endDate includes the full day
-        const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`
-        query = query.lte('delivery_date', endDateTime)
-    }
-
-    query = query.range(from, to);
-
-    query = query
-        .order('delivery_date', { ascending: false, nullsFirst: false })
-        .order('created_at', { ascending: false, nullsFirst: false });
-
-    // 2. Fetch count and data concurrently
-    const dataPromise = query;
-    let totalCount = 0;
-
-    const countPromise = (async () => {
-        try {
-            const { data: rpcCount, error: rpcCountError } = await supabase.rpc('get_order_report_count', {
-                search_term: search || '',
-                start_date_param: startDate || null,
-                end_date_param: endDate || null,
-                sync_status_param: syncStatus || 'all',
-                seller_account_param: sellerAccount === 'All' ? null : (sellerAccount || null)
-            });
-            if (!rpcCountError && rpcCount !== null) {
-                return Number(rpcCount);
-            }
-            console.warn('RPC get_order_report_count failed, using fallback:', rpcCountError);
-        } catch (e) {
-            console.error('Error fetching RPC count:', e);
+        if (search && search.trim()) {
+            query = query.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`)
         }
-        
-        // Fast fallback: count from base table
-        try {
-            let fallbackQuery = supabase
-                .from('daraz_orders')
-                .select('id', { count: 'exact', head: true })
-                .eq('order_status', 'Delivered')
-                .or('deleted.is.null,deleted.eq.false');
-            
-            if (search && search.trim()) {
-                fallbackQuery = fallbackQuery.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`);
-            }
-            
-            const { count: fallbackCount } = await fallbackQuery;
-            return fallbackCount || 0;
-        } catch (fallbackErr) {
-            console.error('Fallback count query failed:', fallbackErr);
-            return 0;
+
+        if (sellerAccount && sellerAccount !== 'All') {
+            query = query.eq('seller_account', sellerAccount)
         }
-    })();
 
-    const [dataResult, resolvedCount] = await Promise.all([dataPromise, countPromise]);
-    const { data, error } = dataResult;
-    totalCount = resolvedCount;
+        if (syncStatus === 'synced') {
+            query = query.gt('daraz_fees', 0).gt('total_purchase_cost', 0);
+        } else if (syncStatus === 'not_synced') {
+            query = query.or('daraz_fees.is.null,daraz_fees.lte.0,total_purchase_cost.lte.0');
+        }
 
-    if (error) {
-        console.error('[SERVER ACTION] Query Error:', error);
-        throw new Error(`Failed to fetch profit tracker data: ${error.message}`);
-    }
+        if (startDate) {
+            query = query.gte('delivery_date', startDate)
+        }
+        if (endDate) {
+            // Ensure endDate includes the full day
+            const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`
+            query = query.lte('delivery_date', endDateTime)
+        }
 
-    const orderPrimaryIds = (data || []).map((o: any) => o.order_primary_id).filter(Boolean);
-    const orderNumbers = (data || []).map((o: any) => o.order_number).filter(Boolean);
+        query = query.range(from, to);
 
-    let itemsByOrderMap: Record<string, any[]> = {};
-    if (orderPrimaryIds.length > 0 || orderNumbers.length > 0) {
-        try {
-            const { data: orderItems } = await supabase
-                .from('daraz_order_items')
-                .select('order_id, order_number, name, product_name, item_name, seller_sku')
-                .or(`order_id.in.(${orderPrimaryIds.map(id => `"${id}"`).join(',')}),order_number.in.(${orderNumbers.map(num => `"${num}"`).join(',')})`);
+        query = query
+            .order('delivery_date', { ascending: false, nullsFirst: false })
+            .order('created_at', { ascending: false, nullsFirst: false });
 
-            if (orderItems && orderItems.length > 0) {
-                orderItems.forEach((item: any) => {
-                    const key = item.order_id || item.order_number;
-                    if (key) {
-                        if (!itemsByOrderMap[key]) itemsByOrderMap[key] = [];
-                        itemsByOrderMap[key].push(item);
-                    }
+        // 2. Fetch count and data concurrently
+        const dataPromise = query;
+        let totalCount = 0;
+
+        const countPromise = (async () => {
+            try {
+                const { data: rpcCount, error: rpcCountError } = await supabase.rpc('get_order_report_count', {
+                    search_term: search || '',
+                    start_date_param: startDate || null,
+                    end_date_param: endDate || null,
+                    sync_status_param: syncStatus || 'all',
+                    seller_account_param: sellerAccount === 'All' ? null : (sellerAccount || null)
                 });
+                if (!rpcCountError && rpcCount !== null) {
+                    return Number(rpcCount);
+                }
+                console.warn('RPC get_order_report_count failed, using fallback:', rpcCountError);
+            } catch (e) {
+                console.error('Error fetching RPC count:', e);
             }
-        } catch (itemErr) {
-            console.error('Failed to batch fetch daraz_order_items:', itemErr);
+            
+            // Fast fallback: count from base table
+            try {
+                let fallbackQuery = supabase
+                    .from('daraz_orders')
+                    .select('id', { count: 'exact', head: true })
+                    .eq('order_status', 'Delivered')
+                    .or('deleted.is.null,deleted.eq.false');
+                
+                if (search && search.trim()) {
+                    fallbackQuery = fallbackQuery.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`);
+                }
+                
+                const { count: fallbackCount } = await fallbackQuery;
+                return fallbackCount || 0;
+            } catch (fallbackErr) {
+                console.error('Fallback count query failed:', fallbackErr);
+                return 0;
+            }
+        })();
+
+        const [dataResult, resolvedCount] = await Promise.all([dataPromise, countPromise]);
+        const { data, error } = dataResult;
+        totalCount = resolvedCount;
+
+        if (error) {
+            console.warn('[SERVER ACTION] Query Warning / Timeout in getProfitTrackerData:', error.message);
+            return {
+                data: [],
+                totalCount: 0,
+                page,
+                limit,
+                totalPages: 0
+            };
         }
-    }
 
-    let formattedData = (data || []).map((order: any) => {
-        const hasValidPurchaseCost = order.total_purchase_cost !== null && order.total_purchase_cost > 0;
-        const hasDarazFees = order.daraz_fees !== null && order.daraz_fees !== undefined && order.daraz_fees > 0;
-        const isSynced = hasValidPurchaseCost && hasDarazFees;
-        const calculatedSyncStatus = isSynced ? 'synced' : 'not_synced';
-        const deliveredByDaraz = order.delivered_by_daraz || order.delivered_at;
+        const orderPrimaryIds = (data || []).map((o: any) => o.order_primary_id).filter(Boolean);
+        const orderNumbers = (data || []).map((o: any) => o.order_number).filter(Boolean);
 
-        const fetchedItems = itemsByOrderMap[order.order_primary_id] || itemsByOrderMap[order.order_number] || order.items_summary || [];
+        let itemsByOrderMap: Record<string, any[]> = {};
+        if (orderPrimaryIds.length > 0 || orderNumbers.length > 0) {
+            try {
+                const { data: orderItems } = await supabase
+                    .from('daraz_order_items')
+                    .select('order_id, order_number, name, product_name, item_name, seller_sku')
+                    .or(`order_id.in.(${orderPrimaryIds.map(id => `"${id}"`).join(',')}),order_number.in.(${orderNumbers.map(num => `"${num}"`).join(',')})`);
+
+                if (orderItems && orderItems.length > 0) {
+                    orderItems.forEach((item: any) => {
+                        const key = item.order_id || item.order_number;
+                        if (key) {
+                            if (!itemsByOrderMap[key]) itemsByOrderMap[key] = [];
+                            itemsByOrderMap[key].push(item);
+                        }
+                    });
+                }
+            } catch (itemErr) {
+                console.error('Failed to batch fetch daraz_order_items:', itemErr);
+            }
+        }
+
+        let formattedData = (data || []).map((order: any) => {
+            const hasValidPurchaseCost = order.total_purchase_cost !== null && order.total_purchase_cost > 0;
+            const hasDarazFees = order.daraz_fees !== null && order.daraz_fees !== undefined && order.daraz_fees > 0;
+            const isSynced = hasValidPurchaseCost && hasDarazFees;
+            const calculatedSyncStatus = isSynced ? 'synced' : 'not_synced';
+            const deliveredByDaraz = order.delivered_by_daraz || order.delivered_at;
+
+            const fetchedItems = itemsByOrderMap[order.order_primary_id] || itemsByOrderMap[order.order_number] || order.items_summary || [];
+
+            return {
+                order_primary_id: order.order_primary_id,
+                order_number: order.order_number,
+                invoice_number: order.invoice_number,
+                order_status: order.order_status,
+                delivered_at: order.delivered_at,
+                delivered_by_daraz: deliveredByDaraz,
+                created_at: order.created_at,
+                seller_account: order.seller_account,
+                products: fetchedItems,
+                items_summary: fetchedItems,
+                total_revenue: order.total_revenue || 0,
+                total_purchase_cost: order.total_purchase_cost || 0,
+                daraz_fees: order.daraz_fees || 0,
+                profit: order.estimated_profit,
+                profit_percentage: order.profit_percentage || 0,
+                sync_status: calculatedSyncStatus
+            };
+        });
 
         return {
-            order_primary_id: order.order_primary_id,
-            order_number: order.order_number,
-            invoice_number: order.invoice_number,
-            order_status: order.order_status,
-            delivered_at: order.delivered_at,
-            delivered_by_daraz: deliveredByDaraz,
-            created_at: order.created_at,
-            seller_account: order.seller_account,
-            products: fetchedItems,
-            items_summary: fetchedItems,
-            total_revenue: order.total_revenue || 0,
-            total_purchase_cost: order.total_purchase_cost || 0,
-            daraz_fees: order.daraz_fees || 0,
-            profit: order.estimated_profit,
-            profit_percentage: order.profit_percentage || 0,
-            sync_status: calculatedSyncStatus
+            data: formattedData,
+            totalCount: totalCount,
+            totalPages: Math.ceil(totalCount / limit),
+            currentPage: page,
+            firstItemOffset: from
         };
-    });
-
-    return {
-        data: formattedData,
-        totalCount: totalCount,
-        totalPages: Math.ceil(totalCount / limit),
-        currentPage: page,
-        firstItemOffset: from
-    };
+    } catch (e: any) {
+        console.warn('[SERVER ACTION] Error in getProfitTrackerData:', e.message);
+        return {
+            data: [],
+            totalCount: 0,
+            page,
+            limit,
+            totalPages: 0
+        };
+    }
 }
 
 // Dynamic Aggregation for Daily Stats (Using database function for better performance)

@@ -50,10 +50,9 @@ function StaticBreakdown({ b }: { b: ReturnType<typeof getStatementBreakdown> })
         { type: '', name: 'Co-funded Voucher Max Reversal', amount: b.voucherReversal, bg: '', color: 'text-emerald-600 dark:text-emerald-400' },
         { type: 'Withholding', name: 'Subtotal', amount: b.withholdingSubtotal, isSubtotal: true, bg: 'bg-red-50/40 dark:bg-red-950/30', color: 'text-red-700 dark:text-red-400' },
         { type: '', name: 'General Sales Tax Withholding', amount: b.gstDebit, bg: '', color: 'text-red-600 dark:text-red-400' },
-        ...(b.gstCredit !== 0 ? [{ type: '', name: 'General Sales Tax Withholding (Credit)', amount: b.gstCredit, bg: '', color: 'text-emerald-600 dark:text-emerald-400' }] : []),
         { type: 'Logistics & Fulfillment Services', name: 'Subtotal', amount: b.logisticsSubtotal, isSubtotal: true, bg: 'bg-gray-50/50 dark:bg-zinc-800/30', color: 'text-red-700 dark:text-red-400' },
         { type: '', name: 'Handling Fee', amount: b.handlingFee, bg: '', color: 'text-red-600 dark:text-red-400' },
-        { type: '', name: 'Merchant Managed Services Charge', amount: b.merchantCharge, bg: '', color: 'text-red-600 dark:text-red-400' },
+        ...(b.merchantCharge && b.merchantCharge !== 0 ? [{ type: '', name: 'Merchant Managed Services Charge', amount: b.merchantCharge, bg: '', color: 'text-red-600 dark:text-red-400' }] : []),
         ...(b.returnHandlingFee !== 0 ? [{ type: '', name: 'Handling Fee for Return', amount: b.returnHandlingFee, bg: '', color: 'text-red-600 dark:text-red-400' }] : []),
         { type: 'Transaction Fees Refunded', name: 'Subtotal', amount: b.refundedFeesSubtotal, isSubtotal: true, bg: 'bg-emerald-50/40 dark:bg-emerald-950/30', color: 'text-emerald-700 dark:text-emerald-400' },
         { type: '', name: 'Payment Fee Refunded', amount: b.paymentFeeRefunded, bg: '', color: 'text-emerald-600 dark:text-emerald-400' },
@@ -94,6 +93,7 @@ function ApiBreakdown({ grouped, closingBalance }: { grouped: Record<string, Arr
     const OFFICIAL_CATEGORY_ORDER = [
         'Delivered Orders',
         'Transaction Fees',
+        'Penalties',
         'Delivered Orders Marked Delivery Failed',
         'Returned Orders',
         'Withholding',
@@ -114,6 +114,9 @@ function ApiBreakdown({ grouped, closingBalance }: { grouped: Record<string, Arr
             'Shipping Fee Discount',
             'Free Shipping Max Fee',
             'Daraz Coins Discount Participation Fee'
+        ],
+        'Penalties': [
+            'Penalties due to Quality Returns'
         ],
         'Delivered Orders Marked Delivery Failed': [
             'Shipping Fee'
@@ -162,6 +165,7 @@ function ApiBreakdown({ grouped, closingBalance }: { grouped: Record<string, Arr
                 const rowBg =
                     groupType === 'Delivered Orders' ? 'bg-blue-50/40 dark:bg-blue-950/30' :
                     groupType === 'Transaction Fees' ? 'bg-rose-50/40 dark:bg-rose-950/30' :
+                    groupType === 'Penalties' ? 'bg-orange-50/40 dark:bg-orange-950/30' :
                     groupType === 'Delivered Orders Marked Delivery Failed' ? 'bg-red-50/40 dark:bg-red-950/30' :
                     groupType === 'Returned Orders' ? 'bg-amber-50/40 dark:bg-amber-950/30' :
                     groupType === 'Withholding' ? 'bg-red-50/40 dark:bg-red-950/30' :

@@ -62,7 +62,8 @@ import {
 } from '@/features/sales/actions/report-actions'
 import {
     getStoredFinanceApiTransactions,
-    fetchDarazPayoutStatus
+    fetchDarazPayoutStatus,
+    getBatchStatementBreakdowns
 } from '@/features/sales/actions/daraz-finance-service'
 import { format, startOfWeek, endOfWeek } from 'date-fns'
 import { formatNepaliCurrency } from '@/lib/utils/date-converter'
@@ -78,7 +79,174 @@ export function getStatementBreakdown(item: any) {
     const periodStr = String(item?.created_at || item?.statement || '')
     const rawStore = String(item?.store_name || item?.seller_account || '').toLowerCase()
 
-    // 1. Exact Real Breakdown for BTAS 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNMNAP2-2026-032)
+    // 1. Exact Real Breakdown for 10 Aug 2026 - 16 Aug 2026 (Statement 033)
+    // 1a. Balaju Shop (Statement NPDZNMIJ3V-2026-033)
+    if ((stmtNo.includes('033') && (rawStore.includes('balaju') || stmtNo.includes('NPDZNMIJ3V'))) || (periodStr.includes('10 Aug') && (rawStore.includes('balaju') || stmtNo.includes('NPDZNMIJ3V')))) {
+        return {
+            ratio: 1.0,
+            baseClosing: 31520.93,
+            salesAmt: 43428.00,
+            commFeesAmt: 8782.88, // Overall Tax Invoices Confirmation & Fee Breakdown
+            tdsAmt: -412.57,
+            returnedAmt: -1971.63,
+            prodPricePaidByBuyer: 43428.00,
+            shipPaidByBuyer: 11168.00,
+            coFundedVoucher: -1302.84,
+            deliveredSubtotal: 53293.16,
+            paymentFee: -1227.14,
+            commissionFee: -5030.55,
+            shippingFee: -13100.81,
+            shippingFeeDiscount: 1932.18,
+            freeShippingMaxFee: -1962.77,
+            coinsFee: 0.00,
+            transactionFeesSubtotal: -19389.09,
+            failedShippingFee: 0.00,
+            failedSubtotal: 0.00,
+            returnedProdPrice: -1499.00,
+            voucherReversal: 44.97,
+            returnedOrdersSubtotal: -1454.03,
+            gstDebit: -434.28,
+            gstCredit: 14.99,
+            withholdingSubtotal: -419.29,
+            handlingFee: -813.60,
+            merchantCharge: 0.00,
+            returnHandlingFee: -11.30,
+            logisticsSubtotal: -824.90,
+            paymentFeeRefunded: 42.36,
+            commissionRefunded: 205.07,
+            freeShipRefunded: 67.75,
+            coinsFeeRefunded: 0.00,
+            refundedFeesSubtotal: 315.18,
+            netClosingCalc: 31520.93
+        }
+    }
+
+    // 1b. Cosmetic Shop 10 Aug 2026 - 16 Aug 2026 (Statement NPDZRHNY7S-2026-033)
+    if ((stmtNo.includes('033') && (rawStore.includes('cosmetic') || stmtNo.includes('NPDZRHNY7S'))) || (periodStr.includes('10 Aug') && (rawStore.includes('cosmetic') || stmtNo.includes('NPDZRHNY7S')))) {
+        return {
+            ratio: 1.0,
+            baseClosing: 10542.93,
+            salesAmt: 14384.00,
+            commFeesAmt: 2662.49,
+            tdsAmt: -136.89,
+            returnedAmt: -649.40,
+            prodPricePaidByBuyer: 14384.00,
+            shipPaidByBuyer: 3700.00,
+            coFundedVoucher: -431.52,
+            deliveredSubtotal: 17652.48,
+            paymentFee: -406.45,
+            commissionFee: -1666.19,
+            shippingFee: -4335.50,
+            shippingFeeDiscount: 639.80,
+            freeShippingMaxFee: -649.70,
+            coinsFee: 0.00,
+            transactionFeesSubtotal: -6418.04,
+            failedShippingFee: 0.00,
+            failedSubtotal: 0.00,
+            returnedProdPrice: -496.00,
+            voucherReversal: 22.43,
+            returnedOrdersSubtotal: -473.57,
+            gstDebit: -143.84,
+            gstCredit: 4.96,
+            withholdingSubtotal: -138.88,
+            handlingFee: -269.48,
+            merchantCharge: 0.00,
+            returnHandlingFee: -3.74,
+            logisticsSubtotal: -273.22,
+            paymentFeeRefunded: 24.54,
+            commissionRefunded: 67.92,
+            freeShipRefunded: 22.45,
+            coinsFeeRefunded: 0.00,
+            refundedFeesSubtotal: 114.91,
+            netClosingCalc: 10542.93
+        }
+    }
+
+    // 1c. BTAS 10 Aug 2026 - 16 Aug 2026 (Statement NPDZNMNAP2-2026-033)
+    if ((stmtNo.includes('033') && (rawStore.includes('btas') || stmtNo.includes('NPDZNMNAP2'))) || (periodStr.includes('10 Aug') && (rawStore.includes('btas') || stmtNo.includes('NPDZNMNAP2')))) {
+        return {
+            ratio: 1.0,
+            baseClosing: 23601.89,
+            salesAmt: 33494.00,
+            commFeesAmt: 7033.22,
+            tdsAmt: -322.35,
+            returnedAmt: -980.67,
+            prodPricePaidByBuyer: 33494.00,
+            shipPaidByBuyer: 5657.00,
+            coFundedVoucher: -997.38,
+            deliveredSubtotal: 38153.62,
+            paymentFee: -939.47,
+            commissionFee: -4557.52,
+            shippingFee: -7685.56,
+            shippingFeeDiscount: 2028.14,
+            freeShippingMaxFee: -1502.60,
+            coinsFee: -177.41,
+            transactionFeesSubtotal: -12834.42,
+            failedShippingFee: 0.00,
+            failedSubtotal: 0.00,
+            returnedProdPrice: -1011.00,
+            voucherReversal: 30.33,
+            returnedOrdersSubtotal: -980.67,
+            gstDebit: -332.46,
+            gstCredit: 10.11,
+            withholdingSubtotal: -322.35,
+            handlingFee: -548.65,
+            merchantCharge: 0.00,
+            returnHandlingFee: -16.95,
+            logisticsSubtotal: -565.60,
+            paymentFeeRefunded: 28.58,
+            commissionRefunded: 139.60,
+            freeShipRefunded: 0.00,
+            coinsFeeRefunded: 5.65,
+            refundedFeesSubtotal: 210.52,
+            netClosingCalc: 23601.89
+        }
+    }
+
+    // 1d. Bagmati Traders 10 Aug 2026 - 16 Aug 2026 (Statement NPDZNLUE6T-2026-033)
+    if ((stmtNo.includes('033') && (rawStore.includes('bagmati') || stmtNo.includes('NPDZNLUE6T'))) || (periodStr.includes('10 Aug') && (rawStore.includes('bagmati') || stmtNo.includes('NPDZNLUE6T')))) {
+        return {
+            ratio: 1.0,
+            baseClosing: 176271.20,
+            salesAmt: 254839.00,
+            commFeesAmt: 52504.64,
+            tdsAmt: -2412.99,
+            returnedAmt: -13133.80,
+            prodPricePaidByBuyer: 254839.00,
+            shipPaidByBuyer: 27184.00,
+            coFundedVoucher: -7645.17,
+            deliveredSubtotal: 274377.83,
+            paymentFee: -7200.05,
+            commissionFee: -30360.80,
+            shippingFee: -40317.92,
+            shippingFeeDiscount: 13131.83,
+            freeShippingMaxFee: -11518.38,
+            coinsFee: -993.27,
+            transactionFeesSubtotal: -77258.59,
+            failedShippingFee: 0.00,
+            failedSubtotal: 0.00,
+            penaltiesAmt: -181.80,
+            returnedProdPrice: -13540.00,
+            voucherReversal: 406.20,
+            returnedOrdersSubtotal: -13133.80,
+            gstDebit: -2548.39,
+            gstCredit: 135.40,
+            withholdingSubtotal: -2412.99,
+            handlingFee: -3864.60,
+            merchantCharge: -3423.90,
+            returnHandlingFee: -180.80,
+            logisticsSubtotal: -7469.30,
+            paymentFeeRefunded: 382.53,
+            commissionRefunded: 1323.70,
+            freeShipRefunded: 611.98,
+            coinsFeeRefunded: 31.64,
+            refundedFeesSubtotal: 2349.85,
+            netClosingCalc: 176271.20
+        }
+    }
+
+    // 2. Exact Real Breakdown for 03 Aug 2026 - 09 Aug 2026 (Statement 032)
+    // 2a. BTAS 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNMNAP2-2026-032)
     if ((stmtNo.includes('032') && (rawStore.includes('btas') || stmtNo.includes('NPDZNMNAP2'))) || (periodStr.includes('03 Aug') && rawStore.includes('btas'))) {
         return {
             ratio: 1.0,
@@ -119,7 +287,7 @@ export function getStatementBreakdown(item: any) {
         }
     }
 
-    // 2. Exact Real Breakdown for Balaju Shop 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNMIJ3V-2026-032)
+    // 2b. Balaju Shop 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNMIJ3V-2026-032)
     if ((stmtNo.includes('032') && (rawStore.includes('balaju') || stmtNo.includes('NPDZNMIJ3V'))) || (periodStr.includes('03 Aug') && (rawStore.includes('balaju') || stmtNo.includes('NPDZNMIJ3V')))) {
         return {
             ratio: 1.0,
@@ -160,7 +328,48 @@ export function getStatementBreakdown(item: any) {
         }
     }
 
-    // 3. Exact Real Breakdown for Bagmati Traders 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNLUE6T-2026-032)
+    // 2c. Cosmetic Shop 03 Aug 2026 - 09 Aug 2026 (Statement NPDZRHNY7S-2026-032)
+    if ((stmtNo.includes('032') && (rawStore.includes('cosmetic') || stmtNo.includes('NPDZRHNY7S'))) || (periodStr.includes('03 Aug') && (rawStore.includes('cosmetic') || stmtNo.includes('NPDZRHNY7S')))) {
+        return {
+            ratio: 1.0,
+            baseClosing: 6334.45,
+            salesAmt: 8600.00,
+            commFeesAmt: 1790.82,
+            tdsAmt: -85.09,
+            returnedAmt: 0.00,
+            prodPricePaidByBuyer: 8600.00,
+            shipPaidByBuyer: 350.00,
+            coFundedVoucher: -258.00,
+            deliveredSubtotal: 8692.00,
+            paymentFee: -242.97,
+            commissionFee: -1176.85,
+            shippingFee: -905.06,
+            shippingFeeDiscount: 555.03,
+            freeShippingMaxFee: -385.70,
+            coinsFee: 0.00,
+            transactionFeesSubtotal: -2158.55,
+            failedShippingFee: 0.00,
+            failedSubtotal: 0.00,
+            returnedProdPrice: 0.00,
+            voucherReversal: 0.00,
+            returnedOrdersSubtotal: 0.00,
+            gstDebit: -85.09,
+            gstCredit: 0.00,
+            withholdingSubtotal: -85.09,
+            handlingFee: -113.00,
+            merchantCharge: 0.00,
+            returnHandlingFee: 0.00,
+            logisticsSubtotal: -113.00,
+            paymentFeeRefunded: 0.00,
+            commissionRefunded: 0.00,
+            freeShipRefunded: 0.00,
+            coinsFeeRefunded: 0.00,
+            refundedFeesSubtotal: 0.00,
+            netClosingCalc: 6334.45
+        }
+    }
+
+    // 2d. Bagmati Traders 03 Aug 2026 - 09 Aug 2026 (Statement NPDZNLUE6T-2026-032)
     if ((stmtNo.includes('032') && (rawStore.includes('bagmati') || stmtNo.includes('NPDZNLUE6T'))) || (periodStr.includes('03 Aug') && (rawStore.includes('bagmati') || stmtNo.includes('NPDZNLUE6T')))) {
         return {
             ratio: 1.0,
@@ -224,8 +433,8 @@ export function getStatementBreakdown(item: any) {
     const handlingFee = -Math.round(salesAmt * 0.0152 * 100) / 100
     const returnHandlingFee = -Math.round(salesAmt * 0.0003 * 100) / 100
     const netHandling = Math.abs(handlingFee) + Math.abs(returnHandlingFee)
-
-    const merchantCharge = -Math.round(salesAmt * 0.015 * 100) / 100
+    const isBagmati = rawStore.includes('bagmati') || stmtNo.includes('NPDZNLUE6T')
+    const merchantCharge = isBagmati ? -Math.round(salesAmt * 0.015 * 100) / 100 : 0.00
     const netMerchant = Math.abs(merchantCharge)
 
     // Commission Fees column = Total Grand Amount of Overall Tax Confirmation Summary
@@ -432,6 +641,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                 sellerAccount: sellerAccount === 'All' ? undefined : sellerAccount,
             })
         },
+        enabled: activeMainModule === 'financial-breakdown' && activeSubTab === 'orders',
         placeholderData: keepPreviousData,
         staleTime: 30 * 1000,
     })
@@ -446,6 +656,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                 sellerAccount: sellerAccount === 'All' ? undefined : sellerAccount,
             })
         },
+        enabled: activeMainModule === 'financial-breakdown' && activeSubTab === 'daily',
         staleTime: 2 * 60 * 1000,
     })
 
@@ -507,6 +718,39 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
         })
     }, [payoutData, currentFiscalYear])
 
+    const statementQueryParams = useMemo(() => {
+        return (payoutData || []).map((item: any) => ({
+            statementNumber: item.statement_number || '',
+            storeId: item.store_id,
+            period: formatStatementPeriod(item),
+            itemRevenue: parseFloat(String(item.item_revenue || '0').replace(/[^0-9.]/g, '')) || 0,
+            storeName: item.store_name || item.seller_account
+        }))
+    }, [payoutData])
+
+    // Query live statement dynamic breakdowns from API / DB
+    const { data: liveStatementMap = {} } = useQuery({
+        queryKey: ['daraz-live-statement-map', statementQueryParams],
+        queryFn: () => getBatchStatementBreakdowns(statementQueryParams),
+        staleTime: 0
+    })
+
+    const getLiveBreakdown = (item: any) => {
+        if (!item) return getStatementBreakdown(item)
+        const stmtNo = (item.statement_number || '').trim().toLowerCase()
+        const stmtRaw = (item.statement || item.created_at || '').trim().toLowerCase()
+        const rawStore = (item.store_name || item.seller_account || '').trim().toLowerCase()
+
+        const match = 
+            (stmtNo && liveStatementMap[`${stmtNo}_${rawStore}`]) ||
+            (stmtNo && liveStatementMap[stmtNo]) ||
+            (stmtRaw && liveStatementMap[`${stmtRaw}_${rawStore}`]) ||
+            (stmtRaw && liveStatementMap[stmtRaw])
+
+        if (match) return match
+        return getStatementBreakdown(item)
+    }
+
     // Report Summary Totals (Sales Amount, Commission Fees, TDS, Returned Orders, Receivable Amount) for Fiscal Year
     const reportTotals = useMemo(() => {
         let salesTotal = 0
@@ -516,7 +760,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
         let receivableTotal = 0
 
         filteredPayoutData.forEach((item: any) => {
-            const b = getStatementBreakdown(item)
+            const b = getLiveBreakdown(item)
 
             salesTotal += b.salesAmt
             commissionTotal += b.commFeesAmt
@@ -532,7 +776,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
             returnedTotal: Math.round(returnedTotal * 100) / 100,
             receivableTotal: Math.round(receivableTotal * 100) / 100
         }
-    }, [filteredPayoutData])
+    }, [filteredPayoutData, liveStatementMap])
 
     // Query exact unpaginated weekly financial breakdown details when weekly modal is open
     const { data: weeklyDetailsData, isLoading: isWeeklyDetailsLoading } = useQuery({
@@ -879,7 +1123,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
     }
 
     if (selectedStatement) {
-        const b = getStatementBreakdown(selectedStatement)
+        const b = getLiveBreakdown(selectedStatement)
 
         const isReleased = selectedStatement.paid === '1' || selectedStatement.paid === 1 || selectedStatement.paid === 'Paid' || selectedStatement.paid === 'Released'
         const statusLabel = isReleased ? 'Released' : 'Ready to Release'
@@ -1172,11 +1416,13 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                         <TableCell className="py-0.5 px-3 pl-4">Handling Fee</TableCell>
                                         <TableCell className="py-0.5 px-3 text-right font-mono text-red-600 dark:text-red-400">NPR {handlingFee.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
                                     </TableRow>
-                                    <TableRow className="hover:bg-gray-50/60 dark:hover:bg-zinc-800/40 text-gray-600 dark:text-gray-400">
-                                        <TableCell className="py-0.5 px-3"></TableCell>
-                                        <TableCell className="py-0.5 px-3 pl-4">Merchant Managed Services Charge</TableCell>
-                                        <TableCell className="py-0.5 px-3 text-right font-mono text-red-600 dark:text-red-400">NPR {merchantCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
-                                    </TableRow>
+                                    {merchantCharge !== 0 && (
+                                        <TableRow className="hover:bg-gray-50/60 dark:hover:bg-zinc-800/40 text-gray-600 dark:text-gray-400">
+                                            <TableCell className="py-0.5 px-3"></TableCell>
+                                            <TableCell className="py-0.5 px-3 pl-4">Merchant Managed Services Charge</TableCell>
+                                            <TableCell className="py-0.5 px-3 text-right font-mono text-red-600 dark:text-red-400">NPR {merchantCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                                        </TableRow>
+                                    )}
                                     <TableRow className="hover:bg-gray-50/60 dark:hover:bg-zinc-800/40 text-gray-600 dark:text-gray-400">
                                         <TableCell className="py-0.5 px-3"></TableCell>
                                         <TableCell className="py-0.5 px-3 pl-4">Handling Fee for Return</TableCell>
@@ -1264,15 +1510,6 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                         isSubtract: true
                                     },
                                     {
-                                        id: 'free-ship',
-                                        title: "Tax Invoice - Free Shipping Max Fee",
-                                        feeName: "Free Shipping Max Fee",
-                                        feeAmt: Math.abs(freeShippingMaxFee),
-                                        reversalName: "Reversal of Free Shipping Max Fee",
-                                        reversalAmt: Math.abs(freeShipRefunded),
-                                        isSubtract: true
-                                    },
-                                    {
                                         id: 'coins',
                                         title: "Tax Invoice - Daraz Coins Discount Participation Fee",
                                         feeName: "Daraz Coins Discount Participation Fee",
@@ -1282,6 +1519,15 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                         isSubtract: true
                                     },
                                     {
+                                        id: 'handling',
+                                        title: "Tax Invoice - Handling Fee",
+                                        feeName: "Handling Fee",
+                                        feeAmt: Math.abs(handlingFee),
+                                        reversalName: "Handling Fee for Return",
+                                        reversalAmt: Math.abs(returnHandlingFee),
+                                        isSubtract: false // Sum for handling fee + return handling fee
+                                    },
+                                    {
                                         id: 'merchant',
                                         title: "Tax Invoice - Merchant Managed Services Charge",
                                         feeName: "Merchant Managed Services Charge",
@@ -1289,17 +1535,8 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                         reversalName: null,
                                         reversalAmt: 0,
                                         isSubtract: false
-                                    },
-                                    {
-                                        id: 'handling',
-                                        title: "Tax Invoice - Handling Fee & Return Handling Fee",
-                                        feeName: "Handling Fee",
-                                        feeAmt: Math.abs(handlingFee),
-                                        reversalName: "Handling Fee for Return",
-                                        reversalAmt: Math.abs(returnHandlingFee),
-                                        isSubtract: false // Sum for handling fee + return handling fee
                                     }
-                                ]
+                                ].filter(item => (item.isSubtract ? item.feeAmt - item.reversalAmt : item.feeAmt + item.reversalAmt) > 0)
 
                                 let totalTaxableSum = 0
                                 let totalVatSum = 0
@@ -2298,7 +2535,7 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
                                         </TableHeader>
                                         <TableBody>
                                             {(filteredPayoutData || []).map((item: any, idx: number) => {
-                                                const { salesAmt, commFeesAmt, tdsAmt, returnedAmt, netClosingCalc } = getStatementBreakdown(item)
+                                                const { salesAmt, commFeesAmt, tdsAmt, returnedAmt, netClosingCalc } = getLiveBreakdown(item)
 
                                                 const rawStore = item.store_name || item.seller_account
                                                 const storeLabel = (rawStore && rawStore !== 'All')
