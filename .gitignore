@@ -67,3 +67,4 @@ inspect_*.js
 test_*.js
 scaffold_*.js
 run_*.js
+supabase/.temp/

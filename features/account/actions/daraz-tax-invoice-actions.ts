@@ -1,7 +1,6 @@
 'use server'
 
 import { createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
 import { format } from 'date-fns'
 
 export interface DarazTaxInvoiceRecord {
@@ -34,7 +33,6 @@ export interface GetDarazTaxInvoicesParams {
     verificationStatus?: 'all' | 'verified' | 'unverified'
 }
 
-import { fetchStatementTaxInvoicesBatch } from '@/features/sales/actions/daraz-finance-service'
 
 /**
  * Fetch live statement tax invoices from database / API
@@ -53,20 +51,6 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
     grandTotal: number
 }>>> {
     try {
-        if (statements && statements.length > 0) {
-            const formatted = statements.map(s => ({
-                statementNumber: s.statementNumber || '',
-                storeId: s.storeId,
-                period: s.period,
-                itemRevenue: s.itemRevenue,
-                storeName: s.storeName
-            }))
-            const batchMap = await fetchStatementTaxInvoicesBatch(formatted)
-            if (Object.keys(batchMap).length > 0) {
-                return batchMap
-            }
-        }
-
         const supabase = await createAdminClient()
 
         const { data: storeRows } = await supabase
@@ -80,20 +64,39 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
             }
         })
 
-        // Fetch transactions from daraz_finance_transactions
-        let allTx: any[] = []
-        let from = 0
-        const step = 1000
-        while (true) {
-            const { data: chunk, error } = await supabase
-                .from('daraz_finance_transactions')
-                .select('statement, store_id, fee_name, transaction_type, amount, transaction_date')
-                .range(from, from + step - 1)
+        const stmtNumbers = (statements || [])
+            .map(s => s.statementNumber?.trim())
+            .filter(Boolean) as string[]
 
-            if (error || !chunk || chunk.length === 0) break
-            allTx.push(...chunk)
-            if (chunk.length < step) break
-            from += step
+        // Fetch transactions from daraz_finance_transactions fast in one batch
+        let allTx: any[] = []
+        if (stmtNumbers.length > 0) {
+            // Fetch in batches of 100 statements
+            const batchSize = 100
+            for (let i = 0; i < stmtNumbers.length; i += batchSize) {
+                const batch = stmtNumbers.slice(i, i + batchSize)
+                const { data: chunk, error } = await supabase
+                    .from('daraz_finance_transactions')
+                    .select('statement, store_id, fee_name, transaction_type, amount, transaction_date')
+                    .in('statement', batch)
+                if (!error && chunk) {
+                    allTx.push(...chunk)
+                }
+            }
+        } else {
+            let from = 0
+            const step = 1000
+            while (true) {
+                const { data: chunk, error } = await supabase
+                    .from('daraz_finance_transactions')
+                    .select('statement, store_id, fee_name, transaction_type, amount, transaction_date')
+                    .range(from, from + step - 1)
+
+                if (error || !chunk || chunk.length === 0) break
+                allTx.push(...chunk)
+                if (chunk.length < step) break
+                from += step
+            }
         }
 
         if (allTx.length === 0) return {}
@@ -300,7 +303,6 @@ export async function createDarazTaxInvoice(data: {
             throw new Error(`Failed to create tax invoice: ${error.message}`)
         }
 
-        revalidatePath('/dashboard/account/pan-vat-billing/report')
         return { success: true, data: inserted }
     } catch (err: any) {
         console.error('createDarazTaxInvoice error:', err)
@@ -331,7 +333,6 @@ export async function updateDarazTaxInvoiceVerification(id: string, isVerified: 
             throw new Error(`Failed to update verification: ${error.message}`)
         }
 
-        revalidatePath('/dashboard/account/pan-vat-billing/report')
         return { success: true }
     } catch (err: any) {
         console.error('updateDarazTaxInvoiceVerification error:', err)
@@ -356,7 +357,6 @@ export async function deleteDarazTaxInvoice(id: string) {
             throw new Error(`Failed to delete invoice: ${error.message}`)
         }
 
-        revalidatePath('/dashboard/account/pan-vat-billing/report')
         return { success: true }
     } catch (err: any) {
         console.error('deleteDarazTaxInvoice error:', err)
@@ -387,10 +387,11 @@ export async function saveOrUpdateDarazTaxInvoice(data: {
         const supabase = await createAdminClient()
         const isVerified = !!data.is_verified
         const verifiedAt = isVerified ? new Date().toISOString() : null
+        const now = new Date().toISOString()
 
         if (data.id) {
-            // Update existing record
-            const { data: updated, error } = await supabase
+            // Fast path: update by known PK — no select needed
+            const { error } = await supabase
                 .from('daraz_tax_invoices')
                 .update({
                     date: data.date,
@@ -406,64 +407,23 @@ export async function saveOrUpdateDarazTaxInvoice(data: {
                     verified_at: verifiedAt,
                     notes: data.notes?.trim() || null,
                     fiscal_year_id: data.fiscal_year_id || null,
-                    updated_at: new Date().toISOString()
+                    updated_at: now
                 })
                 .eq('id', data.id)
-                .select()
-                .single()
 
             if (error) {
                 console.error('[Daraz Tax Invoices] Update error:', error)
                 throw new Error(`Failed to update tax invoice: ${error.message}`)
             }
-            revalidatePath('/dashboard/account/pan-vat-billing/report')
-            return { success: true, data: updated }
-        } else {
-            // Check if existing auto record exists by statement_number, store_name, description
-            if (data.statement_number) {
-                const { data: existing } = await supabase
-                    .from('daraz_tax_invoices')
-                    .select('id')
-                    .eq('statement_number', data.statement_number)
-                    .eq('store_name', data.store_name)
-                    .eq('description', data.description.trim())
-                    .maybeSingle()
+            return { success: true }
+        }
 
-                if (existing) {
-                    const { data: updated, error } = await supabase
-                        .from('daraz_tax_invoices')
-                        .update({
-                            date: data.date,
-                            date_period: data.date_period,
-                            store_name: data.store_name,
-                            company_name: data.company_name,
-                            invoice_number: data.invoice_number?.trim() || null,
-                            description: data.description.trim(),
-                            taxable_amount: data.taxable_amount,
-                            vat_amount: data.vat_amount,
-                            grand_total: data.grand_total,
-                            is_verified: isVerified,
-                            verified_at: verifiedAt,
-                            notes: data.notes?.trim() || null,
-                            fiscal_year_id: data.fiscal_year_id || null,
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('id', existing.id)
-                        .select()
-                        .single()
-
-                    if (error) {
-                        throw new Error(`Failed to update tax invoice: ${error.message}`)
-                    }
-                    revalidatePath('/dashboard/account/pan-vat-billing/report')
-                    return { success: true, data: updated }
-                }
-            }
-
-            // Insert new record
-            const { data: inserted, error } = await supabase
-                .from('daraz_tax_invoices')
-                .insert({
+        // No id — use upsert via the unique index (statement_number, store_name, description)
+        // This is a single round-trip instead of lookup + separate update.
+        const { error } = await supabase
+            .from('daraz_tax_invoices')
+            .upsert(
+                {
                     statement_number: data.statement_number || null,
                     date: data.date,
                     date_period: data.date_period,
@@ -479,19 +439,20 @@ export async function saveOrUpdateDarazTaxInvoice(data: {
                     source: data.statement_number ? 'auto' : 'manual',
                     notes: data.notes?.trim() || null,
                     fiscal_year_id: data.fiscal_year_id || null,
-                    updated_at: new Date().toISOString()
-                })
-                .select()
-                .single()
+                    updated_at: now
+                },
+                {
+                    onConflict: 'statement_number,store_name,description',
+                    ignoreDuplicates: false
+                }
+            )
 
-            if (error) {
-                console.error('[Daraz Tax Invoices] Insert error:', error)
-                throw new Error(`Failed to save tax invoice: ${error.message}`)
-            }
-
-            revalidatePath('/dashboard/account/pan-vat-billing/report')
-            return { success: true, data: inserted }
+        if (error) {
+            console.error('[Daraz Tax Invoices] Upsert error:', error)
+            throw new Error(`Failed to save tax invoice: ${error.message}`)
         }
+
+        return { success: true }
     } catch (err: any) {
         console.error('saveOrUpdateDarazTaxInvoice error:', err)
         throw err
@@ -500,6 +461,8 @@ export async function saveOrUpdateDarazTaxInvoice(data: {
 
 /**
  * Sync auto-calculated statement tax invoices into database
+ * Uses a single bulk upsert (not a sequential loop) to avoid DB lock contention.
+ * Verified records are NOT overwritten — they are excluded before calling this action.
  */
 export async function syncStatementTaxInvoicesToDB(invoices: Array<{
     statement_number?: string
@@ -518,7 +481,7 @@ export async function syncStatementTaxInvoicesToDB(invoices: Array<{
 
         const supabase = await createAdminClient()
 
-        // Prune any incorrect auto MMS invoices for non-Bagmati stores
+        // Prune incorrect auto MMS invoices for non-Bagmati stores
         await supabase
             .from('daraz_tax_invoices')
             .delete()
@@ -526,74 +489,57 @@ export async function syncStatementTaxInvoicesToDB(invoices: Array<{
             .ilike('description', '%merchant managed%')
             .not('store_name', 'ilike', '%bagmati%')
 
-        // Fetch existing records for matching statements to avoid overwriting user edits or verification state
+        // Fetch verified record keys so we don't overwrite them
         const statementNumbers = Array.from(new Set(invoices.map(i => i.statement_number).filter(Boolean)))
-        
-        let existingMap: Record<string, { id: string; is_verified: boolean }> = {}
+        const verifiedKeys = new Set<string>()
+
         if (statementNumbers.length > 0) {
-            const { data: existingRows } = await supabase
+            const { data: verifiedRows } = await supabase
                 .from('daraz_tax_invoices')
-                .select('id, statement_number, store_name, description, is_verified')
+                .select('statement_number, store_name, description')
                 .in('statement_number', statementNumbers)
                 .eq('source', 'auto')
+                .eq('is_verified', true)
 
-            existingRows?.forEach((r: any) => {
-                const key = `${r.statement_number}_${r.store_name}_${r.description}`
-                existingMap[key] = { id: r.id, is_verified: !!r.is_verified }
+            verifiedRows?.forEach((r: any) => {
+                verifiedKeys.add(`${r.statement_number}_${r.store_name}_${r.description}`)
             })
         }
 
-        const toInsert: any[] = []
-        const toUpdate: Array<{ id: string; data: any }> = []
+        // Only sync non-verified records
+        const toUpsert = invoices
+            .filter(item => item.statement_number && !verifiedKeys.has(`${item.statement_number}_${item.store_name}_${item.description}`))
+            .map(item => ({
+                statement_number: item.statement_number!,
+                date: item.date,
+                date_period: item.date_period,
+                store_name: item.store_name,
+                company_name: item.company_name,
+                description: item.description,
+                taxable_amount: item.taxable_amount,
+                vat_amount: item.vat_amount,
+                grand_total: item.grand_total,
+                is_verified: false,
+                source: 'auto' as const,
+                fiscal_year_id: item.fiscal_year_id || null,
+                updated_at: new Date().toISOString()
+            }))
 
-        invoices.forEach(item => {
-            const key = `${item.statement_number}_${item.store_name}_${item.description}`
-            const existing = existingMap[key]
-
-            if (existing) {
-                // If user has locked/verified this invoice, NEVER overwrite their custom values!
-                if (!existing.is_verified) {
-                    toUpdate.push({
-                        id: existing.id,
-                        data: {
-                            date: item.date,
-                            date_period: item.date_period,
-                            company_name: item.company_name,
-                            taxable_amount: item.taxable_amount,
-                            vat_amount: item.vat_amount,
-                            grand_total: item.grand_total,
-                            updated_at: new Date().toISOString()
-                        }
-                    })
-                }
-            } else {
-                toInsert.push({
-                    statement_number: item.statement_number || null,
-                    date: item.date,
-                    date_period: item.date_period,
-                    store_name: item.store_name,
-                    company_name: item.company_name,
-                    description: item.description,
-                    taxable_amount: item.taxable_amount,
-                    vat_amount: item.vat_amount,
-                    grand_total: item.grand_total,
-                    is_verified: false,
-                    source: 'auto',
-                    fiscal_year_id: item.fiscal_year_id || null,
-                    updated_at: new Date().toISOString()
+        if (toUpsert.length > 0) {
+            // Single bulk upsert — replaces the old sequential for-await loop
+            const { error } = await supabase
+                .from('daraz_tax_invoices')
+                .upsert(toUpsert, {
+                    onConflict: 'statement_number,store_name,description',
+                    ignoreDuplicates: false
                 })
+
+            if (error) {
+                console.warn('[Daraz Tax Invoices] Bulk upsert warning:', error.message)
             }
-        })
-
-        for (const u of toUpdate) {
-            await supabase.from('daraz_tax_invoices').update(u.data).eq('id', u.id)
         }
 
-        if (toInsert.length > 0) {
-            await supabase.from('daraz_tax_invoices').insert(toInsert)
-        }
-
-        return { success: true, count: invoices.length }
+        return { success: true, count: toUpsert.length }
     } catch (err: any) {
         console.warn('[Daraz Tax Invoices] Sync warning:', err.message)
         return { success: false, error: err.message }

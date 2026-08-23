@@ -31,7 +31,7 @@ import {
     ShieldCheck
 } from 'lucide-react'
 import Link from 'next/link'
-import { Card, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, TableFooter, Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui-shim'
+import { Card, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, TableFooter, Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui-shim'
 import { useQuery } from '@tanstack/react-query'
 import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
 import { getCompanyDetails } from '@/features/settings/actions/company-details-actions'
@@ -209,7 +209,7 @@ export default function PanVatReportPage() {
     const { data: payoutData = [] } = useQuery({
         queryKey: ['daraz-payout-status-report-page'],
         queryFn: () => fetchDarazPayoutStatus(),
-        staleTime: 0
+        staleTime: 1000 * 60 * 5
     })
 
     const statementQueryParams = useMemo(() => {
@@ -226,7 +226,8 @@ export default function PanVatReportPage() {
     const { data: liveTaxMap = {} } = useQuery({
         queryKey: ['daraz-live-tax-map', statementQueryParams],
         queryFn: () => getLiveDarazStatementTaxMap(statementQueryParams),
-        staleTime: 0
+        staleTime: 1000 * 60 * 5,
+        enabled: statementQueryParams.length > 0
     })
 
     // Helper to get exact tax invoices for a statement
@@ -1713,6 +1714,9 @@ export default function PanVatReportPage() {
                                 <DialogTitle className="text-[17px] font-extrabold text-slate-900 dark:text-slate-100">
                                     Add Daraz Tax Invoice
                                 </DialogTitle>
+                                <DialogDescription className="sr-only">
+                                    Add a received PDF tax invoice from Daraz or manual adjustment
+                                </DialogDescription>
                                 <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-0.5">
                                     Add a received PDF tax invoice from Daraz or manual adjustment
                                 </p>
@@ -1932,8 +1936,11 @@ export default function PanVatReportPage() {
                         <div className="flex items-center justify-between">
                             <DialogTitle className="text-lg font-black text-slate-900 dark:text-slate-100 flex items-center gap-2">
                                 <ShieldCheck className="h-5 w-5 text-emerald-600" />
-                                Verify & Lock Tax Invoice
+                                Verify &amp; Lock Tax Invoice
                             </DialogTitle>
+                            <DialogDescription className="sr-only">
+                                Edit and lock a Daraz tax invoice to protect it from automated API recalculations.
+                            </DialogDescription>
                             {activeVerifyRow?.isVerified ? (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300">
                                     <Lock className="h-3 w-3 text-emerald-600" />

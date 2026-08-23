@@ -257,6 +257,18 @@ const DialogTitle = React.forwardRef<
 ))
 DialogTitle.displayName = DialogPrimitive.Title.displayName
 
+const DialogDescription = React.forwardRef<
+    React.ElementRef<typeof DialogPrimitive.Description>,
+    React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+    <DialogPrimitive.Description
+        ref={ref}
+        className={cn("text-sm text-muted-foreground", className)}
+        {...props}
+    />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName
+
 // --- SELECT (MOCK for now, as it requires complex Radix setup. Using native select in modal, but exporting symbols to satisfy imports if needed) ---
 // Actually, let's just export a simple Select shim that renders children. The Modal uses native <select> inside, but imports Select components. 
 // Wait, the Modal uses Radix-like Select components in the import list BUT uses native <select> in the compiled JSX visually? 
@@ -521,6 +533,7 @@ export {
     DialogHeader,
     DialogFooter,
     DialogTitle,
+    DialogDescription,
     Select,
     SelectGroup,
     SelectValue,
