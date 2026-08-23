@@ -149,6 +149,10 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
             const commRefund = getFee(group, 'commission fee refunded')
             const commNet = Math.max(0, Math.round((commCharge - commRefund) * 100) / 100)
 
+            const freeShipCharge = getFee(group, 'free shipping max fee')
+            const freeShipRefund = getFee(group, 'reversal of free shipping max fee')
+            const freeShipNet = Math.max(0, Math.round((freeShipCharge - freeShipRefund) * 100) / 100)
+
             const coinsCharge = getFee(group, 'daraz coins discount participation fee')
             const coinsRefund = getFee(group, 'reversal of daraz coins discount participation fee')
             const coinsNet = Math.max(0, Math.round((coinsCharge - coinsRefund) * 100) / 100)
@@ -166,6 +170,7 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
                 { desc: 'Tax Invoice - Co Funded Voucher Max', net: voucherNet },
                 { desc: 'Tax Invoice - Payment Fee', net: paymentNet },
                 { desc: 'Tax Invoice - Commission Fee', net: commNet },
+                { desc: 'Tax Invoice - Free Shipping Max', net: freeShipNet },
                 { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: coinsNet },
                 { desc: 'Tax Invoice - Handling Fee', net: handlingNet },
                 ...(isBagmati && merchantNet > 0 ? [{ desc: 'Tax Invoice - Merchant Managed Services Charge', net: merchantNet }] : [])

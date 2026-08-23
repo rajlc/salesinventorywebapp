@@ -256,6 +256,7 @@ export default function PanVatReportPage() {
             { desc: 'Tax Invoice - Co Funded Voucher Max', net: Math.max(0, Math.round((Math.abs(b.coFundedVoucher) - Math.abs(b.voucherReversal)) * 100) / 100) },
             { desc: 'Tax Invoice - Payment Fee', net: Math.max(0, Math.round((Math.abs(b.paymentFee) - Math.abs(b.paymentFeeRefunded)) * 100) / 100) },
             { desc: 'Tax Invoice - Commission Fee', net: Math.max(0, Math.round((Math.abs(b.commissionFee) - Math.abs(b.commissionRefunded)) * 100) / 100) },
+            { desc: 'Tax Invoice - Free Shipping Max', net: Math.max(0, Math.round((Math.abs(b.freeShippingMaxFee) - Math.abs(b.freeShipRefunded)) * 100) / 100) },
             { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: Math.max(0, Math.round((Math.abs(b.coinsFee) - Math.abs(b.coinsFeeRefunded)) * 100) / 100) },
             { desc: 'Tax Invoice - Handling Fee', net: Math.max(0, Math.round((Math.abs(b.handlingFee) + Math.abs(b.returnHandlingFee)) * 100) / 100) },
             ...(isBagmati && b.merchantCharge && b.merchantCharge !== 0 ? [{ desc: 'Tax Invoice - Merchant Managed Services Charge', net: Math.max(0, Math.round(Math.abs(b.merchantCharge) * 100) / 100) }] : [])
@@ -1816,6 +1817,7 @@ export default function PanVatReportPage() {
                                     'Tax Invoice - Commission Fee',
                                     'Tax Invoice - Payment Fee',
                                     'Tax Invoice - Co Funded Voucher Max',
+                                    'Tax Invoice - Free Shipping Max',
                                     'Tax Invoice - Daraz Coins Discount Participation Fee',
                                     'Tax Invoice - Handling Fee',
                                     'Tax Invoice - Merchant Managed Services Charge'

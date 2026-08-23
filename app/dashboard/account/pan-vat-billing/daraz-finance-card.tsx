@@ -426,6 +426,10 @@ export function getStatementBreakdown(item: any) {
     const commissionRefunded = Math.round(salesAmt * 0.0048 * 100) / 100
     const netCommission = Math.max(0, Math.abs(commissionFee) - commissionRefunded)
 
+    const freeShippingMaxFee = -Math.round(salesAmt * 0.045 * 100) / 100
+    const freeShipRefunded = Math.round(salesAmt * 0.0021 * 100) / 100
+    const netFreeShip = Math.max(0, Math.abs(freeShippingMaxFee) - freeShipRefunded)
+
     const coinsFee = -Math.round(salesAmt * 0.0042 * 100) / 100
     const coinsFeeRefunded = Math.round(salesAmt * 0.00016 * 100) / 100
     const netCoins = Math.max(0, Math.abs(coinsFee) - coinsFeeRefunded)
@@ -438,7 +442,7 @@ export function getStatementBreakdown(item: any) {
     const netMerchant = Math.abs(merchantCharge)
 
     // Commission Fees column = Total Grand Amount of Overall Tax Confirmation Summary
-    const commFeesAmt = Math.round((netVoucher + netPayment + netCommission + netCoins + netHandling + netMerchant) * 100) / 100
+    const commFeesAmt = Math.round((netVoucher + netPayment + netCommission + netFreeShip + netCoins + netHandling + netMerchant) * 100) / 100
 
     // TDS withholding (~0.95% of sales)
     const tdsAmt = salesAmt > 0 ? -Math.round((salesAmt * 0.0095) * 100) / 100 : 0

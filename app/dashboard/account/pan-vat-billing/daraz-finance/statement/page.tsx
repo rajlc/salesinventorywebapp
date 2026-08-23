@@ -268,21 +268,26 @@ function TaxPanel({ b, fromApi, grouped }: {
     const commRefund = fromApi ? findFee('Commission Fee Refunded') : Math.abs(b.commissionRefunded)
     const commNet = Math.round((commCharge - commRefund) * 100) / 100
 
-    // 4. Daraz Coins Discount Participation Fee: (Daraz Coins Discount Participation Fee - Reversal of DARAZ Coins Discount Participation Fee)
+    // 4. Free Shipping Max: (Free Shipping Max Fee - Reversal of Free Shipping Max Fee)
+    const freeShipCharge = fromApi ? findFee('Free Shipping Max Fee') : Math.abs(b.freeShippingMaxFee)
+    const freeShipRefund = fromApi ? findFee('Reversal of Free Shipping Max Fee') : Math.abs(b.freeShipRefunded)
+    const freeShipNet = Math.round((freeShipCharge - freeShipRefund) * 100) / 100
+
+    // 5. Daraz Coins Discount Participation Fee: (Daraz Coins Discount Participation Fee - Reversal of DARAZ Coins Discount Participation Fee)
     const coinsCharge = fromApi ? findFee('Daraz Coins Discount Participation Fee') : Math.abs(b.coinsFee)
     const coinsRefund = fromApi ? findFee('Reversal of DARAZ Coins Discount Participation Fee') : Math.abs(b.coinsFeeRefunded)
     const coinsNet = Math.round((coinsCharge - coinsRefund) * 100) / 100
 
-    // 5. Handling Fee: (Handling Fee + Handling Fee for Return)
+    // 6. Handling Fee: (Handling Fee + Handling Fee for Return)
     const handlingCharge = fromApi ? findFee('Handling Fee') : Math.abs(b.handlingFee)
     const returnHandlingCharge = fromApi ? findFee('Handling Fee for Return') : Math.abs(b.returnHandlingFee)
     const handlingNet = Math.round((handlingCharge + returnHandlingCharge) * 100) / 100
 
-    // 6. Merchant Managed Services Charge: (Merchant Managed Services Charge)
+    // 7. Merchant Managed Services Charge: (Merchant Managed Services Charge)
     const merchantCharge = fromApi ? findFee('Merchant Managed Services Charge') : Math.abs(b.merchantCharge)
     const merchantNet = Math.round(merchantCharge * 100) / 100
 
-    // Strict list of ONLY the 6 allowed Tax Invoices
+    // Strict list of allowed Tax Invoices
     const rawInvoices = [
         {
             title: 'Tax Invoice — Co Funded Voucher Max',
@@ -307,6 +312,14 @@ function TaxPanel({ b, fromApi, grouped }: {
                 ...(commRefund > 0 ? [['Commission Fee Refunded', -commRefund]] : [])
             ] as [string, number][],
             netAmt: commNet
+        },
+        {
+            title: 'Tax Invoice - Free Shipping Max',
+            items: [
+                ['Free Shipping Max Fee', freeShipCharge],
+                ...(freeShipRefund > 0 ? [['Reversal of Free Shipping Max Fee', -freeShipRefund]] : [])
+            ] as [string, number][],
+            netAmt: freeShipNet
         },
         {
             title: 'Tax Invoice - Daraz Coins Discount Participation Fee',

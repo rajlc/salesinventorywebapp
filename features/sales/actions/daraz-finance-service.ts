@@ -1022,6 +1022,10 @@ export async function extractTaxInvoicesFromGrouped(grouped: Record<string, Arra
     const commRefund = findFee('Commission Fee Refunded')
     const commNet = Math.round((commCharge - commRefund) * 100) / 100
 
+    const freeShipCharge = findFee('Free Shipping Max Fee')
+    const freeShipRefund = findFee('Reversal of Free Shipping Max Fee')
+    const freeShipNet = Math.round((freeShipCharge - freeShipRefund) * 100) / 100
+
     const coinsCharge = findFee('Daraz Coins Discount Participation Fee')
     const coinsRefund = findFee('Reversal of DARAZ Coins Discount Participation Fee')
     const coinsNet = Math.round((coinsCharge - coinsRefund) * 100) / 100
@@ -1037,6 +1041,7 @@ export async function extractTaxInvoicesFromGrouped(grouped: Record<string, Arra
         { desc: 'Tax Invoice - Co Funded Voucher Max', net: voucherNet },
         { desc: 'Tax Invoice - Payment Fee', net: paymentNet },
         { desc: 'Tax Invoice - Commission Fee', net: commNet },
+        { desc: 'Tax Invoice - Free Shipping Max', net: freeShipNet },
         { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: coinsNet },
         { desc: 'Tax Invoice - Handling Fee', net: handlingNet },
         { desc: 'Tax Invoice - Merchant Managed Services Charge', net: merchantNet }
