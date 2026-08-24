@@ -67,7 +67,7 @@ export interface DarazAvgPriceItem {
 }
 
 async function getSoldQuantitiesMap(days: number) {
-    const supabase = await createClient()
+    const supabase = await createAdminClient()
 
     const startDate = new Date()
     startDate.setDate(startDate.getDate() - days)
@@ -225,7 +225,7 @@ export async function getDarazAvgPrices(days: number | string = 60) {
 }
 
 async function _getDarazAvgPricesInner(days: number | string = 60) {
-    const supabase = await createClient()
+    const supabase = await createAdminClient()
 
     const daysNum = typeof days === 'number' ? days : 60
     // 1. Fetch soldQtyMap concurrently

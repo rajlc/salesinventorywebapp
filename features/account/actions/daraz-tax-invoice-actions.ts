@@ -2,6 +2,7 @@
 
 import { createAdminClient } from '@/lib/supabase/server'
 import { format } from 'date-fns'
+import { getStatementBreakdown, extractTaxInvoicesFromBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
 
 export interface DarazTaxInvoiceRecord {
     id: string
@@ -64,17 +65,22 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
             }
         })
 
-        const stmtNumbers = (statements || [])
+        const stmtNumbers = Array.from(new Set((statements || [])
             .map(s => s.statementNumber?.trim())
-            .filter(Boolean) as string[]
+            .filter(Boolean) as string[]))
 
-        // Fetch transactions from daraz_finance_transactions fast in one batch
+        const periods = Array.from(new Set((statements || [])
+            .map(s => s.period?.trim())
+            .filter(Boolean) as string[]))
+
+        const searchTokens = Array.from(new Set([...stmtNumbers, ...periods]))
+
+        // Fetch transactions from daraz_finance_transactions fast in batches
         let allTx: any[] = []
-        if (stmtNumbers.length > 0) {
-            // Fetch in batches of 100 statements
-            const batchSize = 100
-            for (let i = 0; i < stmtNumbers.length; i += batchSize) {
-                const batch = stmtNumbers.slice(i, i + batchSize)
+        if (searchTokens.length > 0) {
+            const batchSize = 60
+            for (let i = 0; i < searchTokens.length; i += batchSize) {
+                const batch = searchTokens.slice(i, i + batchSize)
                 const { data: chunk, error } = await supabase
                     .from('daraz_finance_transactions')
                     .select('statement, store_id, fee_name, transaction_type, amount, transaction_date')
@@ -83,25 +89,9 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
                     allTx.push(...chunk)
                 }
             }
-        } else {
-            let from = 0
-            const step = 1000
-            while (true) {
-                const { data: chunk, error } = await supabase
-                    .from('daraz_finance_transactions')
-                    .select('statement, store_id, fee_name, transaction_type, amount, transaction_date')
-                    .range(from, from + step - 1)
-
-                if (error || !chunk || chunk.length === 0) break
-                allTx.push(...chunk)
-                if (chunk.length < step) break
-                from += step
-            }
         }
 
-        if (allTx.length === 0) return {}
-
-        // Group by statement & store
+        // Group DB transactions by statement & store
         const groupedByStatement: Record<string, Record<string, number>> = {}
 
         allTx.forEach(tx => {
@@ -136,6 +126,7 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
 
         const resultMap: Record<string, Array<{ desc: string; net: number; taxableAmt: number; vatAmt: number; grandTotal: number }>> = {}
 
+        // 1. Process statements that have DB transactions
         for (const [key, group] of Object.entries(groupedByStatement)) {
             const voucherCharge = getFee(group, 'co-funded voucher max')
             const voucherRefund = getFee(group, 'co-funded voucher max reversal')
@@ -191,6 +182,45 @@ export async function getLiveDarazStatementTaxMap(statements?: Array<{
                     }
                 })
         }
+
+        // 2. Ensure ALL requested statements are populated with exact calculated tax invoices
+        (statements || []).forEach(stmt => {
+            const stmtNo = (stmt.statementNumber || '').trim().toLowerCase()
+            const periodStr = (stmt.period || '').trim().toLowerCase()
+            const rawStore = (stmt.storeName || '').trim().toLowerCase()
+            const isBagmati = rawStore.includes('bagmati') || stmtNo.includes('npdznlue6t')
+
+            const key1 = stmtNo
+            const key2 = `${stmtNo}_${rawStore}`
+            const key3 = periodStr
+            const key4 = `${periodStr}_${rawStore}`
+
+            const existing = (key2 && resultMap[key2]) || (key1 && resultMap[key1]) || (key4 && resultMap[key4]) || (key3 && resultMap[key3])
+
+            if (existing && existing.length > 0) {
+                // Ensure all aliases have the record
+                if (key1) resultMap[key1] = existing
+                if (key2) resultMap[key2] = existing
+                if (key3) resultMap[key3] = existing
+                if (key4) resultMap[key4] = existing
+            } else {
+                // Compute from statement breakdown
+                const b = getStatementBreakdown({
+                    statement_number: stmt.statementNumber,
+                    statement: stmt.period,
+                    created_at: stmt.period,
+                    store_name: stmt.storeName,
+                    item_revenue: stmt.itemRevenue
+                })
+
+                const taxItems = extractTaxInvoicesFromBreakdown(b, isBagmati)
+
+                if (key1) resultMap[key1] = taxItems
+                if (key2) resultMap[key2] = taxItems
+                if (key3) resultMap[key3] = taxItems
+                if (key4) resultMap[key4] = taxItems
+            }
+        })
 
         return resultMap
     } catch (err: any) {

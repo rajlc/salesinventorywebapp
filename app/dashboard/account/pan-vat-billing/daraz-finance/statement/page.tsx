@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { Card, Table, TableHeader, TableHead, TableBody, TableRow, TableCell, Button } from '@/components/ui-shim'
 import { fetchDarazStatementLineItems, syncDarazFinances } from '@/features/sales/actions/daraz-finance-service'
-import { getStatementBreakdown } from '../../daraz-finance-card'
+import { getStatementBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
 import { toast } from 'sonner'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -290,7 +290,7 @@ function TaxPanel({ b, fromApi, grouped }: {
     // Strict list of allowed Tax Invoices
     const rawInvoices = [
         {
-            title: 'Tax Invoice — Co Funded Voucher Max',
+            title: 'Tax Invoice - Co Funded Voucher Max',
             items: [
                 ['Co-funded Voucher Max', voucherCharge],
                 ...(voucherRefund > 0 ? [['Co-funded Voucher Max Reversal', -voucherRefund]] : [])
@@ -298,7 +298,7 @@ function TaxPanel({ b, fromApi, grouped }: {
             netAmt: voucherNet
         },
         {
-            title: 'Tax Invoice - Payment Fees',
+            title: 'Tax Invoice - Payment Fee',
             items: [
                 ['Payment Fee', paymentCharge],
                 ...(paymentRefund > 0 ? [['Payment Fee Refunded', -paymentRefund]] : [])

@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import axios from 'axios'
 
@@ -414,7 +414,7 @@ export async function saveCompetitorLinks(
  * and 7-day price update alert status.
  */
 export async function getCompetitorDataForProducts(productIds?: string[]): Promise<Record<string, CompetitorItem[]>> {
-    const supabase = await createClient()
+    const supabase = await createAdminClient()
 
     let query = supabase
         .from('daraz_competitor_products')

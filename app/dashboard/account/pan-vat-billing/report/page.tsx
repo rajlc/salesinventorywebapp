@@ -40,7 +40,7 @@ import { getSalesBills } from '@/features/sales/actions/sales-bill-actions'
 import { getDailyDarazReportData } from '@/features/account/actions/daraz-transaction-actions'
 import { useOnlineStores } from '@/features/settings/hooks/useStores'
 import { formatNepaliCurrency } from '@/lib/utils/date-converter'
-import { getStatementBreakdown } from '../daraz-finance-card'
+import { getStatementBreakdown, extractTaxInvoicesFromBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
 import { fetchDarazPayoutStatus } from '@/features/sales/actions/daraz-finance-service'
 import {
     getStoredDarazTaxInvoices,
@@ -252,28 +252,7 @@ export default function PanVatReportPage() {
         }
 
         const b = getStatementBreakdown(item)
-        const raw = [
-            { desc: 'Tax Invoice - Co Funded Voucher Max', net: Math.max(0, Math.round((Math.abs(b.coFundedVoucher) - Math.abs(b.voucherReversal)) * 100) / 100) },
-            { desc: 'Tax Invoice - Payment Fee', net: Math.max(0, Math.round((Math.abs(b.paymentFee) - Math.abs(b.paymentFeeRefunded)) * 100) / 100) },
-            { desc: 'Tax Invoice - Commission Fee', net: Math.max(0, Math.round((Math.abs(b.commissionFee) - Math.abs(b.commissionRefunded)) * 100) / 100) },
-            { desc: 'Tax Invoice - Free Shipping Max', net: Math.max(0, Math.round((Math.abs(b.freeShippingMaxFee) - Math.abs(b.freeShipRefunded)) * 100) / 100) },
-            { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee', net: Math.max(0, Math.round((Math.abs(b.coinsFee) - Math.abs(b.coinsFeeRefunded)) * 100) / 100) },
-            { desc: 'Tax Invoice - Handling Fee', net: Math.max(0, Math.round((Math.abs(b.handlingFee) + Math.abs(b.returnHandlingFee)) * 100) / 100) },
-            ...(isBagmati && b.merchantCharge && b.merchantCharge !== 0 ? [{ desc: 'Tax Invoice - Merchant Managed Services Charge', net: Math.max(0, Math.round(Math.abs(b.merchantCharge) * 100) / 100) }] : [])
-        ]
-
-        return raw.filter(t => t.net > 0).map(t => {
-            const taxableAmt = Math.round((t.net / 1.13) * 100) / 100
-            const vatAmt = Math.round((taxableAmt * 0.13) * 100) / 100
-            const grandTotal = Math.round((taxableAmt + vatAmt) * 100) / 100
-            return {
-                desc: t.desc,
-                net: t.net,
-                taxableAmt,
-                vatAmt,
-                grandTotal
-            }
-        })
+        return extractTaxInvoicesFromBreakdown(b, isBagmati)
     }
 
     // Fetch Stored Tax Invoices from DB

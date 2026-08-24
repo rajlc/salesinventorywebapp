@@ -27,7 +27,7 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
 import { fetchDarazPayoutStatus } from '@/features/sales/actions/daraz-finance-service'
-import { getStatementBreakdown } from '@/app/dashboard/account/pan-vat-billing/daraz-finance-card'
+import { getStatementBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
 
 // Helper component for Limit Selector using props
 function LimitSelector({ currentLimit, onLimitChange }: { currentLimit: number, onLimitChange: (limit: number) => void }) {
