@@ -48,8 +48,7 @@ import {
     saveOrUpdateDarazTaxInvoice,
     updateDarazTaxInvoiceVerification,
     deleteDarazTaxInvoice,
-    syncStatementTaxInvoicesToDB,
-    getLiveDarazStatementTaxMap
+    syncStatementTaxInvoicesToDB
 } from '@/features/account/actions/daraz-tax-invoice-actions'
 
 export default function PanVatReportPage() {
@@ -222,13 +221,73 @@ export default function PanVatReportPage() {
         }))
     }, [payoutData])
 
-    // Fetch Live Statement Tax Invoices from DB Transactions / API
-    const { data: liveTaxMap = {} } = useQuery({
-        queryKey: ['daraz-live-tax-map', statementQueryParams],
-        queryFn: () => getLiveDarazStatementTaxMap(statementQueryParams),
-        staleTime: 1000 * 60 * 5,
-        enabled: statementQueryParams.length > 0
+    // Fetch Stored Tax Invoices from DB — must come BEFORE liveTaxMap useMemo
+    const { data: storedInvoices = [], refetch: refetchStoredInvoices } = useQuery({
+        queryKey: ['daraz-stored-tax-invoices', fiscalYearId, startDate, endDate, selectedCompanyId, selectedStoreFilter, verificationFilter],
+        queryFn: () => getStoredDarazTaxInvoices({
+            fiscalYearId: fiscalYearId !== 'all' ? fiscalYearId : undefined,
+            startDate: startDate || undefined,
+            endDate: endDate || undefined,
+            companyName: selectedCompanyId !== 'all' ? (companyMap[selectedCompanyId] || selectedCompanyId) : undefined,
+            storeName: selectedStoreFilter !== 'all' ? selectedStoreFilter : undefined,
+            verificationStatus: verificationFilter
+        }),
+        staleTime: 0,           // Always fetch fresh — amounts are updated by Statement Overview
+        refetchOnWindowFocus: true  // Refetch when user switches back to this tab
     })
+
+    // Build liveTaxMap from already-fetched storedInvoices (daraz_tax_invoices DB).
+    // Accurate amounts are written to DB by the Statement Overview page when it loads.
+    // This removes the expensive 89-second fetchStatementTaxInvoicesBatch API call.
+    const liveTaxMap = useMemo(() => {
+        const map: Record<string, Array<{ desc: string; net: number; taxableAmt: number; vatAmt: number; grandTotal: number }>> = {}
+        const seen = new Set<string>()
+
+        storedInvoices.forEach((s: any) => {
+            if (!s.statement_number && !s.date_period) return
+            const stmtKey = (s.statement_number || '').trim().toLowerCase()
+            const storeKey = (s.store_name || '').trim().toLowerCase()
+            const periodKey = (s.date_period || '').trim().toLowerCase()
+            const descKey = (s.description || '').trim().toLowerCase()
+
+            const entry = {
+                desc: s.description,
+                net: parseFloat(s.grand_total) || 0,
+                taxableAmt: parseFloat(s.taxable_amount) || 0,
+                vatAmt: parseFloat(s.vat_amount) || 0,
+                grandTotal: parseFloat(s.grand_total) || 0,
+            }
+
+            if (stmtKey && storeKey) {
+                const combo = `${stmtKey}_${storeKey}`
+                if (!map[combo]) map[combo] = []
+                map[combo].push(entry)
+            }
+            if (periodKey && storeKey) {
+                const periodCombo = `${periodKey}_${storeKey}`
+                if (!map[periodCombo]) map[periodCombo] = []
+                map[periodCombo].push(entry)
+            }
+
+            if (stmtKey) {
+                const dedupStmt = `${stmtKey}_${descKey}`
+                if (!seen.has(dedupStmt)) {
+                    seen.add(dedupStmt)
+                    if (!map[stmtKey]) map[stmtKey] = []
+                    map[stmtKey].push(entry)
+                }
+            }
+            if (periodKey) {
+                const dedupPeriod = `${periodKey}_${descKey}`
+                if (!seen.has(dedupPeriod)) {
+                    seen.add(dedupPeriod)
+                    if (!map[periodKey]) map[periodKey] = []
+                    map[periodKey].push(entry)
+                }
+            }
+        })
+        return map
+    }, [storedInvoices])
 
     // Helper to get exact tax invoices for a statement
     const getTaxItemsForStatement = (item: any, storeLabel: string) => {
@@ -255,76 +314,9 @@ export default function PanVatReportPage() {
         return extractTaxInvoicesFromBreakdown(b, isBagmati)
     }
 
-    // Fetch Stored Tax Invoices from DB
-    const { data: storedInvoices = [], refetch: refetchStoredInvoices } = useQuery({
-        queryKey: ['daraz-stored-tax-invoices', fiscalYearId, startDate, endDate, selectedCompanyId, selectedStoreFilter, verificationFilter],
-        queryFn: () => getStoredDarazTaxInvoices({
-            fiscalYearId: fiscalYearId !== 'all' ? fiscalYearId : undefined,
-            startDate: startDate || undefined,
-            endDate: endDate || undefined,
-            companyName: selectedCompanyId !== 'all' ? companyMap[selectedCompanyId] : undefined,
-            storeName: selectedStoreFilter !== 'all' ? selectedStoreFilter : undefined,
-            verificationStatus: verificationFilter
-        })
-    })
-
-    // Background sync statement tax invoices to DB
-    useEffect(() => {
-        if (!payoutData || payoutData.length === 0) return
-
-        const itemsToSync: any[] = []
-        payoutData.forEach((item: any) => {
-            const rawStr = (item.statement || item.created_at || '').trim()
-            let pStart: Date | null = null
-            let pEnd: Date | null = null
-            if (rawStr.includes(' - ')) {
-                const parts = rawStr.split(' - ')
-                const d1 = new Date(parts[0].trim())
-                const d2 = new Date(parts[1].trim())
-                if (!isNaN(d1.getTime())) pStart = d1
-                if (!isNaN(d2.getTime())) pEnd = d2
-            } else if (rawStr) {
-                const d = new Date(rawStr)
-                if (!isNaN(d.getTime())) {
-                    const endSun = new Date(d)
-                    endSun.setDate(d.getDate() - 1)
-                    const startMon = new Date(endSun)
-                    startMon.setDate(endSun.getDate() - 6)
-                    pStart = startMon
-                    pEnd = endSun
-                }
-            }
-            if (!pStart) pStart = new Date()
-            if (!pEnd) pEnd = pStart
-
-            const dateStr = format(pEnd, 'yyyy-MM-dd')
-            const datePeriod = `${format(pStart, 'dd MMM yyyy')} - ${format(pEnd, 'dd MMM yyyy')}`
-            const storeLabel = item.store_name || item.seller_account || (item.statement_number ? item.statement_number.split('-')[0] : 'Bagmati Traders')
-            const companyName = item.company_name || 'Bagmati Traders'
-            const taxItems = getTaxItemsForStatement(item, storeLabel)
-
-            taxItems.forEach((t: any) => {
-                if (t.net <= 0) return
-
-                itemsToSync.push({
-                    statement_number: item.statement_number,
-                    date: dateStr,
-                    date_period: datePeriod,
-                    store_name: storeLabel,
-                    company_name: companyName,
-                    description: t.desc,
-                    taxable_amount: t.taxableAmt,
-                    vat_amount: t.vatAmt,
-                    grand_total: t.grandTotal,
-                    fiscal_year_id: fiscalYearId !== 'all' ? fiscalYearId : undefined
-                })
-            })
-        })
-
-        if (itemsToSync.length > 0) {
-            syncStatementTaxInvoicesToDB(itemsToSync).catch(e => console.warn('Background sync tax invoices:', e))
-        }
-    }, [payoutData, fiscalYearId, liveTaxMap])
+    // NOTE: Tax invoice DB sync is now handled by the Statement Overview page
+    // (daraz-finance/statement) when it loads real Daraz API data. This removes
+    // the old background sync that was causing 89-second server responses.
 
     // Helper mappings
     const sellerToCompanyMap = useMemo(() => {
@@ -345,20 +337,60 @@ export default function PanVatReportPage() {
         return map
     }, [companies])
 
-    // List of available online stores for top filter
-    const availableStoresList = useMemo(() => {
+    // Distinct company names from Online Stores (dashboard/settings/stores -> Online Stores)
+    const onlineStoreCompanies = useMemo(() => {
         const set = new Set<string>()
         onlineStores.forEach((s: any) => {
-            const storeName = s.seller_account || s.name
-            if (storeName && storeName !== 'All') {
+            const comp = (s.company_name || '').trim()
+            if (comp) set.add(comp)
+        })
+        if (set.size === 0) {
+            companies.forEach((c: any) => {
+                if (c.company_name) set.add(c.company_name)
+            })
+        }
+        return Array.from(set).sort()
+    }, [onlineStores, companies])
+
+    // List of available online stores for top filter (filtered by selected company)
+    const availableStoresList = useMemo(() => {
+        const set = new Set<string>()
+        const targetComp = (selectedCompanyId !== 'all' ? (companyMap[selectedCompanyId] || selectedCompanyId) : '').trim().toLowerCase()
+
+        onlineStores.forEach((s: any) => {
+            const storeName = (s.seller_account || s.name || '').trim()
+            const storeCompany = (s.company_name || '').trim().toLowerCase()
+            if (!storeName || storeName === 'All') return
+
+            if (selectedCompanyId === 'all') {
+                set.add(storeName)
+            } else if (storeCompany && (storeCompany === targetComp || storeCompany.includes(targetComp) || targetComp.includes(storeCompany))) {
                 set.add(storeName)
             }
         })
-        if (set.size === 0) {
+        if (set.size === 0 && selectedCompanyId === 'all') {
             ;['BTAS', 'Bagmati Traders', 'Balaju Shop', 'Cosmetic Shop'].forEach(st => set.add(st))
         }
-        return Array.from(set)
-    }, [onlineStores])
+        return Array.from(set).sort()
+    }, [onlineStores, selectedCompanyId, companyMap])
+
+    const handleCompanyChange = (newCompany: string) => {
+        setSelectedCompanyId(newCompany)
+        // Reset store filter if the currently selected store does not belong to the newly chosen company
+        if (newCompany !== 'all') {
+            const targetComp = (companyMap[newCompany] || newCompany).trim().toLowerCase()
+            const allowedStores = onlineStores
+                .filter((s: any) => {
+                    const c = (s.company_name || '').trim().toLowerCase()
+                    return c === targetComp || c.includes(targetComp) || targetComp.includes(c)
+                })
+                .map((s: any) => (s.seller_account || s.name || '').trim())
+
+            if (selectedStoreFilter !== 'all' && !allowedStores.includes(selectedStoreFilter)) {
+                setSelectedStoreFilter('all')
+            }
+        }
+    }
 
     // Distinct color badge style per store
     const getStoreBadgeStyle = (storeName: string) => {
@@ -466,12 +498,13 @@ export default function PanVatReportPage() {
     const filteredReportData = useMemo(() => {
         if (selectedCompanyId === 'all') return dailyReportData
 
-        const targetCompanyName = companyMap[selectedCompanyId]
+        const targetCompanyName = (companyMap[selectedCompanyId] || selectedCompanyId).trim().toLowerCase()
         if (!targetCompanyName) return dailyReportData
 
-        return dailyReportData.filter(row =>
-            row.companyName.toLowerCase() === targetCompanyName.toLowerCase()
-        )
+        return dailyReportData.filter(row => {
+            const rComp = (row.companyName || '').trim().toLowerCase()
+            return rComp.includes(targetCompanyName) || targetCompanyName.includes(rComp)
+        })
     }, [dailyReportData, selectedCompanyId, companyMap])
 
     // Aggregate overall totals for Pan/Vat report
@@ -524,9 +557,25 @@ export default function PanVatReportPage() {
         // Map DB stored records by unique key (statement_store_desc)
         const dbMap: Record<string, any> = {}
         storedInvoices.forEach((s: any) => {
-            if (s.statement_number) {
-                const key = `${s.statement_number}_${s.store_name}_${s.description}`
-                dbMap[key] = s
+            const stmtKey = (s.statement_number || '').trim().toLowerCase()
+            const storeKey = (s.store_name || '').trim().toLowerCase()
+            const descKey = (s.description || '').trim().toLowerCase()
+            const periodKey = (s.date_period || '').trim().toLowerCase()
+
+            if (stmtKey && storeKey && descKey) {
+                dbMap[`${stmtKey}_${storeKey}_${descKey}`] = s
+            }
+            if (stmtKey && descKey) {
+                dbMap[`${stmtKey}_${descKey}`] = s
+            }
+            if (periodKey && storeKey && descKey) {
+                dbMap[`${periodKey}_${storeKey}_${descKey}`] = s
+            }
+            if (periodKey && descKey) {
+                dbMap[`${periodKey}_${descKey}`] = s
+            }
+            if (s.statement_number && s.store_name && s.description) {
+                dbMap[`${s.statement_number}_${s.store_name}_${s.description}`] = s
             }
         })
 
@@ -606,8 +655,9 @@ export default function PanVatReportPage() {
 
             // Filter by selected company
             if (selectedCompanyId !== 'all') {
-                const selectedComp = companies.find((c: any) => c.id === selectedCompanyId)
-                if (selectedComp && selectedComp.company_name.toLowerCase() !== companyName.toLowerCase()) {
+                const targetComp = (companyMap[selectedCompanyId] || selectedCompanyId).trim().toLowerCase()
+                const cName = companyName.trim().toLowerCase()
+                if (!cName.includes(targetComp) && !targetComp.includes(cName)) {
                     return
                 }
             }
@@ -627,13 +677,24 @@ export default function PanVatReportPage() {
             taxItems.forEach((tItem: any) => {
                 if (tItem.net <= 0) return
 
-                const key = `${item.statement_number}_${storeLabel}_${tItem.desc}`
-                const dbRecord = dbMap[key]
+                const stmtKey = (item.statement_number || '').trim().toLowerCase()
+                const storeKey = (storeLabel || '').trim().toLowerCase()
+                const descKey = (tItem.desc || '').trim().toLowerCase()
+                const periodKey = (displayPeriod || '').trim().toLowerCase()
+
+                const dbRecord = 
+                    dbMap[`${stmtKey}_${storeKey}_${descKey}`] ||
+                    dbMap[`${stmtKey}_${descKey}`] ||
+                    (periodKey ? dbMap[`${periodKey}_${storeKey}_${descKey}`] : undefined) ||
+                    (periodKey ? dbMap[`${periodKey}_${descKey}`] : undefined) ||
+                    dbMap[`${item.statement_number}_${storeLabel}_${tItem.desc}`]
 
                 const isVerified = dbRecord ? !!dbRecord.is_verified : false
-                const taxableAmt = dbRecord && dbRecord.taxable_amount !== undefined && dbRecord.is_verified ? Number(dbRecord.taxable_amount) : tItem.taxableAmt
-                const vatAmt = dbRecord && dbRecord.vat_amount !== undefined && dbRecord.is_verified ? Number(dbRecord.vat_amount) : tItem.vatAmt
-                const grandTotal = dbRecord && dbRecord.grand_total !== undefined && dbRecord.is_verified ? Number(dbRecord.grand_total) : tItem.grandTotal
+                // Always use DB amounts when a record exists — DB is written by Statement Overview
+                // with real Daraz API data. Fall back to liveTaxMap only when no DB record exists.
+                const taxableAmt = dbRecord?.taxable_amount !== undefined ? Number(dbRecord.taxable_amount) : tItem.taxableAmt
+                const vatAmt = dbRecord?.vat_amount !== undefined ? Number(dbRecord.vat_amount) : tItem.vatAmt
+                const grandTotal = dbRecord?.grand_total !== undefined ? Number(dbRecord.grand_total) : tItem.grandTotal
 
                 rows.push({
                     id: dbRecord?.id || `daraz-tax-${idxCounter++}`,
@@ -659,8 +720,9 @@ export default function PanVatReportPage() {
         storedInvoices.filter((s: any) => s.source === 'manual').forEach((s: any) => {
             // Filter by selected company
             if (selectedCompanyId !== 'all') {
-                const selectedComp = companies.find((c: any) => c.id === selectedCompanyId)
-                if (selectedComp && selectedComp.company_name.toLowerCase() !== s.company_name?.toLowerCase()) {
+                const targetComp = (companyMap[selectedCompanyId] || selectedCompanyId).trim().toLowerCase()
+                const sComp = (s.company_name || '').trim().toLowerCase()
+                if (!sComp.includes(targetComp) && !targetComp.includes(sComp)) {
                     return
                 }
             }
@@ -1143,13 +1205,13 @@ export default function PanVatReportPage() {
                             <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block font-['Inter',sans-serif]">Filter by Company</label>
                             <select
                                 value={selectedCompanyId}
-                                onChange={(e) => setSelectedCompanyId(e.target.value)}
+                                onChange={(e) => handleCompanyChange(e.target.value)}
                                 className="w-full px-3.5 py-2 text-[13px] font-medium border border-slate-200 dark:border-zinc-700 rounded-xl bg-white dark:bg-zinc-800 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500 shadow-2xs font-['Inter',sans-serif] cursor-pointer"
                             >
                                 <option value="all">All Companies</option>
-                                {companies.map((company) => (
-                                    <option key={company.id} value={company.id}>
-                                        {company.company_name}
+                                {onlineStoreCompanies.map((companyName) => (
+                                    <option key={companyName} value={companyName}>
+                                        {companyName}
                                     </option>
                                 ))}
                             </select>

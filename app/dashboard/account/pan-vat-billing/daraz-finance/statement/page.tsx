@@ -16,6 +16,7 @@ import {
 import { Card, Table, TableHeader, TableHead, TableBody, TableRow, TableCell, Button } from '@/components/ui-shim'
 import { fetchDarazStatementLineItems, syncDarazFinances } from '@/features/sales/actions/daraz-finance-service'
 import { getStatementBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
+import { syncStatementTaxInvoicesToDB } from '@/features/account/actions/daraz-tax-invoice-actions'
 import { toast } from 'sonner'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -465,6 +466,71 @@ function StatementOverviewContent() {
                 const numRevenue = parseFloat(String(itemRevenue).replace(/[^0-9.]/g, '')) || 0
                 const result = await fetchDarazStatementLineItems(stmtNo, storeId, period, numRevenue)
                 setApiData(result)
+
+                // ─── Auto-save accurate tax invoices to DB when API data is loaded ───
+                // This makes the All Report → Daraz page show the same amounts as here.
+                if (result?.found && result.grouped && Object.keys(result.grouped).length > 0) {
+                    const g: Record<string, Array<{ feeName: string; amount: number }>> = result.grouped as any
+                    const findFeeLocal = (name: string) => {
+                        const q = name.toLowerCase().trim()
+                        for (const cat of Object.keys(g)) {
+                            for (const item of (g[cat] || [])) {
+                                if (item.feeName.toLowerCase().trim() === q) return Math.abs(item.amount)
+                            }
+                        }
+                        for (const cat of Object.keys(g)) {
+                            for (const item of (g[cat] || [])) {
+                                if (item.feeName.toLowerCase().trim().includes(q)) return Math.abs(item.amount)
+                            }
+                        }
+                        return 0
+                    }
+
+                    const invoiceDefs = [
+                        { desc: 'Tax Invoice - Co Funded Voucher Max',
+                          net: Math.max(0, Math.round((findFeeLocal('Co-funded Voucher Max') - findFeeLocal('Co-funded Voucher Max Reversal')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Payment Fee',
+                          net: Math.max(0, Math.round((findFeeLocal('Payment Fee') - findFeeLocal('Payment Fee Refunded')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Commission Fee',
+                          net: Math.max(0, Math.round((findFeeLocal('Commission Fee') - findFeeLocal('Commission Fee Refunded')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Free Shipping Max',
+                          net: Math.max(0, Math.round((findFeeLocal('Free Shipping Max Fee') - findFeeLocal('Reversal of Free Shipping Max Fee')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Daraz Coins Discount Participation Fee',
+                          net: Math.max(0, Math.round((findFeeLocal('Daraz Coins Discount Participation Fee') - findFeeLocal('Reversal of DARAZ Coins Discount Participation Fee')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Handling Fee',
+                          net: Math.max(0, Math.round((findFeeLocal('Handling Fee') + findFeeLocal('Handling Fee for Return')) * 100) / 100) },
+                        { desc: 'Tax Invoice - Merchant Managed Services Charge',
+                          net: Math.max(0, Math.round(findFeeLocal('Merchant Managed Services Charge') * 100) / 100) },
+                    ]
+
+                    // Parse statement period end date
+                    const parts = period.split(' - ')
+                    const pEnd = parts.length >= 2 ? new Date(parts[1].trim()) : new Date()
+                    const pStart = parts.length >= 2 ? new Date(parts[0].trim()) : pEnd
+                    const pad = (n: number) => String(n).padStart(2, '0')
+                    const dateStr = `${pEnd.getFullYear()}-${pad(pEnd.getMonth() + 1)}-${pad(pEnd.getDate())}`
+
+                    const toSync = invoiceDefs
+                        .filter(inv => inv.net > 0)
+                        .map(inv => ({
+                            statement_number: stmtNo,
+                            date: dateStr,
+                            date_period: period,
+                            store_name: store,
+                            company_name: company,
+                            description: inv.desc,
+                            taxable_amount: Math.round((inv.net / 1.13) * 100) / 100,
+                            vat_amount: Math.round((inv.net / 1.13) * 0.13 * 100) / 100,
+                            grand_total: Math.round(inv.net * 100) / 100,
+                        }))
+
+                    if (toSync.length > 0) {
+                        // Fire-and-forget: don't block the UI
+                        syncStatementTaxInvoicesToDB(toSync).catch(() => {})
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────────
+
             } catch {
                 setApiData({ found: false, transactions: [], grouped: {} })
             } finally {

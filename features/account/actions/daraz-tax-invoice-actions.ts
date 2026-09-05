@@ -243,7 +243,13 @@ export async function getStoredDarazTaxInvoices(params: GetDarazTaxInvoicesParam
             .order('created_at', { ascending: false })
 
         if (params.fiscalYearId && params.fiscalYearId !== 'all') {
-            query = query.eq('fiscal_year_id', params.fiscalYearId)
+            // Only filter by fiscal_year_id when there is no date range.
+            // When startDate+endDate are provided, date-range filtering is sufficient
+            // and avoids excluding records that have fiscal_year_id = null
+            // (e.g., auto-synced records from Statement Overview).
+            if (!params.startDate && !params.endDate) {
+                query = query.eq('fiscal_year_id', params.fiscalYearId)
+            }
         }
 
         if (params.startDate) {
@@ -495,9 +501,10 @@ export async function saveOrUpdateDarazTaxInvoice(data: {
 }
 
 /**
- * Sync auto-calculated statement tax invoices into database
- * Uses a single bulk upsert (not a sequential loop) to avoid DB lock contention.
- * Verified records are NOT overwritten — they are excluded before calling this action.
+ * Sync auto-calculated statement tax invoices into database.
+ * Uses DELETE + INSERT instead of upsert-on-partial-index because Supabase
+ * cannot resolve partial unique indexes in onConflict. Verified records are
+ * never touched.
  */
 export async function syncStatementTaxInvoicesToDB(invoices: Array<{
     statement_number?: string
@@ -525,7 +532,7 @@ export async function syncStatementTaxInvoicesToDB(invoices: Array<{
             .not('store_name', 'ilike', '%bagmati%')
 
         // Fetch verified record keys so we don't overwrite them
-        const statementNumbers = Array.from(new Set(invoices.map(i => i.statement_number).filter(Boolean)))
+        const statementNumbers = Array.from(new Set(invoices.map(i => i.statement_number).filter(Boolean))) as string[]
         const verifiedKeys = new Set<string>()
 
         if (statementNumbers.length > 0) {
@@ -541,40 +548,78 @@ export async function syncStatementTaxInvoicesToDB(invoices: Array<{
             })
         }
 
-        // Only sync non-verified records
-        const toUpsert = invoices
+        // Lookup fiscal year if not provided
+        const { data: fyList } = await supabase
+            .from('fiscal_years')
+            .select('id, start_date, end_date')
+
+        // Only process non-verified records
+        const toInsert = invoices
             .filter(item => item.statement_number && !verifiedKeys.has(`${item.statement_number}_${item.store_name}_${item.description}`))
-            .map(item => ({
-                statement_number: item.statement_number!,
-                date: item.date,
-                date_period: item.date_period,
-                store_name: item.store_name,
-                company_name: item.company_name,
-                description: item.description,
-                taxable_amount: item.taxable_amount,
-                vat_amount: item.vat_amount,
-                grand_total: item.grand_total,
-                is_verified: false,
-                source: 'auto' as const,
-                fiscal_year_id: item.fiscal_year_id || null,
-                updated_at: new Date().toISOString()
-            }))
+            .map(item => {
+                let fyId = item.fiscal_year_id || null
+                if (!fyId && fyList && item.date) {
+                    const matchedFy = fyList.find(f => f.start_date <= item.date && f.end_date >= item.date)
+                    if (matchedFy) fyId = matchedFy.id
+                }
+                return {
+                    statement_number: item.statement_number!,
+                    date: item.date,
+                    date_period: item.date_period,
+                    store_name: item.store_name,
+                    company_name: item.company_name,
+                    description: item.description,
+                    taxable_amount: item.taxable_amount,
+                    vat_amount: item.vat_amount,
+                    grand_total: item.grand_total,
+                    is_verified: false,
+                    source: 'auto' as const,
+                    fiscal_year_id: fyId,
+                    updated_at: new Date().toISOString()
+                }
+            })
 
-        if (toUpsert.length > 0) {
-            // Single bulk upsert — replaces the old sequential for-await loop
-            const { error } = await supabase
-                .from('daraz_tax_invoices')
-                .upsert(toUpsert, {
-                    onConflict: 'statement_number,store_name,description',
-                    ignoreDuplicates: false
-                })
+        if (toInsert.length === 0) return { success: true, count: 0 }
 
-            if (error) {
-                console.warn('[Daraz Tax Invoices] Bulk upsert warning:', error.message)
+        // Group by statement_number to delete+insert per statement
+        // This avoids the partial-index upsert limitation in Supabase
+        const byStatement: Record<string, typeof toInsert> = {}
+        toInsert.forEach(item => {
+            const k = item.statement_number
+            if (!byStatement[k]) byStatement[k] = []
+            byStatement[k].push(item)
+        })
+
+        for (const [stmtNo, rows] of Object.entries(byStatement)) {
+            // Get unique store names in this batch
+            const storeNames = Array.from(new Set(rows.map(r => r.store_name)))
+
+            for (const storeName of storeNames) {
+                const storeRows = rows.filter(r => r.store_name === storeName)
+                const descriptions = storeRows.map(r => r.description)
+
+                // Delete existing unverified records for this statement+store+descriptions
+                await supabase
+                    .from('daraz_tax_invoices')
+                    .delete()
+                    .eq('statement_number', stmtNo)
+                    .eq('store_name', storeName)
+                    .eq('source', 'auto')
+                    .eq('is_verified', false)
+                    .in('description', descriptions)
+
+                // Insert fresh records
+                const { error } = await supabase
+                    .from('daraz_tax_invoices')
+                    .insert(storeRows)
+
+                if (error) {
+                    console.warn(`[Daraz Tax Invoices] Insert warning for ${stmtNo}/${storeName}:`, error.message)
+                }
             }
         }
 
-        return { success: true, count: toUpsert.length }
+        return { success: true, count: toInsert.length }
     } catch (err: any) {
         console.warn('[Daraz Tax Invoices] Sync warning:', err.message)
         return { success: false, error: err.message }
