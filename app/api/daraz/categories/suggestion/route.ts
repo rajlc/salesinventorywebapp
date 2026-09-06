@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
         const preferredModel = aiSettings.model || 'gpt-4o-mini'
 
         if (!apiKey) {
-            return NextResponse.json({ error: 'OpenAI API key not configured' }, { status: 400 })
+            return NextResponse.json({ success: true, paths: [] })
         }
 
         const prompt = `You are a product categorization expert for Daraz Nepal (Lazada).

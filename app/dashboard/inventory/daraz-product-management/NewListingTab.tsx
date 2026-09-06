@@ -1,10 +1,10 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Card } from '@/components/ui-shim'
 import {
     Sparkles, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
-    RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store
+    RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store,
+    AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import CategoryPicker from './CategoryPicker'
@@ -154,6 +154,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [description, setDescription] = useState('')
     const [highlights, setHighlights] = useState<string[]>([''])
     const [previewDesc, setPreviewDesc] = useState(false)
+    const [descAlign, setDescAlign] = useState<'left' | 'center' | 'right'>('left')
+    const [isAdvancedMode, setIsAdvancedMode] = useState(false)
 
     const [sellingPrice, setSellingPrice] = useState<number>(0)
     const [specialPrice, setSpecialPrice] = useState<number | undefined>(undefined)
@@ -199,8 +201,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const fetchStores = async () => {
         try {
             const res = await fetch('/api/daraz/stores')
-            const json = await res.json()
-            if (json.success && json.data) {
+            if (!res.ok) return
+            const json = await res.json().catch(() => null)
+            if (json?.success && json.data) {
                 setStores(json.data)
                 if (json.data.length > 0) setSelectedStores([json.data[0].id])
             }
@@ -213,8 +216,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setDraftsLoading(true)
         try {
             const res = await fetch('/api/daraz/drafts')
-            const json = await res.json()
-            if (json.success) {
+            if (!res.ok) return
+            const json = await res.json().catch(() => null)
+            if (json?.success) {
                 setDrafts(json.data || [])
                 setCurrentPage(1)
             }
@@ -714,8 +718,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setRawName(draft.raw_name)
         setSelectedSupplierId(draft.supplier_id || '')
         setWholesalePrice(draft.wholesale_price || undefined)
-        setTitlesPerStore(draft.titles_per_store || {})
-        setActiveTitleStoreId(draft.target_stores?.[0] || '')
+        
+        // Populate titles per store from draft.titles_per_store and draft.title fallback
+        const initialTitles: Record<string, string> = { ...(draft.titles_per_store || {}) }
+        const targetStores = draft.target_stores && draft.target_stores.length > 0
+            ? draft.target_stores
+            : (stores.length > 0 ? [stores[0].id] : [])
+
+        if (draft.title) {
+            targetStores.forEach(sId => {
+                if (!initialTitles[sId]) initialTitles[sId] = draft.title!
+            })
+            if (!initialTitles['__manual__']) initialTitles['__manual__'] = draft.title
+        }
+
+        setTitlesPerStore(initialTitles)
+        setActiveTitleStoreId(targetStores[0] || '')
+        setSelectedStores(targetStores)
         setCategoryId(draft.category_id || null)
         setCategoryPath(draft.category_path || '')
         setAiCategorySuggestion(draft.category_path || null)
@@ -970,6 +989,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             } : {})
         }
 
+        const validHighlights = highlights
+            .filter(h => h.trim().length > 0)
+            .map(h => h.replace(/^[•\-\*\s]+/, '').trim())
+            .filter(Boolean)
+
         try {
             const finalSkus = hasVariants
                 ? skuRows.map(row => ({
@@ -1000,16 +1024,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     size: singleSize || undefined
                 }]
 
+            // Build final titles per store — fallback to rawName for stores without a manual/AI title
+            const finalTitlesPerStore: Record<string, string> = {}
+            selectedStores.forEach(storeId => {
+                finalTitlesPerStore[storeId] = titlesPerStore[storeId] || titlesPerStore['__manual__'] || rawName
+            })
+            const primaryTitle = Object.values(finalTitlesPerStore)[0] || rawName
+
             const response = await fetch('/api/daraz/products/create', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     storeIds: selectedStores,
-                    titlesPerStore: titlesPerStore,
+                    titlesPerStore: finalTitlesPerStore,
                     primaryCategory: categoryId,
-                    name: Object.values(titlesPerStore)[0] || rawName,
+                    name: primaryTitle,
                     rawName: rawName,
-                    shortDescription: highlights.map(h => `• ${h}`).join('\n'),
+                    shortDescription: validHighlights.map(h => `• ${h}`).join('\n'),
                     description,
                     brand: dynamicAttributes.brand || 'No Brand',
                     attributes: submissionAttributes,
@@ -1045,7 +1076,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             error: errorSummary,
                             titles_per_store: titlesPerStore,
                             description,
-                            highlights,
+                            highlights: validHighlights,
                             attributes: submissionAttributes,
                             price: Number(sellingPrice) || null,
                             special_price: specialPrice ? Number(specialPrice) : null,
@@ -1073,7 +1104,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         error: err.message,
                         titles_per_store: titlesPerStore,
                         description,
-                        highlights,
+                        highlights: validHighlights,
                         attributes: submissionAttributes,
                         price: Number(sellingPrice) || null,
                         special_price: specialPrice ? Number(specialPrice) : null,
@@ -1092,18 +1123,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
-    // ── Content completeness score ────────────────────────────────────────────
-    const checklist = [
-        { label: 'Add product name', met: !!rawName },
-        { label: 'Add min 3 main images', met: images.length >= 3 },
-        { label: 'Choose category', met: !!categoryId },
-        { label: 'Fill specifications', met: Object.keys(dynamicAttributes).length >= 2 },
-        { label: 'Set price', met: sellingPrice > 0 },
-        { label: 'Add description', met: description.length > 50 },
-        { label: 'Add highlights (min 5)', met: highlights.filter(h => h.trim()).length >= 5 },
-        { label: 'Package dimensions', met: weight > 0 && length > 0 },
-    ]
-    const contentScore = Math.round((checklist.filter(c => c.met).length / checklist.length) * 100)
+
 
     // ── Status badge helper ───────────────────────────────────────────────────
     const statusBadge = (status: DraftListing['status']) => {
@@ -1191,7 +1211,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     const draftsToGenerateCount = selectedDraftsList.filter(d => d.status === 'draft' || d.status === 'failed').length;
 
                     return selectedDraftIds.size > 0 && (
-                        <Card className="p-3 bg-amber-50/70 dark:bg-amber-950/10 border border-amber-200/50 flex justify-between items-center shadow-sm">
+                        <div className="rounded-xl p-3 bg-amber-50/70 dark:bg-amber-950/10 border border-amber-200/50 flex justify-between items-center shadow-sm">
                             <span className="text-xs font-semibold text-amber-800 dark:text-amber-400 flex items-center gap-1.5">
                                 <Info size={14} className="text-amber-600 dark:text-amber-500" />
                                 {selectedDraftIds.size} Selected | {readyToPushCount} Ready to Push
@@ -1216,7 +1236,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     Push Selected ({readyToPushCount})
                                 </button>
                             </div>
-                        </Card>
+                        </div>
                     );
                 })()}
 
@@ -1779,43 +1799,48 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     // VIEW 3: FULL ADD / EDIT FORM
     // ═══════════════════════════════════════════════════════════════════════
     return (
-        <div className="space-y-4">
+        <div className="space-y-5">
             {/* Header */}
-            <div className="flex items-center justify-between bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-xl shadow-sm">
                 <div className="flex items-center gap-3">
-                    <button type="button" onClick={handleBackToList} className="p-1.5 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-full">
+                    <button type="button" onClick={handleBackToList} className="p-2 hover:bg-orange-50 dark:hover:bg-zinc-800 rounded-full text-gray-500 hover:text-orange-600 transition-all">
                         <ArrowLeft size={16} />
                     </button>
                     <div>
-                        <h2 className="text-base font-bold">
-                            {viewMode === 'edit-single' ? 'Edit & Configure Listing' : 'New Product Listing'}
+                        <h2 className="text-base font-bold text-gray-900 dark:text-zinc-100">
+                            {viewMode === 'edit-single' ? '✎ Edit & Configure Listing' : '✦ New Product Listing'}
                         </h2>
-                        <p className="text-xs text-gray-500 flex items-center gap-1">
-                            {savingDraft && <><Loader2 className="animate-spin" size={10} /> Auto-saving...</>}
-                            {!savingDraft && editingDraftId && <><CheckCircle2 size={10} className="text-green-500" /> Draft saved in database</>}
-                            {!editingDraftId && !savingDraft && 'Name your product to auto-save as draft'}
+                        <p className="text-xs flex items-center gap-1 mt-0.5">
+                            {savingDraft && <span className="flex items-center gap-1 text-orange-500 font-medium"><Loader2 className="animate-spin" size={10} /> Auto-saving draft...</span>}
+                            {!savingDraft && editingDraftId && <span className="flex items-center gap-1 text-green-600 font-medium"><CheckCircle2 size={10} /> Draft saved in database</span>}
+                            {!editingDraftId && !savingDraft && <span className="text-gray-400">Name your product to auto-save as draft</span>}
                         </p>
                     </div>
                 </div>
+                <div className="hidden sm:flex items-center gap-2 text-xs text-gray-400">
+                    <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse" />
+                    <span>Live Draft</span>
+                </div>
             </div>
 
-            <form onSubmit={handleSubmit} className="flex flex-col lg:flex-row gap-6">
-                <div className="flex-1 space-y-6 lg:max-w-4xl">
+            <form onSubmit={handleSubmit} className="space-y-5">
 
                     {/* AI Banner */}
-                    <Card className="p-4 bg-gradient-to-r from-orange-500/10 to-pink-500/10 border border-orange-100 dark:border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                        <div className="flex gap-3">
-                            <Sparkles className="text-orange-500 shrink-0" size={22} />
+                    <div className="p-4 bg-gradient-to-r from-orange-500/15 via-amber-400/10 to-pink-500/10 border border-orange-200/60 dark:border-orange-900/30 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                        <div className="flex gap-3 items-center">
+                            <div className="w-9 h-9 rounded-full bg-orange-500/20 flex items-center justify-center shrink-0">
+                                <Sparkles className="text-orange-500" size={18} />
+                            </div>
                             <div>
-                                <h4 className="font-bold text-sm">AI Listing Generator</h4>
-                                <p className="text-xs text-gray-500">One click → generates titles (per store), category, description, highlights & attributes</p>
+                                <h4 className="font-bold text-sm text-gray-800 dark:text-zinc-100">AI Listing Generator</h4>
+                                <p className="text-xs text-gray-500 dark:text-zinc-400">One click → generates titles (per store), category, description, highlights & attributes</p>
                             </div>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                             <select
                                 value={aiModel}
                                 onChange={(e) => setAiModel(e.target.value)}
-                                className="py-1 px-2.5 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700"
+                                className="py-1.5 px-2.5 border border-orange-200 dark:border-zinc-700 rounded-lg text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-400"
                             >
                                 <option value="gpt-4o-mini">GPT-4o Mini</option>
                                 <option value="gpt-4o">GPT-4o (Vision)</option>
@@ -1824,19 +1849,20 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 type="button"
                                 onClick={handleAIGenerate}
                                 disabled={generating || !rawName}
-                                className="px-4 py-1.5 bg-orange-500 hover:bg-orange-600 text-white rounded text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 shadow"
+                                className="px-5 py-1.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 shadow-md shadow-orange-200 dark:shadow-none transition-all"
                             >
                                 {generating ? <RefreshCw className="animate-spin" size={12} /> : <Sparkles size={12} />}
                                 {generating ? 'Generating...' : 'Generate Content'}
                             </button>
                         </div>
-                    </Card>
+                    </div>
 
                     {/* Wholesale Pricing & Supplier Card (Internal Inventory) */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-5 space-y-4 shadow-sm">
-                        <div className="flex items-center justify-between border-b dark:border-zinc-800 pb-2">
-                            <h3 className="text-sm font-bold flex items-center gap-2">
-                                Wholesale Price & Supplier <span className="text-xs font-normal text-gray-400 dark:text-zinc-400">(Optional - Internal Inventory Only)</span>
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-5 space-y-4 shadow-sm">
+                        <div className="flex items-center justify-between border-b dark:border-zinc-800 pb-3">
+                            <h3 className="text-sm font-bold flex items-center gap-2 text-gray-700 dark:text-zinc-300">
+                                <span className="w-5 h-5 rounded bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-gray-400 text-[10px] font-bold">$</span>
+                                Wholesale Price & Supplier <span className="text-xs font-normal text-gray-400 dark:text-zinc-500">(Optional)</span>
                             </h3>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1877,8 +1903,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Section 1: Basic Information */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-6 space-y-5 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-2">1. Basic Information</h3>
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-5 shadow-sm">
+                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
+                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
+                            Basic Information
+                        </h3>
 
                         {/* Seller Accounts */}
                         <div className="space-y-1.5">
@@ -1930,63 +1959,82 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             <p className="text-xs text-gray-400">Saved automatically as draft when you leave this field</p>
                         </div>
 
-                        {/* Per-Store SEO Titles (shown after AI generation) */}
-                        {Object.keys(titlesPerStore).length > 0 && (
-                            <div className="space-y-2">
+                        {/* Product Title / Name on Daraz — always visible */}
+                        <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
                                 <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                    SEO-Optimized Product Titles (per store)
+                                    Product Title (Name on Daraz) <span className="text-red-500">*</span>
                                 </label>
+                                <span className="text-[10px] text-gray-400">
+                                    {((activeTitleStoreId || selectedStores[0]) ? (titlesPerStore[activeTitleStoreId || selectedStores[0]] || '') : '').length}/255
+                                </span>
+                            </div>
 
-                                {/* Store tabs */}
-                                {selectedStores.length > 1 && (
-                                    <div className="flex gap-1 border-b dark:border-zinc-800 mb-1">
-                                        {selectedStores.map(storeId => {
-                                            const store = stores.find(s => s.id === storeId)
-                                            return (
-                                                <button
-                                                    key={storeId}
-                                                    type="button"
-                                                    onClick={() => setActiveTitleStoreId(storeId)}
-                                                    className={`px-3 py-1 text-xs font-semibold rounded-t transition-all ${activeTitleStoreId === storeId
+                            {/* Per-store tabs — only when multiple stores */}
+                            {selectedStores.length > 1 && (
+                                <div className="flex gap-1 border-b dark:border-zinc-800">
+                                    {selectedStores.map(storeId => {
+                                        const store = stores.find(s => s.id === storeId)
+                                        return (
+                                            <button
+                                                key={storeId}
+                                                type="button"
+                                                onClick={() => setActiveTitleStoreId(storeId)}
+                                                className={`px-3 py-1 text-xs font-semibold rounded-t transition-all ${
+                                                    (activeTitleStoreId || selectedStores[0]) === storeId
                                                         ? 'bg-orange-500 text-white'
                                                         : 'text-gray-500 hover:text-gray-700 dark:hover:text-zinc-300'
-                                                        }`}
-                                                >
-                                                    {store?.seller_account || storeId}
-                                                </button>
-                                            )
-                                        })}
-                                    </div>
-                                )}
+                                                }`}
+                                            >
+                                                {store?.seller_account || storeId}
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            )}
 
-                                {/* Active store title editor */}
-                                {(activeTitleStoreId || selectedStores[0]) && (() => {
-                                    const storeId = activeTitleStoreId || selectedStores[0]
-                                    const titleVal = titlesPerStore[storeId] || ''
-                                    return (
-                                        <div className="space-y-1">
-                                            <div className="flex justify-between">
-                                                <span className="text-xs text-gray-400">
-                                                    {stores.find(s => s.id === storeId)?.seller_account}
-                                                </span>
-                                                <span className="text-xs text-gray-400">{titleVal.length}/255</span>
-                                            </div>
-                                            <input
-                                                type="text"
-                                                value={titleVal}
-                                                onChange={(e) => setTitlesPerStore(prev => ({ ...prev, [storeId]: e.target.value }))}
-                                                maxLength={255}
-                                                className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
-                                            />
-                                        </div>
-                                    )
-                                })()}
-                            </div>
-                        )}
+                            {/* Title input — always shown */}
+                            {(() => {
+                                const storeId = activeTitleStoreId || selectedStores[0]
+                                const titleVal = (storeId && titlesPerStore[storeId])
+                                    ? titlesPerStore[storeId]
+                                    : (titlesPerStore['__manual__'] || Object.values(titlesPerStore)[0] || '')
+                                return (
+                                    <div className="space-y-1">
+                                        {selectedStores.length > 1 && storeId && (
+                                            <span className="text-[10px] text-gray-400">
+                                                {stores.find(s => s.id === storeId)?.seller_account}
+                                            </span>
+                                        )}
+                                        <input
+                                            type="text"
+                                            value={titleVal}
+                                            onChange={(e) => {
+                                                const val = e.target.value
+                                                if (storeId) {
+                                                    setTitlesPerStore(prev => ({ ...prev, [storeId]: val, '__manual__': val }))
+                                                } else {
+                                                    setTitlesPerStore(prev => ({ ...prev, '__manual__': val }))
+                                                }
+                                            }}
+                                            maxLength={255}
+                                            placeholder={rawName ? `e.g. ${rawName} — Premium Quality...` : 'Enter the product title that will appear on Daraz'}
+                                            className="w-full py-1.5 px-3 border rounded-lg text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                                        />
+                                        <p className="text-[10px] text-gray-400">
+                                            {Object.keys(titlesPerStore).length > 0
+                                                ? <span className="text-orange-500 font-medium">✦ AI-generated title — you can edit it</span>
+                                                : 'Type manually or click "Generate Content" to auto-generate an SEO-optimized title'
+                                            }
+                                        </p>
+                                    </div>
+                                )
+                            })()}
+                        </div>
 
                         {/* Category Picker with auto-select */}
                         <CategoryPicker
-                            productName={Object.values(titlesPerStore)[0] || ''}
+                            productName={Object.values(titlesPerStore).filter(t => t && t !== '').join(' ') || rawName || ''}
                             selectedCategoryId={categoryId}
                             onSelectCategory={(id, path) => {
                                 setCategoryId(id)
@@ -2064,9 +2112,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Section 2: Product Specification */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-6 space-y-4 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-2 flex items-center justify-between">
-                            2. Product Specification
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
+                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center justify-between">
+                            <span className="flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
+                                <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
+                                Product Specification
+                            </span>
                             {categoryId && (
                                 <span className="text-xs bg-orange-50 text-orange-600 dark:bg-orange-950/20 px-2 py-0.5 rounded border border-orange-100 dark:border-zinc-800">
                                     {categoryPath.split(' > ').slice(-2).join(' > ')}
@@ -2092,9 +2143,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Section 3: Price, Stock & Variants */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-6 space-y-4 shadow-sm">
-                        <div className="flex justify-between items-center border-b dark:border-zinc-800 pb-2">
-                            <h3 className="text-base font-bold">3. Price, Stock &amp; Variants</h3>
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
+                        <div className="flex justify-between items-center border-b dark:border-zinc-800 pb-3">
+                            <h3 className="text-base font-bold flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
+                                <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">3</span>
+                                Price, Stock &amp; Variants
+                            </h3>
                             {saleProps.length > 0 && (
                                 <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold">
                                     <input
@@ -2301,83 +2355,191 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Section 4: Product Description */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-6 space-y-4 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-2">4. Product Description</h3>
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-sm">
+                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
+                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">4</span>
+                            Product Description
+                        </h3>
 
-                        <div className="space-y-1">
-                            <div className="flex justify-between items-center">
-                                <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400">
-                                    Main Description (HTML) <span className="text-red-500">*</span>
-                                </label>
-                                <button
-                                    type="button"
-                                    onClick={() => setPreviewDesc(!previewDesc)}
-                                    className="text-xs font-bold text-orange-600 hover:underline"
-                                >
-                                    {previewDesc ? 'Editor' : 'HTML Preview'}
-                                </button>
+                        {/* Main Description */}
+                        <div className="space-y-1.5">
+                            <label className="text-sm font-medium text-gray-700 dark:text-zinc-200 block">
+                                Main Description
+                            </label>
+                            <div className="border border-gray-200 dark:border-zinc-700 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-gray-400 dark:focus-within:border-zinc-500 transition-colors shadow-xs">
+                                {/* Daraz Toolbar */}
+                                <div className="bg-white dark:bg-zinc-800/80 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex flex-wrap items-center justify-between gap-2 select-none">
+                                    <div className="flex items-center gap-2 text-gray-600 dark:text-zinc-400">
+                                        {/* Font size */}
+                                        <div className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-300 cursor-pointer border border-transparent hover:border-gray-200 dark:hover:border-zinc-600">
+                                            <span className="font-medium text-xs">11</span>
+                                            <ChevronDown size={12} className="text-gray-400" />
+                                        </div>
+
+                                        <div className="h-4 w-[1px] bg-gray-200 dark:bg-zinc-700" />
+
+                                        {/* Alignments */}
+                                        <button
+                                            type="button"
+                                            title="Align Left"
+                                            onClick={() => setDescAlign('left')}
+                                            className={`p-1.5 rounded transition-colors ${descAlign === 'left' ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-zinc-100' : 'text-gray-500 hover:text-gray-800 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-700'}`}
+                                        >
+                                            <AlignLeft size={15} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            title="Align Center"
+                                            onClick={() => setDescAlign('center')}
+                                            className={`p-1.5 rounded transition-colors ${descAlign === 'center' ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-zinc-100' : 'text-gray-500 hover:text-gray-800 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-700'}`}
+                                        >
+                                            <AlignCenter size={15} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            title="Align Right"
+                                            onClick={() => setDescAlign('right')}
+                                            className={`p-1.5 rounded transition-colors ${descAlign === 'right' ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-zinc-100' : 'text-gray-500 hover:text-gray-800 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-700'}`}
+                                        >
+                                            <AlignRight size={15} />
+                                        </button>
+
+                                        <div className="h-4 w-[1px] bg-gray-200 dark:bg-zinc-700" />
+
+                                        {/* Lists */}
+                                        <button
+                                            type="button"
+                                            title="Bulleted List"
+                                            onClick={() => {
+                                                setDescription(prev => prev ? prev + '\n<ul>\n  <li></li>\n</ul>' : '<ul>\n  <li></li>\n</ul>')
+                                            }}
+                                            className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-500 hover:text-gray-800 dark:text-zinc-400 transition-colors"
+                                        >
+                                            <List size={15} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            title="Numbered List"
+                                            onClick={() => {
+                                                setDescription(prev => prev ? prev + '\n<ol>\n  <li></li>\n</ol>' : '<ol>\n  <li></li>\n</ol>')
+                                            }}
+                                            className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-500 hover:text-gray-800 dark:text-zinc-400 transition-colors"
+                                        >
+                                            <ListOrdered size={15} />
+                                        </button>
+
+                                        <div className="h-4 w-[1px] bg-gray-200 dark:bg-zinc-700" />
+
+                                        {/* Image */}
+                                        <button
+                                            type="button"
+                                            title="Insert Image"
+                                            onClick={() => {
+                                                const url = prompt('Enter image URL:')
+                                                if (url) {
+                                                    setDescription(prev => prev + `\n<p><img src="${url}" alt="Product" style="max-width:100%;" /></p>`)
+                                                }
+                                            }}
+                                            className="flex items-center gap-0.5 p-1.5 rounded hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-500 hover:text-gray-800 dark:text-zinc-400 transition-colors"
+                                        >
+                                            <ImageIcon size={15} />
+                                            <ChevronDown size={11} className="text-gray-400" />
+                                        </button>
+                                    </div>
+
+                                    {/* Right side tools */}
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsAdvancedMode(!isAdvancedMode)}
+                                            className={`border text-xs px-2.5 py-1 rounded flex items-center gap-1.5 font-medium transition-colors ${
+                                                isAdvancedMode
+                                                    ? 'bg-orange-500 text-white border-orange-500 shadow-sm'
+                                                    : 'border-orange-500 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20'
+                                            }`}
+                                        >
+                                            <Maximize2 size={12} />
+                                            <span>Advanced Mode</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setPreviewDesc(!previewDesc)}
+                                            className={`border text-xs px-3 py-1 rounded font-medium transition-colors ${
+                                                previewDesc
+                                                    ? 'bg-gray-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent shadow-sm'
+                                                    : 'border-gray-300 dark:border-zinc-600 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-700'
+                                            }`}
+                                        >
+                                            {previewDesc ? 'Editor' : 'Preview'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Textarea or Preview */}
+                                {previewDesc ? (
+                                    <div
+                                        className={`p-4 prose dark:prose-invert max-w-none text-sm bg-gray-50/50 dark:bg-zinc-900/30 overflow-y-auto ${
+                                            isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
+                                        }`}
+                                        dangerouslySetInnerHTML={{
+                                            __html: description || '<p class="text-gray-400 dark:text-zinc-500 italic">No description content to preview</p>'
+                                        }}
+                                    />
+                                ) : (
+                                    <textarea
+                                        value={description}
+                                        onChange={(e) => setDescription(e.target.value)}
+                                        placeholder="Please input"
+                                        style={{ textAlign: descAlign }}
+                                        className={`w-full p-4 text-sm text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans ${
+                                            isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
+                                        }`}
+                                        required
+                                    />
+                                )}
                             </div>
-                            {previewDesc ? (
-                                <div
-                                    className="border dark:border-zinc-800 rounded p-3 min-h-[180px] prose dark:prose-invert text-sm max-w-none bg-gray-50/50 dark:bg-zinc-800/10"
-                                    dangerouslySetInnerHTML={{ __html: description }}
-                                />
-                            ) : (
-                                <textarea
-                                    value={description}
-                                    onChange={(e) => setDescription(e.target.value)}
-                                    placeholder='AI will generate: "Perfect for: [3 lines]" + ~200 word product description...'
-                                    className="w-full border dark:border-zinc-800 rounded p-3 text-sm focus:outline-none focus:ring-1 focus:ring-orange-500 font-mono min-h-[180px] bg-white dark:bg-zinc-800 resize-y"
-                                    required
-                                />
-                            )}
                         </div>
 
                         {/* Highlights */}
-                        <div className="space-y-2">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                Key Highlights (Bullet Points) <span className="text-red-500">*</span>
-                                <span className="text-gray-400 font-normal ml-1">— AI generates 8-10 points covering specs, benefits & care</span>
+                        <div className="space-y-1.5">
+                            <label className="text-sm font-medium text-gray-700 dark:text-zinc-200 flex items-center gap-1">
+                                <span className="text-red-500 font-bold">*</span> Highlights
                             </label>
-                            <div className="space-y-2">
-                                {highlights.map((h, i) => (
-                                    <div key={i} className="flex gap-2 items-center">
-                                        <span className="text-orange-500 font-bold text-sm">•</span>
-                                        <input
-                                            type="text"
-                                            value={h}
-                                            onChange={(e) => {
-                                                const next = [...highlights]
-                                                next[i] = e.target.value
-                                                setHighlights(next)
-                                            }}
-                                            placeholder="Add highlight..."
-                                            className="flex-1 py-1 px-3 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700"
-                                        />
-                                        {highlights.length > 1 && (
-                                            <button type="button" onClick={() => setHighlights(highlights.filter((_, idx) => idx !== i))} className="p-1 hover:text-red-500">
-                                                <Trash2 size={14} />
-                                            </button>
-                                        )}
-                                    </div>
-                                ))}
-                                <button
-                                    type="button"
-                                    onClick={() => setHighlights([...highlights, ''])}
-                                    className="text-xs text-orange-600 font-bold hover:underline flex items-center gap-1"
-                                >
-                                    <Plus size={12} /> Add Highlight
-                                </button>
+                            <div className="border border-gray-200 dark:border-zinc-700 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-gray-400 dark:focus-within:border-zinc-500 transition-colors shadow-xs">
+                                {/* Daraz Toolbar */}
+                                <div className="bg-white dark:bg-zinc-800/80 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex items-center justify-between select-none">
+                                    <button
+                                        type="button"
+                                        title="Bulleted List"
+                                        className="p-1.5 rounded bg-gray-100 dark:bg-zinc-700 text-gray-800 dark:text-zinc-200 cursor-default"
+                                    >
+                                        <List size={16} />
+                                    </button>
+                                    <span className="text-[11px] text-gray-400">
+                                        {highlights.filter(h => h.trim()).length} point{highlights.filter(h => h.trim()).length === 1 ? '' : 's'} (1 per line)
+                                    </span>
+                                </div>
+
+                                {/* Highlights Textarea */}
+                                <textarea
+                                    value={highlights.join('\n')}
+                                    onChange={(e) => {
+                                        setHighlights(e.target.value.split('\n'))
+                                    }}
+                                    placeholder="Please input"
+                                    rows={6}
+                                    className="w-full p-4 min-h-[160px] text-sm text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans"
+                                />
                             </div>
-                            <p className="text-xs text-gray-400">
-                                {highlights.filter(h => h.trim()).length} highlights added
-                            </p>
                         </div>
                     </div>
 
                     {/* Section 5: Shipping */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-6 space-y-4 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-2">5. Shipping &amp; Package</h3>
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
+                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
+                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">5</span>
+                            Shipping &amp; Package
+                        </h3>
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                             {[
                                 { label: 'Weight (kg)', val: weight, set: setWeight, step: '0.01' },
@@ -2420,60 +2582,21 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Action buttons */}
-                    <div className="bg-gray-100 dark:bg-zinc-950 p-4 border dark:border-zinc-800 rounded-lg flex justify-end gap-3">
-                        <button type="button" onClick={handleBackToList} className="px-4 py-2 border rounded text-sm hover:bg-gray-200 dark:hover:bg-zinc-850 text-gray-700 dark:text-gray-300">
-                            Cancel
+                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-4 flex justify-between items-center gap-3 shadow-sm">
+                        <button type="button" onClick={handleBackToList} className="px-4 py-2 border dark:border-zinc-700 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-zinc-800 text-gray-600 dark:text-gray-400 transition-all font-medium">
+                            ← Back to List
                         </button>
                         <button
                             type="submit"
                             disabled={submitting}
-                            className="px-6 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded font-bold text-sm shadow flex items-center gap-2 disabled:opacity-50"
+                            className="px-7 py-2.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded-lg font-bold text-sm shadow-md shadow-orange-200 dark:shadow-none flex items-center gap-2 disabled:opacity-50 transition-all"
                         >
                             {submitting
-                                ? <><Loader2 className="animate-spin" size={16} /> Pushing...</>
+                                ? <><Loader2 className="animate-spin" size={16} /> Pushing to Daraz...</>
                                 : <><Send size={16} /> Push to Daraz ({selectedStores.length} store{selectedStores.length !== 1 ? 's' : ''})</>
                             }
                         </button>
                     </div>
-                </div>
-
-                {/* Right Sidebar: Content Score */}
-                <div className="w-full lg:w-60 space-y-4 shrink-0 lg:sticky lg:top-20 h-fit self-start">
-                    <Card className="p-4 bg-white dark:bg-zinc-900 border dark:border-zinc-800 space-y-4 shadow-sm text-xs">
-                        <div>
-                            <h4 className="font-bold text-gray-400 uppercase tracking-wider mb-1">Content Score</h4>
-                            <div className="flex items-center justify-between">
-                                <span className={`px-2 py-0.5 rounded-full font-bold ${contentScore < 40 ? 'bg-red-50 text-red-600' : contentScore < 70 ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>
-                                    {contentScore < 40 ? 'Poor' : contentScore < 70 ? 'Needs Work' : 'Excellent'}
-                                </span>
-                                <span className="text-base font-bold">{contentScore}%</span>
-                            </div>
-                            <div className="w-full bg-gray-100 dark:bg-zinc-800 h-1.5 rounded-full overflow-hidden mt-2">
-                                <div
-                                    className={`h-full transition-all duration-500 ${contentScore < 40 ? 'bg-red-500' : contentScore < 70 ? 'bg-orange-500' : 'bg-green-500'}`}
-                                    style={{ width: `${contentScore}%` }}
-                                />
-                            </div>
-                        </div>
-
-                        <div className="space-y-2">
-                            <h5 className="font-bold border-b dark:border-zinc-800 pb-1 text-gray-500">Checklist</h5>
-                            {checklist.map((item, i) => (
-                                <div key={i} className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.met ? 'bg-green-500' : 'bg-orange-400'}`} />
-                                    <span className={item.met ? 'line-through text-gray-400 dark:text-gray-600' : ''}>{item.label}</span>
-                                </div>
-                            ))}
-                        </div>
-
-                        {editingDraftId && (
-                            <div className="pt-1 border-t dark:border-zinc-800 text-gray-400 text-[10px]">
-                                Draft ID: {editingDraftId.substring(0, 8)}...
-                                <br />Auto-synced to database
-                            </div>
-                        )}
-                    </Card>
-                </div>
             </form>
 
             <datalist id="variant-color-options">

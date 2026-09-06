@@ -143,6 +143,27 @@ export async function POST(request: NextRequest) {
                     }
                 }
 
+                // Format description: if plain text (no HTML tags), wrap each paragraph in <p> tags
+                // Daraz requires HTML in the description field for proper rendering
+                let formattedDescription = migratedDescription
+                if (formattedDescription && !/<[a-z][\s\S]*>/i.test(formattedDescription)) {
+                    const paragraphs = formattedDescription
+                        .split(/\n{2,}/)
+                        .map((para: string) => para.trim())
+                        .filter(Boolean)
+                    if (paragraphs.length > 0) {
+                        formattedDescription = paragraphs
+                            .map((para: string) => {
+                                // Handle single-line-break lines within a paragraph
+                                const lines = para.split(/\n/).map((l: string) => l.trim()).filter(Boolean)
+                                return `<p>${lines.join('<br/>')}</p>`
+                            })
+                            .join('')
+                    } else {
+                        formattedDescription = `<p>${formattedDescription}</p>`
+                    }
+                }
+
                 // Fetch category schema and filter out non-required (optional) attributes
                 let filteredAttributes: Record<string, string> = {}
                 try {
@@ -178,7 +199,7 @@ export async function POST(request: NextRequest) {
                     images: darazMainImages,
                     name,
                     shortDescription: formattedShortDesc,
-                    description: migratedDescription,
+                    description: formattedDescription,
                     brand: brand || 'Remark', // Default Brand if empty
                     attributes: {
                         warranty_type: 'No Warranty', // Default fallback
