@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
-    Sparkles, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
+    Sparkles, Copy, Check, Pencil, X, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
     RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store,
     AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2,
     Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock
@@ -218,6 +218,25 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [selectedSupplierId, setSelectedSupplierId] = useState<string>('')
     const [wholesalePrice, setWholesalePrice] = useState<number | undefined>(undefined)
 
+    // ── Quick Edit Modals on Card (Desktop) ─────────────────────────────────
+    const [imageModalDraft, setImageModalDraft] = useState<DraftListing | null>(null)
+    const [modalImages, setModalImages] = useState<string[]>([])
+    const [imageModalUploading, setImageModalUploading] = useState(false)
+    const [imageModalSaving, setImageModalSaving] = useState(false)
+
+    const [copiedTitleId, setCopiedTitleId] = useState<string | null>(null)
+
+    const [categoryModalDraft, setCategoryModalDraft] = useState<DraftListing | null>(null)
+    const [editCatId, setEditCatId] = useState<number | null>(null)
+    const [editCatPath, setEditCatPath] = useState<string>('')
+    const [editAttributes, setEditAttributes] = useState<Record<string, any>>({})
+    const [categoryModalSaving, setCategoryModalSaving] = useState(false)
+
+    const [priceModalDraft, setPriceModalDraft] = useState<DraftListing | null>(null)
+    const [editRegularPrice, setEditRegularPrice] = useState<string>('')
+    const [editSpecialPrice, setEditSpecialPrice] = useState<string>('')
+    const [priceModalSaving, setPriceModalSaving] = useState(false)
+
     // Per-store titles: { storeId: title }
     const [titlesPerStore, setTitlesPerStore] = useState<Record<string, string>>({})
     // Which store tab is active in the title editor
@@ -316,7 +335,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
     const fetchStores = async () => {
         try {
-            const res = await fetch('/api/daraz/stores')
+            const res = await fetch('/api/daraz/stores', { cache: 'no-store' })
             if (!res.ok) return
             const json = await res.json().catch(() => null)
             if (json?.success && json.data) {
@@ -328,18 +347,41 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
-    const fetchDrafts = async () => {
+    const fetchDrafts = async (retryArg?: any) => {
+        const retryCount = typeof retryArg === 'number' ? retryArg : 0
         setDraftsLoading(true)
         try {
-            const res = await fetch('/api/daraz/drafts')
-            if (!res.ok) return
-            const json = await res.json().catch(() => null)
-            if (json?.success) {
-                setDrafts(json.data || [])
-                setCurrentPage(1)
+            const res = await fetch('/api/daraz/drafts', { cache: 'no-store' })
+            if (res.ok) {
+                const json = await res.json().catch(() => null)
+                if (json?.success && Array.isArray(json.data)) {
+                    setDrafts(json.data)
+                    setCurrentPage(1)
+                    return
+                }
             }
-        } catch (err) {
-            console.error('Failed to load drafts:', err)
+            throw new Error('Drafts API response not OK')
+        } catch (err: any) {
+            // Direct client fallback to Supabase if Next API route is compiling, offline or aborted
+            try {
+                const { data, error } = await supabase
+                    .from('daraz_draft_listings')
+                    .select('*')
+                    .order('created_at', { ascending: false })
+                if (!error && Array.isArray(data)) {
+                    setDrafts(data as DraftListing[])
+                    setCurrentPage(1)
+                    return
+                }
+            } catch (fallbackErr) {
+                // Ignore fallback error
+            }
+
+            if (retryCount < 1) {
+                setTimeout(() => fetchDrafts(retryCount + 1), 600)
+            } else {
+                console.warn('[NewListingTab] Failed to load drafts after fallback:', err?.message || err)
+            }
         } finally {
             setDraftsLoading(false)
         }
@@ -540,6 +582,128 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             return filtered
         })
     }, [attributesSchema])
+
+    // ── Quick Modal Handlers (Desktop Card Improvements) ───────────────────
+    const handleModalDesktopUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!e.target.files || e.target.files.length === 0) return
+        const files = Array.from(e.target.files)
+        setImageModalUploading(true)
+        try {
+            const remaining = 8 - modalImages.length
+            if (remaining <= 0) {
+                alert('Maximum 8 photos allowed per product.')
+                return
+            }
+            const filesToUpload = files.slice(0, remaining)
+            const urls = await Promise.all(filesToUpload.map(f => uploadImageToSupabase(f)))
+            setModalImages(prev => [...prev, ...urls].slice(0, 8))
+        } catch (err: any) {
+            alert('Upload failed: ' + err.message)
+        } finally {
+            setImageModalUploading(false)
+            e.target.value = ''
+        }
+    }
+
+    const handleSaveModalImages = async () => {
+        if (!imageModalDraft) return
+        setImageModalSaving(true)
+        try {
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: imageModalDraft.id,
+                    images: modalImages
+                })
+            })
+            const json = await res.json()
+            if (!res.ok || json.error) throw new Error(json.error || 'Failed to update images')
+
+            setDrafts(prev => prev.map(d => d.id === imageModalDraft.id ? { ...d, images: modalImages } : d))
+            setImageModalDraft(null)
+        } catch (err: any) {
+            alert('Failed to save photos: ' + err.message)
+        } finally {
+            setImageModalSaving(false)
+        }
+    }
+
+    const handleOpenCategoryModal = (draft: DraftListing) => {
+        setCategoryModalDraft(draft)
+        setEditCatId(draft.category_id || null)
+        setEditCatPath(draft.category_path || '')
+        setEditAttributes(draft.attributes || {})
+    }
+
+    const handleSaveCategoryModal = async () => {
+        if (!categoryModalDraft) return
+        setCategoryModalSaving(true)
+        try {
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: categoryModalDraft.id,
+                    category_id: editCatId,
+                    category_path: editCatPath,
+                    attributes: editAttributes
+                })
+            })
+            const json = await res.json()
+            if (!res.ok || json.error) throw new Error(json.error || 'Failed to update category')
+
+            setDrafts(prev => prev.map(d => d.id === categoryModalDraft.id ? {
+                ...d,
+                category_id: editCatId || undefined,
+                category_path: editCatPath,
+                attributes: { ...(d.attributes || {}), ...editAttributes }
+            } : d))
+            setCategoryModalDraft(null)
+        } catch (err: any) {
+            alert('Failed to save category & specifications: ' + err.message)
+        } finally {
+            setCategoryModalSaving(false)
+        }
+    }
+
+    const handleOpenPriceModal = (draft: DraftListing) => {
+        setPriceModalDraft(draft)
+        setEditRegularPrice(draft.price !== undefined && draft.price !== null ? String(draft.price) : '')
+        setEditSpecialPrice(draft.special_price !== undefined && draft.special_price !== null ? String(draft.special_price) : '')
+    }
+
+    const handleSavePriceModal = async () => {
+        if (!priceModalDraft) return
+        const regPrice = editRegularPrice.trim() ? Number(editRegularPrice) : null
+        const specPrice = editSpecialPrice.trim() ? Number(editSpecialPrice) : null
+
+        setPriceModalSaving(true)
+        try {
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: priceModalDraft.id,
+                    price: regPrice,
+                    special_price: specPrice
+                })
+            })
+            const json = await res.json()
+            if (!res.ok || json.error) throw new Error(json.error || 'Failed to update price')
+
+            setDrafts(prev => prev.map(d => d.id === priceModalDraft.id ? {
+                ...d,
+                price: regPrice !== null ? regPrice : undefined,
+                special_price: specPrice !== null ? specPrice : undefined
+            } : d))
+            setPriceModalDraft(null)
+        } catch (err: any) {
+            alert('Failed to save price: ' + err.message)
+        } finally {
+            setPriceModalSaving(false)
+        }
+    }
 
     // ── Supabase image upload ────────────────────────────────────────────────
     const uploadImageToSupabase = async (file: File): Promise<string> => {
@@ -1777,7 +1941,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         <button
                             type="button"
-                            onClick={fetchDrafts}
+                            onClick={() => fetchDrafts()}
                             disabled={draftsLoading}
                             className="p-2 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md border border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400"
                             title="Refresh List"
@@ -1985,13 +2149,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 />
                                             </div>
 
-                                            {/* Product Image */}
-                                            <div className="relative flex-none">
+                                            {/* Product Image - Click opens Gallery & Desktop Upload */}
+                                            <div 
+                                                onClick={() => {
+                                                    setImageModalDraft(draft)
+                                                    setModalImages(draft.images ? [...draft.images] : [])
+                                                }}
+                                                className="relative flex-none cursor-pointer group"
+                                                title="Click to view & edit all photos"
+                                            >
                                                 <img
                                                     src={draft.images?.[0] || '/placeholder.png'}
                                                     alt="Preview"
-                                                    className="w-16 h-16 rounded object-cover border border-gray-200 dark:border-zinc-800 bg-gray-50"
+                                                    className="w-16 h-16 rounded object-cover border border-gray-200 dark:border-zinc-800 bg-gray-50 transition-transform group-hover:scale-105 group-hover:shadow-md"
                                                 />
+                                                <div className="absolute inset-0 bg-black/35 rounded opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                                    <Pencil size={14} />
+                                                </div>
                                                 {draft.images && draft.images.length > 1 && (
                                                     <span className="absolute bottom-0.5 right-0.5 bg-black/70 text-[9px] text-white px-1 rounded font-bold">
                                                         +{draft.images.length - 1}
@@ -2002,28 +2176,62 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             {/* Main info columns */}
                                             <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 items-center min-w-0">
                                                 
-                                                {/* Column 1: Names */}
+                                                {/* Column 1: Names + Copy Button for Daraz Title */}
                                                 <div className="min-w-0 flex flex-col justify-center">
                                                     <span className="font-bold text-gray-800 dark:text-zinc-200 block truncate text-sm" title={draft.raw_name}>
                                                         {draft.raw_name}
                                                     </span>
-                                                    <span className="text-xs mt-1 block truncate" title={draft.title || 'AI Content: Not Generated'}>
+                                                    <div className="text-xs mt-1 flex items-center min-w-0">
                                                         {draft.title ? (
-                                                            <span className="flex items-center gap-1 text-amber-700 dark:text-amber-400 font-medium">
+                                                            <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-medium min-w-0 max-w-full">
                                                                 <Sparkles size={12} className="shrink-0 text-amber-500" />
-                                                                {draft.title}
-                                                            </span>
+                                                                <span className="truncate" title={draft.title}>{draft.title}</span>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        navigator.clipboard.writeText(draft.title || '')
+                                                                        setCopiedTitleId(draft.id)
+                                                                        setTimeout(() => setCopiedTitleId(null), 2000)
+                                                                    }}
+                                                                    className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-100/60 dark:hover:bg-amber-950/40 rounded transition-colors"
+                                                                    title={copiedTitleId === draft.id ? 'Copied!' : 'Copy Daraz Title'}
+                                                                >
+                                                                    {copiedTitleId === draft.id ? (
+                                                                        <Check size={12} className="text-emerald-500" />
+                                                                    ) : (
+                                                                        <Copy size={12} />
+                                                                    )}
+                                                                </button>
+                                                            </div>
                                                         ) : (
-                                                            <span className="italic text-gray-400">AI Content Not Generated</span>
+                                                            <span className="italic text-gray-400 text-xs">AI Content Not Generated</span>
                                                         )}
-                                                    </span>
+                                                    </div>
                                                 </div>
 
-                                                {/* Column 2: Category & Attributes */}
+                                                {/* Column 2: Category & Attributes + Edit Icon */}
                                                 <div className="flex flex-col min-w-0">
-                                                    <span className="text-xs font-semibold text-gray-600 dark:text-zinc-400 truncate">
-                                                        {draft.category_path || 'No Category Selected'}
-                                                    </span>
+                                                    <div className="flex items-center gap-1.5 min-w-0">
+                                                        <span 
+                                                            onClick={() => handleOpenCategoryModal(draft)}
+                                                            className="text-xs font-semibold text-gray-700 dark:text-zinc-300 truncate cursor-pointer hover:text-orange-600 dark:hover:text-orange-400 transition-colors"
+                                                            title="Click to edit category & specifications"
+                                                        >
+                                                            {draft.category_path || 'No Category Selected'}
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handleOpenCategoryModal(draft)
+                                                            }}
+                                                            className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
+                                                            title="Edit Category & Product Specifications"
+                                                        >
+                                                            <Pencil size={11} />
+                                                        </button>
+                                                    </div>
                                                     <div className="flex flex-wrap gap-1 mt-1">
                                                         {draft.target_stores && draft.target_stores.map(storeId => {
                                                             const sName = stores.find(s => s.id === storeId)?.seller_account || 'Account'
@@ -2060,11 +2268,37 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     })()}
                                                 </div>
 
-                                                {/* Column 3: Price & Status */}
+                                                {/* Column 3: Price (Regular & Special) + Edit Icon */}
                                                 <div className="flex flex-col md:items-center justify-center min-w-0">
-                                                    <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">
-                                                        {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
-                                                    </span>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <div className="flex flex-col md:items-center">
+                                                            {draft.special_price ? (
+                                                                <div className="flex items-baseline gap-1.5">
+                                                                    <span className="text-sm font-bold text-emerald-600 dark:text-emerald-400">
+                                                                        NPR {draft.special_price}
+                                                                    </span>
+                                                                    <span className="text-[11px] text-gray-400 line-through">
+                                                                        NPR {draft.price || 0}
+                                                                    </span>
+                                                                </div>
+                                                            ) : (
+                                                                <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">
+                                                                    {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handleOpenPriceModal(draft)
+                                                            }}
+                                                            className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
+                                                            title="Edit Regular & Special Price"
+                                                        >
+                                                            <Pencil size={11} />
+                                                        </button>
+                                                    </div>
                                                     <div className="mt-1">
                                                         {statusBadge(draft.status, draft)}
                                                     </div>
@@ -2240,6 +2474,385 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             );
                         })()
                     )}
+                
+                {/* ── 1. Image Gallery & Desktop Upload Modal ──────────────── */}
+                {imageModalDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-2xl w-full flex flex-col max-h-[90vh] overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-zinc-800">
+                                <div>
+                                    <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                        Product Photos
+                                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-orange-600 dark:bg-orange-950/30 dark:text-orange-400 border border-orange-200 dark:border-orange-900/30">
+                                            {modalImages.length}/8
+                                        </span>
+                                    </h3>
+                                    <div className="flex items-center gap-1.5 mt-0.5 max-w-md min-w-0">
+                                        <p className="text-xs text-gray-500 dark:text-zinc-400 truncate" title={imageModalDraft.title || imageModalDraft.raw_name}>
+                                            {imageModalDraft.title || imageModalDraft.raw_name}
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const textToCopy = imageModalDraft.title || imageModalDraft.raw_name || ''
+                                                navigator.clipboard.writeText(textToCopy)
+                                                setCopiedTitleId('modal-img-' + imageModalDraft.id)
+                                                setTimeout(() => setCopiedTitleId(null), 2000)
+                                            }}
+                                            className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 rounded transition-colors"
+                                            title={copiedTitleId === 'modal-img-' + imageModalDraft.id ? 'Copied!' : 'Copy Product Title'}
+                                        >
+                                            {copiedTitleId === 'modal-img-' + imageModalDraft.id ? (
+                                                <Check size={12} className="text-emerald-500" />
+                                            ) : (
+                                                <Copy size={12} />
+                                            )}
+                                        </button>
+                                        {copiedTitleId === 'modal-img-' + imageModalDraft.id && (
+                                            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                                                Copied!
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setImageModalDraft(null)}
+                                    className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            {/* Gallery Content */}
+                            <div className="p-5 overflow-y-auto flex-1 space-y-4">
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                    {modalImages.map((url, idx) => (
+                                        <div
+                                            key={idx}
+                                            className={`relative group rounded-lg overflow-hidden border-2 bg-gray-50 dark:bg-zinc-800 aspect-square ${
+                                                idx === 0 ? 'border-orange-500 shadow-sm' : 'border-gray-200 dark:border-zinc-700'
+                                            }`}
+                                        >
+                                            <img src={url} alt={`Photo ${idx + 1}`} className="w-full h-full object-cover" />
+
+                                            {idx === 0 && (
+                                                <span className="absolute top-1.5 left-1.5 bg-orange-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                                                    Main
+                                                </span>
+                                            )}
+
+                                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-between p-2">
+                                                <div className="flex justify-end">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setModalImages(prev => prev.filter((_, i) => i !== idx))
+                                                        }}
+                                                        className="p-1 bg-red-600 hover:bg-red-700 text-white rounded shadow-xs transition-colors"
+                                                        title="Delete photo"
+                                                    >
+                                                        <Trash2 size={12} />
+                                                    </button>
+                                                </div>
+                                                {idx !== 0 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const updated = [url, ...modalImages.filter((_, i) => i !== idx)]
+                                                            setModalImages(updated)
+                                                        }}
+                                                        className="w-full py-1 bg-white/90 hover:bg-white text-gray-900 text-[10px] font-bold rounded shadow-xs transition-colors"
+                                                    >
+                                                        Set as Main
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+
+                                    {/* Upload from Desktop Tile */}
+                                    {modalImages.length < 8 && (
+                                        <label className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-orange-300 dark:border-orange-900/40 bg-orange-50/50 dark:bg-orange-950/10 hover:bg-orange-50 dark:hover:bg-orange-950/20 cursor-pointer aspect-square p-3 transition-colors ${
+                                            imageModalUploading ? 'opacity-60 pointer-events-none' : ''
+                                        }`}>
+                                            {imageModalUploading ? (
+                                                <Loader2 size={24} className="animate-spin text-orange-600 mb-1" />
+                                            ) : (
+                                                <Upload size={22} className="text-orange-600 dark:text-orange-400 mb-1" />
+                                            )}
+                                            <span className="text-[11px] font-bold text-orange-700 dark:text-orange-300 text-center">
+                                                {imageModalUploading ? 'Uploading...' : 'Add Photos'}
+                                            </span>
+                                            <span className="text-[9px] text-orange-600/70 dark:text-orange-400/70 text-center">
+                                                from Desktop
+                                            </span>
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                multiple
+                                                disabled={imageModalUploading}
+                                                onChange={handleModalDesktopUpload}
+                                                className="hidden"
+                                            />
+                                        </label>
+                                    )}
+                                </div>
+
+                                <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                                    💡 The first photo is your Daraz cover image. Up to 8 photos supported. Hover on any photo to delete or set as Main.
+                                </p>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/50">
+                                <button
+                                    type="button"
+                                    onClick={() => setImageModalDraft(null)}
+                                    disabled={imageModalSaving}
+                                    className="px-3.5 py-1.5 text-xs font-semibold text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSaveModalImages}
+                                    disabled={imageModalSaving || imageModalUploading}
+                                    className="px-4 py-1.5 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                >
+                                    {imageModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                                    Save Photos
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── 2. Category & Product Specifications Modal ───────────── */}
+                {categoryModalDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-3xl w-full flex flex-col max-h-[90vh] overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-zinc-800">
+                                <div>
+                                    <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100">
+                                        Edit Category & Product Specifications
+                                    </h3>
+                                    <div className="flex items-center gap-1.5 mt-0.5 max-w-lg min-w-0">
+                                        <p className="text-xs text-gray-500 dark:text-zinc-400 truncate" title={categoryModalDraft.title || categoryModalDraft.raw_name}>
+                                            {categoryModalDraft.title || categoryModalDraft.raw_name}
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const textToCopy = categoryModalDraft.title || categoryModalDraft.raw_name || ''
+                                                navigator.clipboard.writeText(textToCopy)
+                                                setCopiedTitleId('modal-cat-' + categoryModalDraft.id)
+                                                setTimeout(() => setCopiedTitleId(null), 2000)
+                                            }}
+                                            className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 rounded transition-colors"
+                                            title={copiedTitleId === 'modal-cat-' + categoryModalDraft.id ? 'Copied!' : 'Copy Product Title'}
+                                        >
+                                            {copiedTitleId === 'modal-cat-' + categoryModalDraft.id ? (
+                                                <Check size={12} className="text-emerald-500" />
+                                            ) : (
+                                                <Copy size={12} />
+                                            )}
+                                        </button>
+                                        {copiedTitleId === 'modal-cat-' + categoryModalDraft.id && (
+                                            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                                                Copied!
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setCategoryModalDraft(null)}
+                                    className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            {/* Body */}
+                            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+                                {/* Category Picker */}
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+                                        Category Selection
+                                    </label>
+                                    <CategoryPicker
+                                        productName={categoryModalDraft.raw_name || categoryModalDraft.title || ''}
+                                        selectedCategoryId={editCatId}
+                                        selectedCategoryPath={editCatPath}
+                                        onSelectCategory={(id, path) => {
+                                            setEditCatId(id)
+                                            setEditCatPath(path)
+                                        }}
+                                    />
+                                </div>
+
+                                {/* Dynamic Attributes */}
+                                <div className="space-y-2 pt-3 border-t border-gray-100 dark:border-zinc-800">
+                                    <label className="text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
+                                        Product Specifications & Key Attributes
+                                    </label>
+                                    {editCatId ? (
+                                        <div className="bg-gray-50/50 dark:bg-zinc-800/30 p-4 rounded-lg border border-gray-200 dark:border-zinc-800">
+                                            <DynamicAttributesForm
+                                                categoryId={editCatId}
+                                                values={editAttributes}
+                                                onChange={(k, v) => setEditAttributes(prev => ({ ...prev, [k]: v }))}
+                                                onLoadSaleProps={() => {}}
+                                            />
+                                        </div>
+                                    ) : (
+                                        <div className="p-6 text-center text-xs text-gray-400 italic bg-gray-50 dark:bg-zinc-800/30 rounded-lg border border-dashed border-gray-200 dark:border-zinc-800">
+                                            Please select a category above to configure specifications.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="flex items-center justify-end gap-2 px-6 py-3.5 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/50">
+                                <button
+                                    type="button"
+                                    onClick={() => setCategoryModalDraft(null)}
+                                    disabled={categoryModalSaving}
+                                    className="px-4 py-1.5 text-xs font-semibold text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSaveCategoryModal}
+                                    disabled={categoryModalSaving}
+                                    className="px-5 py-1.5 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                >
+                                    {categoryModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                                    Save Specifications
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── 3. Quick Price Editor Modal ─────────────────────────── */}
+                {priceModalDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-sm w-full flex flex-col overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-zinc-800">
+                                <div>
+                                    <h3 className="text-sm font-bold text-gray-900 dark:text-zinc-100">
+                                        Edit Price
+                                    </h3>
+                                    <div className="flex items-center gap-1.5 mt-0.5 max-w-[240px] min-w-0">
+                                        <p className="text-xs text-gray-500 dark:text-zinc-400 truncate" title={priceModalDraft.title || priceModalDraft.raw_name}>
+                                            {priceModalDraft.title || priceModalDraft.raw_name}
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const textToCopy = priceModalDraft.title || priceModalDraft.raw_name || ''
+                                                navigator.clipboard.writeText(textToCopy)
+                                                setCopiedTitleId('modal-price-' + priceModalDraft.id)
+                                                setTimeout(() => setCopiedTitleId(null), 2000)
+                                            }}
+                                            className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 rounded transition-colors"
+                                            title={copiedTitleId === 'modal-price-' + priceModalDraft.id ? 'Copied!' : 'Copy Product Title'}
+                                        >
+                                            {copiedTitleId === 'modal-price-' + priceModalDraft.id ? (
+                                                <Check size={12} className="text-emerald-500" />
+                                            ) : (
+                                                <Copy size={12} />
+                                            )}
+                                        </button>
+                                        {copiedTitleId === 'modal-price-' + priceModalDraft.id && (
+                                            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                                                Copied!
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setPriceModalDraft(null)}
+                                    className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </div>
+
+                            {/* Inputs */}
+                            <div className="p-5 space-y-4">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1">
+                                        Regular Selling Price (NPR) <span className="text-red-500">*</span>
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        value={editRegularPrice}
+                                        onChange={(e) => setEditRegularPrice(e.target.value)}
+                                        placeholder="e.g. 1000"
+                                        className="w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 outline-none"
+                                    />
+                                </div>
+
+                                <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                        <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                                            Special / Discount Price (NPR)
+                                        </label>
+                                        <span className="text-[10px] text-gray-400">Optional</span>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        value={editSpecialPrice}
+                                        onChange={(e) => setEditSpecialPrice(e.target.value)}
+                                        placeholder="e.g. 850 (leave empty if none)"
+                                        className="w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 outline-none"
+                                    />
+                                    {editSpecialPrice && Number(editSpecialPrice) >= Number(editRegularPrice) && Number(editRegularPrice) > 0 && (
+                                        <p className="text-[11px] text-amber-600 mt-1">
+                                            ⚠️ Special price is usually lower than regular price.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/50">
+                                <button
+                                    type="button"
+                                    onClick={() => setPriceModalDraft(null)}
+                                    disabled={priceModalSaving}
+                                    className="px-3.5 py-1.5 text-xs font-semibold text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSavePriceModal}
+                                    disabled={priceModalSaving}
+                                    className="px-4 py-1.5 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                >
+                                    {priceModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                                    Save Price
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
                 </div>
             </div>
         )

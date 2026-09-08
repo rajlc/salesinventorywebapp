@@ -32,10 +32,13 @@ import { createAdminClient } from '@/lib/supabase/server'
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json()
-        const {
+        let {
             storeIds,
+            storeId,
             primaryCategory,
+            primaryCategoryId,
             name,
+            productName,
             rawName,
             shortDescription,
             description,
@@ -49,12 +52,39 @@ export async function POST(request: NextRequest) {
             wholesalePrice
         } = body
 
+        if (!storeIds && storeId) {
+            storeIds = [storeId]
+        } else if (typeof storeIds === 'string') {
+            storeIds = [storeIds]
+        }
+
         if (!storeIds || !Array.isArray(storeIds) || storeIds.length === 0) {
             return NextResponse.json({ error: 'At least one storeId is required' }, { status: 400 })
         }
 
-        if (!primaryCategory) {
+        const effectiveCategory = primaryCategory || primaryCategoryId
+        if (!effectiveCategory) {
             return NextResponse.json({ error: 'primaryCategory is required' }, { status: 400 })
+        }
+        primaryCategory = effectiveCategory
+
+        const effectiveName = name || productName || rawName
+        if (effectiveName) {
+            name = effectiveName
+        }
+
+        if (!skus || !Array.isArray(skus) || skus.length === 0) {
+            skus = [{
+                price: body.price || 500,
+                specialPrice: body.specialPrice || body.special_price,
+                quantity: body.quantity || 100,
+                packageWeight: body.packageWeight || body.weight || 0.1,
+                packageLength: body.packageLength || body.pkg_length || 1,
+                packageWidth: body.packageWidth || body.pkg_width || 1,
+                packageHeight: body.packageHeight || body.pkg_height || 1,
+                images: Array.isArray(images) && images.length > 0 ? images.slice(0, 1) : [],
+                color_family: 'Not Specified'
+            }]
         }
 
         const supabase = await createAdminClient()
