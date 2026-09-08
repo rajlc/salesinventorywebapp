@@ -91,12 +91,12 @@ export default function DynamicAttributesForm({ categoryId, values, onChange, on
                     const value = values[attr.name] || ''
 
                     return (
-                        <div key={attr.name} className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 flex items-center gap-1.5">
-                                {isMandatory && <span className="text-red-500">*</span>}
-                                {attr.label || attr.name}
+                        <div key={attr.name} className="space-y-1.5">
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                {isMandatory && <span className="text-red-500 font-bold">*</span>}
+                                <span>{attr.label || attr.name}</span>
                                 {isKey && (
-                                    <span className="text-[9px] bg-orange-100 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400 px-1 py-0.2 rounded font-bold uppercase tracking-wider">
+                                    <span className="text-[9px] bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-400 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">
                                         KEY
                                     </span>
                                 )}
@@ -104,16 +104,18 @@ export default function DynamicAttributesForm({ categoryId, values, onChange, on
 
                             {/* Dropdown Select Attributes */}
                             {attr.input_type === 'singleSelect' && attr.options ? (
-                                <select
-                                    value={value}
-                                    onChange={(e) => onChange(attr.name, e.target.value)}
-                                    className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700"
-                                >
-                                    <option value="">Please Select</option>
-                                    {attr.options.map(opt => (
-                                        <option key={opt.name} value={opt.name}>{opt.name}</option>
-                                    ))}
-                                </select>
+                                <div className="relative">
+                                    <select
+                                        value={value}
+                                        onChange={(e) => onChange(attr.name, e.target.value)}
+                                        className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors cursor-pointer"
+                                    >
+                                        <option value="">Please Select</option>
+                                        {attr.options.map(opt => (
+                                            <option key={opt.name} value={opt.name}>{opt.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
                             ) : (
                                 /* Free Text Input Attributes */
                                 <input
@@ -121,7 +123,7 @@ export default function DynamicAttributesForm({ categoryId, values, onChange, on
                                     placeholder="Please Input or select option"
                                     value={value}
                                     onChange={(e) => onChange(attr.name, e.target.value)}
-                                    className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                                    className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-normal"
                                 />
                             )}
                         </div>
@@ -135,7 +137,7 @@ export default function DynamicAttributesForm({ categoryId, values, onChange, on
                     <button
                         type="button"
                         onClick={() => setShowAll(!showAll)}
-                        className="text-xs font-bold text-orange-600 hover:underline"
+                        className="text-xs font-semibold text-orange-600 hover:text-orange-700 hover:underline inline-flex items-center gap-1"
                     >
                         {showAll ? 'Show Less ∧' : `Show More (${sortedAttributes.length - 6} fields) ∨`}
                     </button>

@@ -57,15 +57,26 @@ export async function GET() {
             .eq('key', 'daraz_listing_prompt')
             .maybeSingle()
 
+        const currentModel = aiRow?.value?.model || 'gemini-1.5-flash'
+        const isGemini = currentModel.startsWith('gemini')
+        const geminiKey = aiRow?.value?.geminiApiKey || (isGemini ? aiRow?.value?.apiKey : '') || process.env.GEMINI_API_KEY || ''
+        const openaiKey = aiRow?.value?.openaiApiKey || (!isGemini ? aiRow?.value?.apiKey : '') || process.env.OPENAI_API_KEY || ''
+
         return NextResponse.json({
-            model: aiRow?.value?.model || 'gpt-4o-mini',
-            apiKey: aiRow?.value?.apiKey || '',
+            provider: aiRow?.value?.provider || (isGemini ? 'gemini' : 'openai'),
+            model: currentModel,
+            apiKey: isGemini ? geminiKey : openaiKey,
+            geminiApiKey: geminiKey,
+            openaiApiKey: openaiKey,
             listingPrompt: promptRow?.value?.prompt || DEFAULT_PROMPT
         })
     } catch (error: any) {
         return NextResponse.json({
-            model: 'gpt-4o-mini',
+            provider: 'gemini',
+            model: 'gemini-1.5-flash',
             apiKey: '',
+            geminiApiKey: '',
+            openaiApiKey: '',
             listingPrompt: DEFAULT_PROMPT
         })
     }
@@ -77,14 +88,24 @@ export async function POST(request: Request) {
         const body = await request.json()
 
         // Save model + API key
-        if (body.model !== undefined || body.apiKey !== undefined) {
+        if (body.model !== undefined || body.apiKey !== undefined || body.geminiApiKey !== undefined) {
+            const selectedModel = body.model || 'gemini-1.5-flash'
+            const selectedProvider = body.provider || (selectedModel.startsWith('gemini') ? 'gemini' : 'openai')
+            const isGemini = selectedProvider === 'gemini'
+            const geminiKey = body.geminiApiKey !== undefined ? body.geminiApiKey : (isGemini ? body.apiKey : '')
+            const openaiKey = body.openaiApiKey !== undefined ? body.openaiApiKey : (!isGemini ? body.apiKey : '')
+            const effectiveApiKey = isGemini ? geminiKey : openaiKey
+
             const { error: aiError } = await supabase
                 .from('app_settings')
                 .upsert({
                     key: 'daraz_ai_settings',
                     value: {
-                        model: body.model || 'gpt-4o-mini',
-                        apiKey: body.apiKey || ''
+                        provider: selectedProvider,
+                        model: selectedModel,
+                        apiKey: effectiveApiKey || '',
+                        geminiApiKey: geminiKey || '',
+                        openaiApiKey: openaiKey || ''
                     },
                     updated_at: new Date().toISOString()
                 }, { onConflict: 'key' })

@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
     Sparkles, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
     RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store,
-    AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2
+    AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2,
+    Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import CategoryPicker from './CategoryPicker'
@@ -21,8 +22,12 @@ interface SkuRow {
     size?: string
     price: number
     specialPrice?: number
+    specialPriceFrom?: string
+    specialPriceTo?: string
     quantity: number
     sellerSku: string
+    freeItems?: string
+    available?: boolean
     images: string[]
 }
 
@@ -36,7 +41,7 @@ interface DraftListing {
     category_id?: number
     category_path?: string
     images: string[]
-    attributes?: Record<string, string>
+    attributes?: Record<string, any>
     target_stores: string[]
     price?: number
     special_price?: number
@@ -48,6 +53,8 @@ interface DraftListing {
     pkg_height?: number
     supplier_id?: string
     wholesale_price?: number
+    product_link?: string
+    draft_type?: 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed'
     status: 'draft' | 'generating' | 'generated' | 'pushing' | 'pushed' | 'failed'
     error?: string
     created_at?: string
@@ -56,12 +63,17 @@ interface DraftListing {
 interface BulkAddRow {
     id: string
     rawName: string
+    productLink?: string
+    isExtracting?: boolean
     images: string[]
     targetStores: string[]
     price?: number
     special_price?: number
     supplier_id?: string
     wholesale_price?: number
+    extractedCategory?: { id: number; path: string }
+    description?: string
+    highlights?: string[]
 }
 
 // Formats today's date as YYYY-MM-DD
@@ -116,9 +128,82 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [bulkGenerating, setBulkGenerating] = useState(false)
     const [bulkPushing, setBulkPushing] = useState(false)
 
+    // ── Helper: Draft Classification ───────────────────────────────────────
+    const getDraftClassification = useCallback((draft: DraftListing): 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed' => {
+        if (draft.status === 'pushed') return 'pushed'
+        if (draft.draft_type) return draft.draft_type
+        const link = draft.product_link || draft.attributes?.product_link
+        const hasImages = Array.isArray(draft.images) && draft.images.length > 0
+        const hasLink = Boolean(link && String(link).trim().length > 0)
+        const isAutoName = !draft.raw_name || draft.raw_name.startsWith('[Image Only]') || draft.raw_name.startsWith('[Link]') || draft.raw_name.startsWith('Raw Product')
+        const hasRealName = Boolean(draft.raw_name && !isAutoName && draft.raw_name.trim().length > 0)
+
+        if (hasImages && !hasLink && !hasRealName) return 'image_only'
+        if (hasLink && !hasImages && !hasRealName) return 'link_only'
+        if (hasRealName && !hasImages && !hasLink) return 'name_only'
+
+        const hasTitle = Boolean(draft.title && draft.title.trim().length > 0)
+        const hasCategory = Boolean(draft.category_id)
+        const hasHighlights = Boolean(draft.highlights && draft.highlights.length > 0 && draft.highlights.some(h => h.trim().length > 0))
+        const hasDesc = Boolean(draft.description && draft.description.trim().length > 0)
+
+        if ((hasTitle || hasRealName) && hasCategory && hasHighlights && hasDesc && hasImages) {
+            return 'ready'
+        }
+        return 'pending'
+    }, [])
+
+    // ── Filtering state ─────────────────────────────────────────────────────
+    const [statusFilter, setStatusFilter] = useState<string>('all')
+    const [storeFilter, setStoreFilter] = useState<string>('')
+    const [searchQuery, setSearchQuery] = useState<string>('')
+
     // ── Stores & Suppliers ──────────────────────────────────────────────────
     const [stores, setStores] = useState<any[]>([])
     const [suppliers, setSuppliers] = useState<Array<{ id: string; supplier_name: string }>>([])
+
+    // ── Tab counts based on current storeFilter ─────────────────────────────
+    const tabCounts = useMemo(() => {
+        const storeFiltered = drafts.filter(draft => {
+            if (storeFilter) {
+                const hasStore = draft.target_stores && draft.target_stores.some(st => 
+                    st === storeFilter || 
+                    stores.find(s => s.id === storeFilter)?.seller_account?.toLowerCase() === st?.toLowerCase()
+                )
+                if (!hasStore) return false
+            }
+            return true
+        })
+
+        const counts = {
+            all: storeFiltered.length,
+            image_only: 0,
+            link_only: 0,
+            pending: 0,
+            ready: 0,
+            pushed: 0
+        }
+
+        storeFiltered.forEach(d => {
+            const type = getDraftClassification(d)
+            if (type === 'image_only') counts.image_only++
+            else if (type === 'link_only') counts.link_only++
+            else if (type === 'ready' || d.status === 'generated') counts.ready++
+            else if (type === 'pushed' || d.status === 'pushed') counts.pushed++
+            else counts.pending++
+        })
+
+        return counts
+    }, [drafts, storeFilter, stores, getDraftClassification])
+
+    const statusTabs = [
+        { label: 'All', value: 'all', count: tabCounts.all },
+        { label: 'Image Only', value: 'image_only', count: tabCounts.image_only },
+        { label: 'Link Only', value: 'link_only', count: tabCounts.link_only },
+        { label: 'Pending', value: 'pending', count: tabCounts.pending },
+        { label: 'Ready', value: 'ready', count: tabCounts.ready },
+        { label: 'Pushed', value: 'pushed', count: tabCounts.pushed },
+    ]
 
     // ── Bulk add rows ───────────────────────────────────────────────────────
     const [bulkRows, setBulkRows] = useState<BulkAddRow[]>([])
@@ -126,6 +211,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
     // ── Single / Edit form state ────────────────────────────────────────────
     const [rawName, setRawName] = useState('')
+    const [singleProductLink, setSingleProductLink] = useState('')
+    const [singleIsExtracting, setSingleIsExtracting] = useState(false)
     const [savingDraft, setSavingDraft] = useState(false)
     const [selectedStores, setSelectedStores] = useState<string[]>([])
     const [selectedSupplierId, setSelectedSupplierId] = useState<string>('')
@@ -168,21 +255,50 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [variant2Values, setVariant2Values] = useState<string[]>([])
     const [skuRows, setSkuRows] = useState<SkuRow[]>([])
 
+    // Daraz Variant UI states
+    const [addVariantImages, setAddVariantImages] = useState(false)
+    const [variantImages, setVariantImages] = useState<Record<string, string[]>>({})
+    const [variant1Name, setVariant1Name] = useState('Color Family')
+    const [variant2Name, setVariant2Name] = useState('Size')
+    const [showVariant2, setShowVariant2] = useState(false)
+    const [batchPrice, setBatchPrice] = useState<string>('')
+    const [batchSpecialPrice, setBatchSpecialPrice] = useState<string>('')
+    const [batchStock, setBatchStock] = useState<string>('')
+    const [variantInputText, setVariantInputText] = useState('')
+    const [variant2InputText, setVariant2InputText] = useState('')
+    const [singleSellerSku, setSingleSellerSku] = useState('')
+    const [singleFreeItems, setSingleFreeItems] = useState('')
+    const [singleAvailable, setSingleAvailable] = useState(true)
+    const variant1InputRef = useRef<HTMLInputElement>(null)
+    const variant2InputRef = useRef<HTMLInputElement>(null)
+
     const [weight, setWeight] = useState(0.1)
     const [length, setLength] = useState(1)
     const [width, setWidth] = useState(1)
     const [height, setHeight] = useState(1)
     const [dangerousGoods, setDangerousGoods] = useState('None')
 
-    const [aiModel, setAiModel] = useState('gpt-4o-mini')
+    const [aiModel, setAiModel] = useState('gemini-3.6-flash')
     const [generating, setGenerating] = useState(false)
     const [submitting, setSubmitting] = useState(false)
 
-    // ── Load stores + drafts + suppliers on mount ───────────────────────────
+    // ── Load stores + drafts + suppliers + AI settings on mount ─────────────
     useEffect(() => {
         fetchStores()
         fetchDrafts()
         fetchSuppliers()
+        // Auto-load configured model from settings
+        fetch('/api/settings/ai-integration')
+            .then(res => res.json())
+            .then(data => {
+                if (data.model) {
+                    const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(data.model)
+                        ? 'gemini-3.6-flash'
+                        : data.model
+                    setAiModel(normalized)
+                }
+            })
+            .catch(() => {})
     }, [])
 
     const fetchSuppliers = async () => {
@@ -253,29 +369,140 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }, [prefilledData])
 
-    // ── Variant SKU grid generation ──────────────────────────────────────────
+    // ── Variant SKU grid generation (preserves individual edits) ─────────────
     useEffect(() => {
-        if (!hasVariants) { setSkuRows([]); return }
-        const rows: SkuRow[] = []
+        if (!hasVariants && variant1Values.length === 0 && variant2Values.length === 0) {
+            setSkuRows([])
+            return
+        }
+
         const v1List = variant1Values.length > 0 ? variant1Values : ['']
         const v2List = variant2Values.length > 0 ? variant2Values : ['']
-        v1List.forEach(v1 => {
-            v2List.forEach(v2 => {
-                if (v1 || v2) {
-                    rows.push({
-                        colorFamily: v1 || undefined,
-                        size: v2 || undefined,
-                        price: sellingPrice,
-                        specialPrice,
-                        quantity: stock,
-                        sellerSku: `${rawName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 10).toUpperCase()}-${v1}-${v2}`,
-                        images: images.slice(0, 1)
-                    })
-                }
+
+        if (variant1Values.length === 0 && variant2Values.length === 0) {
+            setSkuRows([])
+            return
+        }
+
+        setSkuRows(prevRows => {
+            const existingMap = new Map<string, SkuRow>()
+            prevRows.forEach(r => {
+                const key = `${r.colorFamily || ''}__${r.size || ''}`
+                existingMap.set(key, r)
             })
+
+            const newRows: SkuRow[] = []
+            const rawPrefix = (rawName || 'SKU').replace(/[^a-zA-Z0-9]/g, '-').substring(0, 10).toUpperCase()
+
+            v1List.forEach(v1 => {
+                v2List.forEach(v2 => {
+                    if (v1 || v2) {
+                        const key = `${v1}__${v2}`
+                        const existing = existingMap.get(key)
+                        const vImages = (v1 && variantImages[v1]?.length) ? variantImages[v1] : []
+                        if (existing) {
+                            newRows.push({
+                                ...existing,
+                                images: vImages
+                            })
+                        } else {
+                            const skuParts = [rawPrefix, v1, v2].filter(Boolean)
+                            newRows.push({
+                                colorFamily: v1 || undefined,
+                                size: v2 || undefined,
+                                price: sellingPrice || 0,
+                                specialPrice: specialPrice,
+                                specialPriceFrom: specialPriceFrom,
+                                specialPriceTo: specialPriceTo,
+                                quantity: stock || 100,
+                                sellerSku: skuParts.join('-'),
+                                freeItems: '',
+                                available: true,
+                                images: vImages
+                            })
+                        }
+                    }
+                })
+            })
+            return newRows
         })
-        setSkuRows(rows)
-    }, [hasVariants, variant1Values, variant2Values, sellingPrice, specialPrice, stock])
+    }, [hasVariants, variant1Values, variant2Values, variantImages])
+
+    // Update variant names when category saleProps change
+    useEffect(() => {
+        if (saleProps && saleProps.length > 0) {
+            if (saleProps[0]?.label || saleProps[0]?.name) {
+                setVariant1Name(saleProps[0].label || saleProps[0].name)
+            }
+            if (saleProps.length > 1 && (saleProps[1]?.label || saleProps[1]?.name)) {
+                setVariant2Name(saleProps[1].label || saleProps[1].name)
+            }
+        }
+    }, [saleProps])
+
+    const DARAZ_STANDARD_COLORS = [
+        'Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Pink', 'Purple',
+        'Orange', 'Brown', 'Grey', 'Gold', 'Silver', 'Multicolor', 'Beige',
+        'Navy Blue', 'Maroon', 'Teal', 'Bronze', 'Copper', 'Rose Gold', 'Khaki'
+    ]
+
+    const DARAZ_STANDARD_SIZES = [
+        'XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL', 'Free Size', 'One Size',
+        '28', '30', '32', '34', '36', '38', '40', '42', '44'
+    ]
+
+    const availableV1Options = useMemo(() => {
+        if (saleProps && saleProps[0]?.options && saleProps[0].options.length > 0) {
+            return saleProps[0].options.map((o: any) => o.name)
+        }
+        return DARAZ_STANDARD_COLORS
+    }, [saleProps])
+
+    const availableV2Options = useMemo(() => {
+        if (saleProps && saleProps.length > 1 && saleProps[1]?.options && saleProps[1].options.length > 0) {
+            return saleProps[1].options.map((o: any) => o.name)
+        }
+        return DARAZ_STANDARD_SIZES
+    }, [saleProps])
+
+    const handleBatchApply = () => {
+        setSkuRows(prev => prev.map(row => ({
+            ...row,
+            price: batchPrice ? Number(batchPrice) : row.price,
+            specialPrice: batchSpecialPrice !== '' ? Number(batchSpecialPrice) : row.specialPrice,
+            quantity: batchStock ? Number(batchStock) : row.quantity
+        })))
+    }
+
+    const handleVariantImageUpload = async (variantVal: string, file: File) => {
+        try {
+            const url = await uploadImageToSupabase(file)
+            const currentImages = variantImages[variantVal] || []
+            const next = { ...variantImages, [variantVal]: [...currentImages, url] }
+            setVariantImages(next)
+            setSkuRows(prev => prev.map(row => {
+                if (row.colorFamily === variantVal) {
+                    return { ...row, images: [...(row.images || []), url] }
+                }
+                return row
+            }))
+        } catch (err: any) {
+            alert('Failed to upload variant image: ' + err.message)
+        }
+    }
+
+    const handleRemoveVariantImage = (variantVal: string, imgIdx: number) => {
+        const current = variantImages[variantVal] || []
+        const updated = current.filter((_, i) => i !== imgIdx)
+        const next = { ...variantImages, [variantVal]: updated }
+        setVariantImages(next)
+        setSkuRows(prev => prev.map(row => {
+            if (row.colorFamily === variantVal) {
+                return { ...row, images: updated }
+            }
+            return row
+        }))
+    }
 
     // Auto-filter dynamic attributes to keep ONLY required specifications
     // Auto-fills empty required fields with sensible defaults (e.g. first option)
@@ -359,8 +586,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     raw_name: rawName.trim(),
+                    product_link: singleProductLink.trim() || undefined,
                     target_stores: selectedStores,
                     images,
+                    category_id: categoryId || null,
+                    category_path: categoryPath || '',
+                    attributes: dynamicAttributes || {},
                     price: sellingPrice || null,
                     supplier_id: selectedSupplierId || null,
                     wholesale_price: wholesalePrice || null,
@@ -394,9 +625,99 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }, [editingDraftId])
 
+    const [draftSavedSuccess, setDraftSavedSuccess] = useState(false)
+
+    // ── Save full form as draft ──────────────────────────────────────────────
+    const handleSaveAsDraft = async () => {
+        const effectiveRawName = rawName.trim() || (singleProductLink.trim() ? `[Link] ${singleProductLink.trim().slice(0, 40)}` : (images.length > 0 ? `[Image Only] ${new Date().toLocaleDateString()}` : ''))
+        if (!effectiveRawName) {
+            return alert('Please enter a Product Name, paste a Competitor Link, or upload an Image to save as draft')
+        }
+        setSavingDraft(true)
+        try {
+            const primaryTitle = Object.values(titlesPerStore)[0] || titlesPerStore['__manual__'] || (rawName.trim() || effectiveRawName)
+            const cleanHighlights = highlights
+                .filter(h => h.trim().length > 0)
+                .map(h => h.replace(/^[•\-\*\s]+/, '').trim())
+                .filter(Boolean)
+
+            const draftPayload: any = {
+                raw_name: effectiveRawName,
+                product_link: singleProductLink.trim() || undefined,
+                title: primaryTitle,
+                titles_per_store: titlesPerStore,
+                description: description || '',
+                highlights: cleanHighlights,
+                category_id: categoryId || null,
+                category_path: categoryPath || '',
+                images: images || [],
+                attributes: {
+                    ...(dynamicAttributes || {}),
+                    ...(hasVariants ? {
+                        has_variants: true,
+                        variant1_name: variant1Name,
+                        variant1_values: variant1Values,
+                        variant2_name: variant2Name,
+                        variant2_values: variant2Values,
+                        sku_rows: skuRows,
+                        variant_images: variantImages,
+                        add_variant_images: addVariantImages
+                    } : {
+                        has_variants: false,
+                        color_family: singleColorFamily,
+                        size: singleSize
+                    })
+                },
+                target_stores: selectedStores || [],
+                price: (hasVariants && skuRows.length > 0) ? (Number(skuRows[0]?.price) || sellingPrice || null) : (sellingPrice || null),
+                special_price: (hasVariants && skuRows.length > 0) ? (Number(skuRows[0]?.specialPrice) || specialPrice || null) : (specialPrice || null),
+                special_price_from: specialPriceFrom || null,
+                special_price_to: specialPriceTo || null,
+                weight: weight || 0.1,
+                pkg_length: length || 1,
+                pkg_width: width || 1,
+                pkg_height: height || 1,
+                supplier_id: selectedSupplierId || null,
+                wholesale_price: wholesalePrice || null,
+                status: 'draft'
+            }
+
+            if (editingDraftId) {
+                const res = await fetch('/api/daraz/drafts', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: editingDraftId, ...draftPayload })
+                })
+                const json = await res.json()
+                if (!json.success) throw new Error(json.error || 'Failed to update draft')
+            } else {
+                const res = await fetch('/api/daraz/drafts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(draftPayload)
+                })
+                const json = await res.json()
+                if (!json.success) throw new Error(json.error || 'Failed to create draft')
+                if (json.data?.id) {
+                    setEditingDraftId(json.data.id)
+                }
+            }
+
+            setDraftSavedSuccess(true)
+            setTimeout(() => setDraftSavedSuccess(false), 3000)
+            fetchDrafts()
+        } catch (err: any) {
+            console.error('Save as draft failed:', err)
+            alert('Failed to save draft: ' + err.message)
+        } finally {
+            setSavingDraft(false)
+        }
+    }
+
     // ── Single AI Generation ──────────────────────────────────────────────────
     const handleAIGenerate = async () => {
-        if (!rawName.trim()) return alert('Please enter a product name first')
+        const hasImage = images.length > 0
+        if (!rawName.trim() && !hasImage) return alert('Please enter a product name or upload an image first')
         if (selectedStores.length === 0) return alert('Please select at least one seller account')
         setGenerating(true)
 
@@ -410,11 +731,13 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             const storeNames = selectedStores
                 .map(id => stores.find(s => s.id === id)?.seller_account || id)
 
+            const effectiveName = rawName.trim() || 'Product from uploaded image'
+
             const res = await fetch('/api/daraz/products/ai-generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    productName: rawName,
+                    productName: effectiveName,
                     price: sellingPrice || 500,
                     imageUrl: images[0] || null,
                     storeNames,
@@ -490,9 +813,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     }
 
     const handleSingleGenerate = async (draft: DraftListing) => {
-        if (!draft.raw_name?.trim()) return alert('Product name is required')
-        if (!draft.target_stores || draft.target_stores.length === 0) {
-            return alert('No target stores configured for this draft. Please edit it first.')
+        const hasImage = draft.images && draft.images.length > 0
+        const isImageOnly = !draft.raw_name?.trim() || draft.raw_name.startsWith('[Image Only]')
+        const effectiveName = !isImageOnly ? draft.raw_name!.trim() : (hasImage ? 'Product from uploaded image' : '')
+        if (!effectiveName && !hasImage) return alert('Product name or image is required')
+
+        let targetStores = draft.target_stores
+        if (!targetStores || targetStores.length === 0) {
+            if (stores.length > 0) {
+                targetStores = [stores[0].id]
+            } else {
+                return alert('No online store found. Please connect a Daraz store first.')
+            }
         }
 
         setGeneratingId(draft.id)
@@ -508,14 +840,14 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setDrafts(prev => prev.map(d => d.id === draft.id ? { ...d, status: 'generating' } : d))
 
         try {
-            const storeNames = draft.target_stores
+            const storeNames = targetStores
                 .map(id => stores.find(s => s.id === id)?.seller_account || id)
 
             const res = await fetch('/api/daraz/products/ai-generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    productName: draft.raw_name,
+                    productName: effectiveName,
                     price: draft.price || 500,
                     imageUrl: draft.images?.[0] || null,
                     storeNames: storeNames.length > 0 ? storeNames : ['Default Store'],
@@ -526,28 +858,32 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
             if (data.success) {
                 const newTitlesPerStore: Record<string, string> = {}
-                draft.target_stores.forEach(storeId => {
+                targetStores.forEach(storeId => {
                     const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
-                    newTitlesPerStore[storeId] = data.titles?.[storeName] || draft.raw_name
+                    newTitlesPerStore[storeId] = data.titles?.[storeName] || effectiveName
                 })
+
+                const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
                 await fetch('/api/daraz/drafts', {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         id: draft.id,
-                        title: Object.values(newTitlesPerStore)[0] || draft.raw_name,
+                        title: finalTitle,
+                        raw_name: isImageOnly ? finalTitle : draft.raw_name,
+                        target_stores: targetStores,
                         titles_per_store: newTitlesPerStore,
                         description: data.description || '',
                         highlights: data.highlights || [],
-                        attributes: data.attributes || {},
+                        attributes: { ...(data.attributes || {}), brand: 'No Brand' },
                         category_id: data.category_id || null,
                         category_path: data.category_suggestion || '',
                         status: 'generated'
                     })
                 })
                 
-                alert(`AI content generated successfully for "${draft.raw_name}"!`)
+                alert(`AI content generated successfully for "${finalTitle}"!`)
             } else {
                 throw new Error(data.error || 'AI Generation failed')
             }
@@ -570,6 +906,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setBulkRows([{
             id: crypto.randomUUID(),
             rawName: '',
+            productLink: '',
             images: [],
             targetStores: stores.length > 0 ? [stores[0].id] : [],
             price: undefined,
@@ -579,6 +916,116 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }])
         setViewMode('add-bulk')
         setIsAddMenuOpen(false)
+    }
+
+    const handleExtractRowLink = async (idx: number) => {
+        const row = bulkRows[idx]
+        if (!row.productLink || !row.productLink.trim()) {
+            return alert('Please enter a product URL first')
+        }
+        const updated = [...bulkRows]
+        updated[idx].isExtracting = true
+        setBulkRows(updated)
+
+        try {
+            const res = await fetch('/api/daraz/extract-link', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: row.productLink.trim() })
+            })
+            const json = await res.json()
+            if (!res.ok || !json.success) {
+                throw new Error(json.error || 'Failed to extract product link')
+            }
+
+            const data = json.data
+            setBulkRows(prev => {
+                const next = [...prev]
+                const cur = next[idx]
+                if (!cur) return prev
+
+                if (!cur.rawName.trim() && data.raw_name) {
+                    cur.rawName = data.raw_name
+                }
+                if (data.special_price) {
+                    cur.special_price = data.special_price
+                    cur.price = data.price || (data.special_price + 200)
+                } else if (data.price) {
+                    cur.price = data.price
+                    cur.special_price = data.price > 200 ? data.price - 200 : data.price
+                }
+                if (data.images && data.images.length > 0) {
+                    const existing = cur.images || []
+                    const merged = Array.from(new Set([...existing, ...data.images])).slice(0, 8)
+                    cur.images = merged
+                }
+                if (data.category_id) {
+                    cur.extractedCategory = { id: data.category_id, path: data.category_path || '' }
+                }
+                if (data.description) {
+                    cur.description = data.description
+                }
+                if (data.highlights) {
+                    cur.highlights = data.highlights
+                }
+                return next
+            })
+        } catch (err: any) {
+            alert('Extraction failed: ' + err.message)
+        } finally {
+            setBulkRows(prev => prev.map((r, i) => i === idx ? { ...r, isExtracting: false } : r))
+        }
+    }
+
+    const handleSingleExtractLink = async () => {
+        if (!singleProductLink.trim()) return alert('Please enter a competitor product URL')
+        setSingleIsExtracting(true)
+        try {
+            const res = await fetch('/api/daraz/extract-link', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: singleProductLink.trim() })
+            })
+            const json = await res.json()
+            if (!res.ok || !json.success) {
+                throw new Error(json.error || 'Failed to extract product link')
+            }
+            const data = json.data
+            if (data.raw_name && !rawName) setRawName(data.raw_name)
+            if (data.title) {
+                const initTitles: Record<string, string> = { ...titlesPerStore }
+                selectedStores.forEach(sId => { if (!initTitles[sId]) initTitles[sId] = data.title })
+                initTitles['__manual__'] = data.title
+                setTitlesPerStore(initTitles)
+            }
+            if (data.special_price) {
+                setSpecialPrice(data.special_price)
+                setSellingPrice(data.price || data.special_price + 200)
+            } else if (data.price) {
+                setSellingPrice(data.price)
+                setSpecialPrice(data.price > 200 ? data.price - 200 : data.price)
+            }
+            if (data.images && data.images.length > 0) {
+                const merged = Array.from(new Set([...images, ...data.images])).slice(0, 8)
+                setImages(merged)
+            }
+            if (data.category_id) {
+                setCategoryId(data.category_id)
+                setCategoryPath(data.category_path || '')
+                setAiCategorySuggestion(data.category_path || null)
+            }
+            if (data.description) {
+                setDescription(data.description)
+            }
+            if (data.highlights && data.highlights.length > 0) {
+                setHighlights(data.highlights)
+            }
+            alert(`Extracted details successfully from ${data.platform || 'link'}!`)
+        } catch (err: any) {
+            alert('Extraction failed: ' + err.message)
+        } finally {
+            setSingleIsExtracting(false)
+        }
     }
 
     const handleBulkImageUpload = async (rowId: string, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -596,8 +1043,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     }
 
     const handleSaveBulkDrafts = async () => {
-        const valid = bulkRows.filter(r => r.rawName.trim().length > 0)
-        if (valid.length === 0) return alert('Please enter at least one product name')
+        const valid = bulkRows.filter(r => 
+            r.rawName.trim().length > 0 || 
+            (r.productLink && r.productLink.trim().length > 0) || 
+            (r.images && r.images.length > 0)
+        )
+        if (valid.length === 0) return alert('Please enter at least a product name, competitor link, or upload an image')
 
         // Save each bulk row to Supabase
         await Promise.all(valid.map(r =>
@@ -606,6 +1057,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     raw_name: r.rawName.trim(),
+                    product_link: r.productLink?.trim() || null,
+                    category_id: r.extractedCategory?.id || null,
+                    category_path: r.extractedCategory?.path || null,
+                    description: r.description || null,
+                    highlights: r.highlights || null,
                     images: r.images,
                     target_stores: r.targetStores,
                     price: r.price || null,
@@ -642,35 +1098,49 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         // Generate one by one
         for (const item of toGen) {
             try {
-                const storeNames = item.target_stores
+                const hasImage = item.images && item.images.length > 0
+                const isImageOnly = !item.raw_name?.trim() || item.raw_name.startsWith('[Image Only]')
+                const effectiveName = !isImageOnly ? item.raw_name!.trim() : (hasImage ? 'Product from uploaded image' : '')
+                if (!effectiveName && !hasImage) continue
+
+                let targetStores = item.target_stores
+                if (!targetStores || targetStores.length === 0) {
+                    targetStores = stores.length > 0 ? [stores[0].id] : []
+                }
+
+                const storeNames = targetStores
                     .map(id => stores.find(s => s.id === id)?.seller_account || id)
 
                 const res = await fetch('/api/daraz/products/ai-generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        productName: item.raw_name,
+                        productName: effectiveName,
                         price: item.price || 500,
                         imageUrl: item.images?.[0] || null,
                         storeNames: storeNames.length > 0 ? storeNames : ['Default Store'],
-                        model: 'gpt-4o-mini'
+                        model: aiModel
                     })
                 })
                 const data = await res.json()
 
                 if (data.success) {
                     const newTitlesPerStore: Record<string, string> = {}
-                    item.target_stores.forEach(storeId => {
+                    targetStores.forEach(storeId => {
                         const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
-                        newTitlesPerStore[storeId] = data.titles?.[storeName] || item.raw_name
+                        newTitlesPerStore[storeId] = data.titles?.[storeName] || effectiveName
                     })
+
+                    const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
                     await fetch('/api/daraz/drafts', {
                         method: 'PATCH',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             id: item.id,
-                            title: Object.values(newTitlesPerStore)[0] || item.raw_name,
+                            title: finalTitle,
+                            raw_name: isImageOnly ? finalTitle : item.raw_name,
+                            target_stores: targetStores,
                             titles_per_store: newTitlesPerStore,
                             description: data.description || '',
                             highlights: data.highlights || [],
@@ -683,7 +1153,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                     setDrafts(prev => prev.map(d => d.id === item.id ? {
                         ...d,
-                        title: Object.values(newTitlesPerStore)[0] || item.raw_name,
+                        title: finalTitle,
                         titles_per_store: newTitlesPerStore,
                         category_id: data.category_id || undefined,
                         category_path: data.category_suggestion || undefined,
@@ -716,6 +1186,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const handleEditDraft = (draft: DraftListing) => {
         setEditingDraftId(draft.id)
         setRawName(draft.raw_name)
+        setSingleProductLink(draft.product_link || draft.attributes?.product_link || '')
         setSelectedSupplierId(draft.supplier_id || '')
         setWholesalePrice(draft.wholesale_price || undefined)
         
@@ -754,6 +1225,29 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setHeight(draft.pkg_height || 1)
         setSingleColorFamily(draft.attributes?.color_family || 'Not Specified')
         setSingleSize(draft.attributes?.size || '')
+
+        // Restore variants if present in draft.attributes
+        const attr = draft.attributes || {}
+        const hasVar = Boolean(attr.has_variants || (attr.sku_rows && attr.sku_rows.length > 0) || (attr.variant1_values && attr.variant1_values.length > 0))
+        setHasVariants(hasVar)
+        if (hasVar) {
+            setVariant1Name(attr.variant1_name || 'Color Family')
+            setVariant1Values(Array.isArray(attr.variant1_values) ? attr.variant1_values : [])
+            setVariant2Name(attr.variant2_name || 'Size')
+            setVariant2Values(Array.isArray(attr.variant2_values) ? attr.variant2_values : [])
+            setShowVariant2(Boolean(attr.variant2_values && attr.variant2_values.length > 0))
+            setSkuRows(Array.isArray(attr.sku_rows) ? attr.sku_rows : [])
+            setVariantImages((typeof attr.variant_images === 'object' && attr.variant_images !== null && !Array.isArray(attr.variant_images)) ? (attr.variant_images as Record<string, string[]>) : {})
+            setAddVariantImages(Boolean(attr.add_variant_images || (attr.variant_images && Object.keys(attr.variant_images).length > 0)))
+        } else {
+            setVariant1Values([])
+            setVariant2Values([])
+            setSkuRows([])
+            setShowVariant2(false)
+            setVariantImages({})
+            setAddVariantImages(false)
+        }
+
         setViewMode('edit-single')
     }
 
@@ -977,7 +1471,14 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         if (selectedStores.length === 0) return alert('Select target accounts')
         if (!categoryId) return alert('Please select category')
         if (images.length === 0) return alert('Add at least one image')
-        if (sellingPrice <= 0) return alert('Please enter a selling price')
+        if (hasVariants && skuRows.length > 0) {
+            const missingPrice = skuRows.find(r => !r.price || Number(r.price) <= 0)
+            if (missingPrice) {
+                return alert(`Please enter a price for variant ${missingPrice.colorFamily || missingPrice.size || 'item'}`)
+            }
+        } else if (sellingPrice <= 0) {
+            return alert('Please enter a selling price')
+        }
 
         setSubmitting(true)
         
@@ -995,21 +1496,24 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             .filter(Boolean)
 
         try {
-            const finalSkus = hasVariants
-                ? skuRows.map(row => ({
-                    sellerSku: row.sellerSku,
+            const finalSkus = (hasVariants && skuRows.length > 0)
+                ? skuRows.filter(row => row.available !== false).map((row, i) => ({
+                    sellerSku: row.sellerSku || `${rawName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 10).toUpperCase()}-${row.colorFamily || 'VAR'}-${row.size || i + 1}`,
                     price: Number(row.price),
                     specialPrice: row.specialPrice ? Number(row.specialPrice) : undefined,
-                    quantity: Number(row.quantity),
+                    specialPriceFrom: row.specialPrice ? (row.specialPriceFrom || specialPriceFrom) : undefined,
+                    specialPriceTo: row.specialPrice ? (row.specialPriceTo || specialPriceTo) : undefined,
+                    quantity: Number(row.quantity ?? 0),
                     packageWeight: weight,
                     packageLength: length,
                     packageWidth: width,
                     packageHeight: height,
-                    images: row.images,
+                    images: row.images && row.images.length > 0 ? row.images : [],
                     color_family: row.colorFamily || 'Not Specified',
-                    size: row.size
+                    size: row.size || undefined
                 }))
                 : [{
+                    sellerSku: singleSellerSku || `${rawName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 15).toUpperCase()}`,
                     price: Number(sellingPrice),
                     specialPrice: specialPrice ? Number(specialPrice) : undefined,
                     specialPriceFrom: specialPrice ? specialPriceFrom : undefined,
@@ -1020,7 +1524,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     packageWidth: width,
                     packageHeight: height,
                     images: images.slice(0, 1),
-                    color_family: singleColorFamily,
+                    color_family: singleColorFamily || 'Not Specified',
                     size: singleSize || undefined
                 }]
 
@@ -1052,6 +1556,10 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             })
 
             const result = await response.json()
+            if (!result.success) {
+                const failSummary = result.error || result.results?.map((r: any) => `${r.sellerAccount}: ${r.error}`).join('; ') || 'Push to Daraz failed'
+                throw new Error(failSummary)
+            }
             if (result.success) {
                 const anyFailed = result.results.some((r: any) => !r.success)
                 const targetStatus = anyFailed ? 'failed' : 'pushed'
@@ -1072,6 +1580,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             id: editingDraftId,
+                            product_link: singleProductLink.trim() || undefined,
                             status: targetStatus,
                             error: errorSummary,
                             titles_per_store: titlesPerStore,
@@ -1126,27 +1635,77 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
 
     // ── Status badge helper ───────────────────────────────────────────────────
-    const statusBadge = (status: DraftListing['status']) => {
-        const map: Record<string, string> = {
-            draft: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300 border border-zinc-200/50 dark:border-zinc-700/30',
-            generating: 'bg-blue-50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-300 border border-blue-100/50 dark:border-blue-900/20',
-            generated: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-300 border border-emerald-100/50 dark:border-emerald-900/20',
-            pushing: 'bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-300 border border-amber-100/50 dark:border-amber-900/20',
-            pushed: 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/20 dark:text-indigo-300 border border-indigo-100/50 dark:border-indigo-900/20',
-            failed: 'bg-rose-50 text-rose-700 dark:bg-rose-950/20 dark:text-rose-300 border border-rose-100/50 dark:border-rose-900/20',
+    const statusBadge = (status: DraftListing['status'], draft?: DraftListing) => {
+        if (status === 'generating') {
+            return (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-300 border border-blue-100/50 dark:border-blue-900/20">
+                    <Loader2 className="inline animate-spin mr-1 shrink-0" size={10} />
+                    AI Writing...
+                </span>
+            )
         }
-        const label: Record<string, string> = {
-            draft: 'Draft',
-            generating: 'AI Writing...',
-            generated: 'Ready',
-            pushing: 'Pushing...',
-            pushed: 'Pushed ✓',
-            failed: 'Not Pushed',
+        if (status === 'pushing') {
+            return (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-300 border border-amber-100/50 dark:border-amber-900/20">
+                    <Loader2 className="inline animate-spin mr-1 shrink-0" size={10} />
+                    Pushing...
+                </span>
+            )
         }
+        if (status === 'failed') {
+            return (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 dark:bg-rose-950/20 dark:text-rose-300 border border-rose-100/50 dark:border-rose-900/20">
+                    Not Pushed
+                </span>
+            )
+        }
+        if (status === 'pushed') {
+            return (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/20 dark:text-indigo-300 border border-indigo-100/50 dark:border-indigo-900/20">
+                    ✓ Pushed
+                </span>
+            )
+        }
+
+        const classification = draft ? getDraftClassification(draft) : (status === 'generated' ? 'ready' : 'pending')
+
+        if (status === 'generated' || classification === 'ready') {
+            return (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-900/30">
+                    <Sparkles size={10} className="shrink-0 text-emerald-600" />
+                    Ready Draft
+                </span>
+            )
+        }
+        if (classification === 'image_only') {
+            return (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-purple-50 text-purple-700 dark:bg-purple-950/20 dark:text-purple-300 border border-purple-200/60 dark:border-purple-900/30">
+                    <Camera size={10} className="shrink-0 text-purple-600" />
+                    Image Only
+                </span>
+            )
+        }
+        if (classification === 'link_only') {
+            return (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-300 border border-blue-200/60 dark:border-blue-900/30">
+                    <ExternalLink size={10} className="shrink-0 text-blue-600" />
+                    Product Link Only
+                </span>
+            )
+        }
+        if (classification === 'name_only') {
+            return (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-300 border border-amber-200/60 dark:border-amber-900/30">
+                    <FileText size={10} className="shrink-0 text-amber-600" />
+                    Product Name Only
+                </span>
+            )
+        }
+
         return (
-            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${map[status] || map.draft}`}>
-                {status === 'generating' && <Loader2 className="inline animate-spin mr-1 shrink-0" size={10} />}
-                {label[status] || status}
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-orange-50 text-orange-700 dark:bg-orange-950/20 dark:text-orange-300 border border-orange-200/60 dark:border-orange-900/30">
+                <Clock size={10} className="shrink-0 text-orange-600" />
+                Pending Draft
             </span>
         )
     }
@@ -1157,11 +1716,74 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     if (viewMode === 'list') {
         return (
             <div className="space-y-4">
-                {/* Header */}
-                <div className="flex justify-between items-center bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-lg shadow-sm">
-                    <div>
-                        <h2 className="text-base font-bold text-gray-800 dark:text-zinc-200">Draft Listings</h2>
-                        <p className="text-xs text-gray-500">Prepare, generate AI content, and push products to Daraz</p>
+                {/* Status Tabs Bar */}
+                <div className="flex border-b border-gray-200 dark:border-zinc-800 overflow-x-auto gap-4 scrollbar-none bg-white dark:bg-zinc-900 p-2 rounded-t-lg shadow-xs">
+                    {statusTabs.map(tab => (
+                        <button
+                            key={tab.value}
+                            type="button"
+                            onClick={() => {
+                                setStatusFilter(tab.value)
+                                setCurrentPage(1)
+                            }}
+                            className={`pb-2 px-3 text-sm font-semibold transition-all relative border-b-2 whitespace-nowrap ${
+                                statusFilter === tab.value
+                                    ? 'border-orange-500 text-orange-600'
+                                    : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-zinc-100'
+                            }`}
+                        >
+                            {tab.label}
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-gray-400">
+                                {tab.count}
+                            </span>
+                        </button>
+                    ))}
+                </div>
+
+                {/* Filter & Action Bar */}
+                <div className="p-4 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-3 flex-1">
+                        {/* Search Field */}
+                        <div className="relative min-w-[240px] flex-1 max-w-sm">
+                            <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">
+                                <Search size={16} />
+                            </span>
+                            <input
+                                type="text"
+                                placeholder="Search by Product Name..."
+                                value={searchQuery}
+                                onChange={(e) => {
+                                    setSearchQuery(e.target.value)
+                                    setCurrentPage(1)
+                                }}
+                                className="w-full pl-9 pr-4 py-2 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                            />
+                        </div>
+
+                        {/* Store Account Switcher */}
+                        <select
+                            value={storeFilter}
+                            onChange={(e) => {
+                                setStoreFilter(e.target.value)
+                                setCurrentPage(1)
+                            }}
+                            className="py-2 px-3 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                        >
+                            <option value="">All Seller Accounts</option>
+                            {stores.map(s => (
+                                <option key={s.id} value={s.id}>{s.seller_account}</option>
+                            ))}
+                        </select>
+
+                        <button
+                            type="button"
+                            onClick={fetchDrafts}
+                            disabled={draftsLoading}
+                            className="p-2 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md border border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400"
+                            title="Refresh List"
+                        >
+                            <RefreshCw size={16} className={draftsLoading ? 'animate-spin' : ''} />
+                        </button>
                     </div>
 
                     <div className="relative">
@@ -1176,7 +1798,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         </button>
 
                         {isAddMenuOpen && (
-                            <div className="absolute right-0 mt-1.5 w-44 bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-md shadow-lg z-50 divide-y dark:divide-zinc-800 text-xs">
+                            <div className="absolute right-0 mt-1.5 w-44 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-lg z-50 divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -1190,14 +1812,14 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     }}
                                     className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 font-medium"
                                 >
-                                    ✦ One by One
+                                    ✦ Single Add
                                 </button>
                                 <button
                                     type="button"
                                     onClick={handleStartBulkAdd}
                                     className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 font-medium"
                                 >
-                                    ⊞ Multiple Add
+                                    ⊞ Bulk Add
                                 </button>
                             </div>
                         )}
@@ -1243,52 +1865,110 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 {/* Drafts Card List */}
                 <div className="space-y-3">
                     {draftsLoading ? (
-                        <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-12 text-center text-gray-400 shadow-sm">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg p-12 text-center text-gray-400 shadow-xs">
                             <Loader2 className="animate-spin mx-auto mb-2 text-orange-500" size={24} />
                             Loading draft listings...
                         </div>
                     ) : drafts.length === 0 ? (
-                        <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-12 text-center text-gray-400 italic shadow-sm">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg p-12 text-center text-gray-400 italic shadow-xs">
                             No draft listings. Click "Add Product" to get started.
                         </div>
                     ) : (
                         (() => {
-                            const getStatusGroupPriority = (status: string) => {
-                                switch (status) {
-                                    case 'draft':
-                                    case 'generating':
-                                        return 1;
-                                    case 'generated':
-                                    case 'failed':
-                                        return 2;
-                                    case 'pushing':
-                                    case 'pushed':
-                                        return 3;
-                                    default:
-                                        return 4;
+                        const filteredDrafts = drafts.filter(draft => {
+                            // 1. Status & Classification Filter
+                            if (statusFilter !== 'all') {
+                                const classification = getDraftClassification(draft)
+                                if (statusFilter === 'pushed') {
+                                    if (draft.status !== 'pushed' && classification !== 'pushed') return false
+                                } else if (statusFilter === 'ready') {
+                                    if (draft.status !== 'generated' && classification !== 'ready') return false
+                                } else if (statusFilter === 'image_only') {
+                                    if (classification !== 'image_only') return false
+                                } else if (statusFilter === 'link_only') {
+                                    if (classification !== 'link_only') return false
+                                } else if (statusFilter === 'pending') {
+                                    if (classification !== 'pending' && classification !== 'name_only' && classification !== 'image_only' && classification !== 'link_only') return false
                                 }
-                            };
+                            }
 
-                            const sortedDrafts = [...drafts].sort((a, b) => {
-                                const priorityA = getStatusGroupPriority(a.status);
-                                const priorityB = getStatusGroupPriority(b.status);
-                                if (priorityA !== priorityB) {
-                                    return priorityA - priorityB;
-                                }
-                                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
-                            });
+                            // 2. Store Filter
+                            if (storeFilter) {
+                                const hasStore = draft.target_stores && draft.target_stores.some(st => 
+                                    st === storeFilter || 
+                                    stores.find(s => s.id === storeFilter)?.seller_account?.toLowerCase() === st?.toLowerCase()
+                                )
+                                if (!hasStore) return false
+                            }
 
-                            const ITEMS_PER_PAGE = 50;
-                            const totalPages = Math.ceil(sortedDrafts.length / ITEMS_PER_PAGE);
-                            const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-                            const paginatedDrafts = sortedDrafts.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+                            // 3. Search Query
+                            if (searchQuery.trim()) {
+                                const q = searchQuery.toLowerCase()
+                                const matchRaw = draft.raw_name?.toLowerCase().includes(q)
+                                const matchTitle = draft.title?.toLowerCase().includes(q)
+                                const matchCategory = draft.category_path?.toLowerCase().includes(q)
+                                if (!matchRaw && !matchTitle && !matchCategory) return false
+                            }
 
+                            return true
+                        })
+
+                        if (filteredDrafts.length === 0) {
                             return (
-                                <>
-                                    {paginatedDrafts.map(draft => (
+                                <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg p-12 text-center text-gray-400 shadow-xs">
+                                    <p className="font-medium text-gray-600 dark:text-zinc-300 text-sm">No listings found matching the selected filters.</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setStatusFilter('all')
+                                            setStoreFilter('')
+                                            setSearchQuery('')
+                                            setCurrentPage(1)
+                                        }}
+                                        className="mt-3 px-3 py-1.5 text-xs text-orange-600 dark:text-orange-400 hover:underline font-semibold"
+                                    >
+                                        Clear Filters
+                                    </button>
+                                </div>
+                            )
+                        }
+
+                        const getStatusGroupPriority = (status: string) => {
+                            switch (status) {
+                                case 'draft':
+                                case 'generating':
+                                    return 1;
+                                case 'generated':
+                                case 'failed':
+                                    return 2;
+                                case 'pushing':
+                                case 'pushed':
+                                    return 3;
+                                default:
+                                    return 4;
+                            }
+                        };
+
+                        const sortedDrafts = [...filteredDrafts].sort((a, b) => {
+                            const priorityA = getStatusGroupPriority(a.status);
+                            const priorityB = getStatusGroupPriority(b.status);
+                            if (priorityA !== priorityB) {
+                                return priorityA - priorityB;
+                            }
+                            return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+                        });
+
+                        const ITEMS_PER_PAGE = 50;
+                        const totalPages = Math.ceil(sortedDrafts.length / ITEMS_PER_PAGE) || 1;
+                        const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+                        const paginatedDrafts = sortedDrafts.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+
+                        return (
+                            <>
+                                {paginatedDrafts.map(draft => (
                                         <div 
                                             key={draft.id} 
-                                            className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-lg shadow-sm hover:shadow transition-all duration-200 relative"
+                                            className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 bg-white dark:bg-zinc-900 p-4 border border-gray-200 dark:border-zinc-800 rounded-lg shadow-xs hover:border-gray-300 dark:hover:border-zinc-700 hover:shadow-sm transition-all duration-200 relative"
                                         >
                                             {/* Selection Checkbox */}
                                             <div className="flex items-center">
@@ -1310,7 +1990,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 <img
                                                     src={draft.images?.[0] || '/placeholder.png'}
                                                     alt="Preview"
-                                                    className="w-16 h-16 rounded object-cover border dark:border-zinc-800 bg-gray-50"
+                                                    className="w-16 h-16 rounded object-cover border border-gray-200 dark:border-zinc-800 bg-gray-50"
                                                 />
                                                 {draft.images && draft.images.length > 1 && (
                                                     <span className="absolute bottom-0.5 right-0.5 bg-black/70 text-[9px] text-white px-1 rounded font-bold">
@@ -1355,6 +2035,29 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             )
                                                         })}
                                                     </div>
+                                                    {(() => {
+                                                        const pLink = draft.product_link || draft.attributes?.product_link
+                                                        if (!pLink) return null
+                                                        let hostname = 'link'
+                                                        try {
+                                                            hostname = new URL(pLink).hostname.replace('www.', '')
+                                                        } catch {
+                                                            hostname = 'link'
+                                                        }
+                                                        return (
+                                                            <a
+                                                                href={pLink}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400 hover:underline max-w-[220px] truncate mt-1 bg-blue-50/50 dark:bg-blue-950/20 px-1.5 py-0.5 rounded border border-blue-100 dark:border-blue-900/30"
+                                                                title={pLink}
+                                                            >
+                                                                <ExternalLink size={10} className="shrink-0" />
+                                                                <span>{hostname}</span>
+                                                            </a>
+                                                        )
+                                                    })()}
                                                 </div>
 
                                                 {/* Column 3: Price & Status */}
@@ -1363,7 +2066,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
                                                     </span>
                                                     <div className="mt-1">
-                                                        {statusBadge(draft.status)}
+                                                        {statusBadge(draft.status, draft)}
                                                     </div>
                                                     {draft.status === 'failed' && draft.error && (
                                                         <div className="mt-1.5 text-[10px] text-rose-600 dark:text-rose-400 md:text-center max-w-[220px] bg-rose-50/50 dark:bg-rose-950/10 border border-rose-100/50 dark:border-rose-900/10 px-2 py-1 rounded leading-tight font-medium hover:max-w-none transition-all duration-200 cursor-help" title={draft.error}>
@@ -1561,12 +2264,69 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-5 space-y-4 shadow-sm">
                     <div className="divide-y dark:divide-zinc-800 space-y-4">
                         {bulkRows.map((row, idx) => (
-                            <div key={row.id} className="pt-4 first:pt-0 flex flex-col md:flex-row gap-4 items-start">
-                                <span className="font-bold text-gray-400 text-sm self-center w-6 shrink-0">#{idx + 1}</span>
+                            <div key={row.id} className="pt-4 first:pt-0 flex flex-col md:flex-row gap-3 items-start">
+                                {/* Row Index & Status Badge */}
+                                <div className="flex md:flex-col items-center gap-1 self-center md:self-start md:pt-1 shrink-0 w-16">
+                                    <span className="font-bold text-gray-400 text-xs">#{idx + 1}</span>
+                                    {(() => {
+                                        const hasImg = row.images && row.images.length > 0
+                                        const hasLnk = Boolean(row.productLink && row.productLink.trim().length > 0)
+                                        const hasNm = Boolean(row.rawName && row.rawName.trim().length > 0)
+                                        if (hasImg && !hasLnk && !hasNm) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200" title="Image Only">📷 Img</span>
+                                        if (hasLnk && !hasImg && !hasNm) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200" title="Link Only">🔗 Link</span>
+                                        if (hasNm && !hasImg && !hasLnk) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200" title="Name Only">📝 Name</span>
+                                        if (hasNm || hasImg || hasLnk) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300 border border-orange-200" title="Pending Draft">⏳ Draft</span>
+                                        return null
+                                    })()}
+                                </div>
+
+                                {/* Competitor Link & Auto Extract */}
+                                <div className="flex-1 space-y-1 min-w-[200px]">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-bold text-gray-600 dark:text-zinc-300 block">Competitor / Product Link</label>
+                                        {row.extractedCategory?.path && (
+                                            <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate max-w-[140px]" title={row.extractedCategory.path}>
+                                                ✓ {row.extractedCategory.path.split('>').pop()?.trim()}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-1.5">
+                                        <input
+                                            type="url"
+                                            value={row.productLink || ''}
+                                            onChange={(e) => {
+                                                const next = [...bulkRows]
+                                                next[idx].productLink = e.target.value
+                                                setBulkRows(next)
+                                            }}
+                                            placeholder="Daraz, Amazon, etc. link"
+                                            className="flex-1 py-1.5 px-2.5 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                        />
+                                        <button
+                                            type="button"
+                                            disabled={row.isExtracting || !row.productLink?.trim()}
+                                            onClick={() => handleExtractRowLink(idx)}
+                                            className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0 transition-all shadow-xs"
+                                            title="Auto-extract name, price, images, and category"
+                                        >
+                                            {row.isExtracting ? (
+                                                <Loader2 size={12} className="animate-spin" />
+                                            ) : (
+                                                <>
+                                                    <Zap size={11} />
+                                                    Extract
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
 
                                 {/* Product name */}
-                                <div className="flex-1 space-y-1">
-                                    <label className="text-xs font-bold text-gray-600 block">Product Raw Name *</label>
+                                <div className="flex-1 space-y-1 min-w-[180px]">
+                                    <label className="text-xs font-bold text-gray-600 dark:text-zinc-300 flex items-center gap-1">
+                                        Product Raw Name
+                                        <span className="text-[10px] text-gray-400 font-normal">(Optional if link/img)</span>
+                                    </label>
                                     <input
                                         type="text"
                                         value={row.rawName}
@@ -1800,8 +2560,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     // ═══════════════════════════════════════════════════════════════════════
     return (
         <div className="space-y-5">
-            {/* Header */}
-            <div className="flex items-center justify-between bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-xl shadow-sm">
+            {/* Merged Header & AI Generator Bar */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-xl shadow-sm">
+                {/* 1. Left: Back Arrow, Title & Subtitle */}
                 <div className="flex items-center gap-3">
                     <button type="button" onClick={handleBackToList} className="p-2 hover:bg-orange-50 dark:hover:bg-zinc-800 rounded-full text-gray-500 hover:text-orange-600 transition-all">
                         <ArrowLeft size={16} />
@@ -1817,7 +2578,34 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         </p>
                     </div>
                 </div>
-                <div className="hidden sm:flex items-center gap-2 text-xs text-gray-400">
+
+                {/* 2. Middle: AI Generator */}
+                <div className="flex flex-wrap items-center gap-2.5 bg-orange-50/80 dark:bg-orange-950/20 border border-orange-200/70 dark:border-orange-900/30 px-3 py-1.5 rounded-lg">
+                    <span className="text-xs font-bold text-orange-600 dark:text-orange-400 flex items-center gap-1.5">
+                        <Sparkles size={14} />
+                        AI Generator
+                    </span>
+                    <select
+                        value={aiModel}
+                        onChange={(e) => setAiModel(e.target.value)}
+                        className="py-1 px-2.5 border border-orange-200 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-400 font-medium"
+                    >
+                        <option value="gpt-4o-mini">GPT-4o Mini</option>
+                        <option value="gpt-4o">GPT-4o (Vision)</option>
+                    </select>
+                    <button
+                        type="button"
+                        onClick={handleAIGenerate}
+                        disabled={generating || !rawName}
+                        className="px-4 py-1.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded-md text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 shadow-sm transition-all"
+                    >
+                        {generating ? <RefreshCw className="animate-spin" size={12} /> : <Sparkles size={12} />}
+                        {generating ? 'Generating...' : 'Generate Content'}
+                    </button>
+                </div>
+
+                {/* 3. Right: Live Draft */}
+                <div className="flex items-center gap-2 text-xs text-gray-400 self-end lg:self-center">
                     <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse" />
                     <span>Live Draft</span>
                 </div>
@@ -1825,50 +2613,21 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
             <form onSubmit={handleSubmit} className="space-y-5">
 
-                    {/* AI Banner */}
-                    <div className="p-4 bg-gradient-to-r from-orange-500/15 via-amber-400/10 to-pink-500/10 border border-orange-200/60 dark:border-orange-900/30 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
-                        <div className="flex gap-3 items-center">
-                            <div className="w-9 h-9 rounded-full bg-orange-500/20 flex items-center justify-center shrink-0">
-                                <Sparkles className="text-orange-500" size={18} />
-                            </div>
-                            <div>
-                                <h4 className="font-bold text-sm text-gray-800 dark:text-zinc-100">AI Listing Generator</h4>
-                                <p className="text-xs text-gray-500 dark:text-zinc-400">One click → generates titles (per store), category, description, highlights & attributes</p>
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                            <select
-                                value={aiModel}
-                                onChange={(e) => setAiModel(e.target.value)}
-                                className="py-1.5 px-2.5 border border-orange-200 dark:border-zinc-700 rounded-lg text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-400"
-                            >
-                                <option value="gpt-4o-mini">GPT-4o Mini</option>
-                                <option value="gpt-4o">GPT-4o (Vision)</option>
-                            </select>
-                            <button
-                                type="button"
-                                onClick={handleAIGenerate}
-                                disabled={generating || !rawName}
-                                className="px-5 py-1.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 shadow-md shadow-orange-200 dark:shadow-none transition-all"
-                            >
-                                {generating ? <RefreshCw className="animate-spin" size={12} /> : <Sparkles size={12} />}
-                                {generating ? 'Generating...' : 'Generate Content'}
-                            </button>
-                        </div>
-                    </div>
-
                     {/* Wholesale Pricing & Supplier Card (Internal Inventory) */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-5 space-y-4 shadow-sm">
-                        <div className="flex items-center justify-between border-b dark:border-zinc-800 pb-3">
-                            <h3 className="text-sm font-bold flex items-center gap-2 text-gray-700 dark:text-zinc-300">
-                                <span className="w-5 h-5 rounded bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-gray-400 text-[10px] font-bold">$</span>
-                                Wholesale Price & Supplier <span className="text-xs font-normal text-gray-400 dark:text-zinc-500">(Optional)</span>
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-5 shadow-xs">
+                        <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                Wholesale Price &amp; Supplier
+                                <span className="text-xs font-normal text-gray-400 dark:text-zinc-500">(Optional - Internal Inventory)</span>
                             </h3>
+                            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                Link a supplier and cost price for internal inventory tracking and profit calculation.
+                            </p>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {/* Supplier Dropdown */}
-                            <div className="space-y-1">
-                                <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
+                            <div className="space-y-1.5">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
                                     Supplier
                                 </label>
                                 <SearchableSupplierSelect
@@ -1883,8 +2642,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             </div>
 
                             {/* Wholesale Price Input */}
-                            <div className="space-y-1">
-                                <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
+                            <div className="space-y-1.5">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
                                     Wholesale Price (NPR)
                                 </label>
                                 <input
@@ -1896,23 +2655,27 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         setWholesalePrice(val)
                                         patchDraft({ wholesale_price: val })
                                     }}
-                                    className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                                    className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
                                 />
                             </div>
                         </div>
                     </div>
 
                     {/* Section 1: Basic Information */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-5 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
-                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
-                            Basic Information
-                        </h3>
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-xs">
+                        <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                Basic Information
+                            </h3>
+                            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                Provide basic details, target seller accounts, product title, and images.
+                            </p>
+                        </div>
 
                         {/* Seller Accounts */}
                         <div className="space-y-1.5">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                Target Seller Accounts <span className="text-red-500">*</span>
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                Target Seller Accounts <span className="text-red-500 font-bold">*</span>
                             </label>
                             <div className="flex flex-wrap gap-2">
                                 {stores.map(store => (
@@ -1926,9 +2689,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     : [...prev, store.id]
                                             )
                                         }}
-                                        className={`py-1.5 px-3 rounded text-xs font-medium border transition-all ${selectedStores.includes(store.id)
+                                        className={`h-8 px-3 rounded-md text-xs font-medium border transition-all ${selectedStores.includes(store.id)
                                             ? 'bg-orange-500/10 text-orange-600 border-orange-500 font-bold'
-                                            : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400'
+                                            : 'bg-white dark:bg-zinc-850 border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:border-gray-400'
                                             }`}
                                     >
                                         {store.seller_account}
@@ -1942,10 +2705,46 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             )}
                         </div>
 
+                        {/* Competitor Link Auto-fill */}
+                        <div className="p-3.5 bg-blue-50/60 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/40 rounded-lg space-y-1.5">
+                            <label className="text-xs font-semibold text-blue-900 dark:text-blue-300 flex items-center gap-1.5">
+                                <LinkIcon size={13} className="text-blue-600 dark:text-blue-400" />
+                                Auto-fill from Competitor Product Link
+                                <span className="text-[10px] text-blue-600/80 dark:text-blue-400/80 font-normal">(Daraz, Amazon, Alibaba, AliExpress, etc.)</span>
+                            </label>
+                            <div className="flex gap-2">
+                                <input
+                                    type="url"
+                                    placeholder="Paste competitor URL (e.g. https://www.daraz.com.np/products/...)"
+                                    value={singleProductLink}
+                                    onChange={(e) => setSingleProductLink(e.target.value)}
+                                    className="flex-1 h-9 px-3 border border-blue-200 dark:border-blue-800 rounded-md text-xs bg-white dark:bg-zinc-900 text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                />
+                                <button
+                                    type="button"
+                                    disabled={singleIsExtracting || !singleProductLink.trim()}
+                                    onClick={handleSingleExtractLink}
+                                    className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 shadow-xs transition-colors"
+                                >
+                                    {singleIsExtracting ? (
+                                        <>
+                                            <Loader2 size={13} className="animate-spin" />
+                                            Extracting...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Zap size={13} />
+                                            Extract ⚡
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+
                         {/* Raw Name */}
                         <div className="space-y-1">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                Product Raw Name <span className="text-red-500">*</span>
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                Product Raw Name <span className="text-red-500 font-bold">*</span>
                             </label>
                             <input
                                 type="text"
@@ -1953,19 +2752,19 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 value={rawName}
                                 onChange={(e) => setRawName(e.target.value)}
                                 onBlur={handleRawNameBlur}
-                                className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                                className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-normal"
                                 required
                             />
-                            <p className="text-xs text-gray-400">Saved automatically as draft when you leave this field</p>
+                            <p className="text-[11px] text-gray-400">Saved automatically as draft when you leave this field</p>
                         </div>
 
                         {/* Product Title / Name on Daraz — always visible */}
                         <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
-                                <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                    Product Title (Name on Daraz) <span className="text-red-500">*</span>
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                    Product Title (Name on Daraz) <span className="text-red-500 font-bold">*</span>
                                 </label>
-                                <span className="text-[10px] text-gray-400">
+                                <span className="text-[11px] text-gray-400">
                                     {((activeTitleStoreId || selectedStores[0]) ? (titlesPerStore[activeTitleStoreId || selectedStores[0]] || '') : '').length}/255
                                 </span>
                             </div>
@@ -1980,10 +2779,10 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 key={storeId}
                                                 type="button"
                                                 onClick={() => setActiveTitleStoreId(storeId)}
-                                                className={`px-3 py-1 text-xs font-semibold rounded-t transition-all ${
+                                                className={`px-3 py-1.5 text-xs font-semibold rounded-t transition-all ${
                                                     (activeTitleStoreId || selectedStores[0]) === storeId
                                                         ? 'bg-orange-500 text-white'
-                                                        : 'text-gray-500 hover:text-gray-700 dark:hover:text-zinc-300'
+                                                        : 'text-gray-500 hover:text-gray-800 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800'
                                                 }`}
                                             >
                                                 {store?.seller_account || storeId}
@@ -2019,9 +2818,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             }}
                                             maxLength={255}
                                             placeholder={rawName ? `e.g. ${rawName} — Premium Quality...` : 'Enter the product title that will appear on Daraz'}
-                                            className="w-full py-1.5 px-3 border rounded-lg text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-normal"
                                         />
-                                        <p className="text-[10px] text-gray-400">
+                                        <p className="text-[11px] text-gray-400">
                                             {Object.keys(titlesPerStore).length > 0
                                                 ? <span className="text-orange-500 font-medium">✦ AI-generated title — you can edit it</span>
                                                 : 'Type manually or click "Generate Content" to auto-generate an SEO-optimized title'
@@ -2036,6 +2835,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         <CategoryPicker
                             productName={Object.values(titlesPerStore).filter(t => t && t !== '').join(' ') || rawName || ''}
                             selectedCategoryId={categoryId}
+                            selectedCategoryPath={categoryPath}
                             onSelectCategory={(id, path) => {
                                 setCategoryId(id)
                                 setCategoryPath(path)
@@ -2047,8 +2847,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         {/* Images — Draggable + Primary Badge */}
                         <div className="space-y-2">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 flex items-center gap-1">
-                                Product Images <span className="text-red-500">* (Add min 3)</span>
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                Product Images <span className="text-red-500 font-bold">* (Add min 3)</span>
                                 {images[0] && aiModel === 'gpt-4o' && (
                                     <span className="text-[10px] bg-orange-100 text-orange-700 dark:bg-orange-950/20 px-1.5 py-0.5 rounded font-semibold">
                                         AI Vision: Reading image ✓
@@ -2112,263 +2912,723 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
 
                     {/* Section 2: Product Specification */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center justify-between">
-                            <span className="flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
-                                <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
-                                Product Specification
-                            </span>
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-xs">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                    Product Specification
+                                </h3>
+                                <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                    Category-specific attributes and key properties required by Daraz.
+                                </p>
+                            </div>
                             {categoryId && (
-                                <span className="text-xs bg-orange-50 text-orange-600 dark:bg-orange-950/20 px-2 py-0.5 rounded border border-orange-100 dark:border-zinc-800">
+                                <span className="text-xs bg-[#f8f9fa] dark:bg-zinc-850 text-orange-600 dark:text-orange-400 font-semibold px-2.5 py-1 rounded-md border border-gray-200 dark:border-zinc-700">
                                     {categoryPath.split(' > ').slice(-2).join(' > ')}
                                 </span>
                             )}
-                        </h3>
+                        </div>
 
                         {categoryId ? (
                             <DynamicAttributesForm
                                 categoryId={categoryId}
                                 values={dynamicAttributes}
-                                onChange={(key, val) => setDynamicAttributes(prev => ({ ...prev, [key]: val }))}
+                                onChange={(key, val) => {
+                                    const next = { ...dynamicAttributes, [key]: val }
+                                    setDynamicAttributes(next)
+                                    if (editingDraftId) {
+                                        patchDraft({ attributes: next })
+                                    }
+                                }}
                                 onLoadSaleProps={(props) => setSaleProps(props)}
                                 onLoadAttributesSchema={(schema) => setAttributesSchema(schema)}
                             />
                         ) : (
-                            <div className="p-4 bg-gray-50 dark:bg-zinc-800/40 text-center rounded border border-dashed dark:border-zinc-800">
-                                <Info className="text-gray-400 mx-auto mb-1.5" size={18} />
-                                <p className="text-sm text-gray-500">Select category to load specification fields</p>
-                                <p className="text-xs text-gray-400 mt-1">AI will auto-suggest a category when you click "Generate Content"</p>
+                            <div className="p-5 bg-[#f8f9fa] dark:bg-zinc-850/50 text-center rounded-lg border border-dashed border-gray-300 dark:border-zinc-700 space-y-1">
+                                <Info className="text-gray-400 mx-auto mb-1" size={18} />
+                                <p className="text-xs font-medium text-gray-600 dark:text-zinc-400">Select category above to load specification fields</p>
+                                <p className="text-[11px] text-gray-400">AI will auto-suggest a category when you click "Generate Content"</p>
                             </div>
                         )}
                     </div>
 
-                    {/* Section 3: Price, Stock & Variants */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
-                        <div className="flex justify-between items-center border-b dark:border-zinc-800 pb-3">
-                            <h3 className="text-base font-bold flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
-                                <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">3</span>
+                    {/* Section 3: Price, Stock & Variants (Daraz Seller Center Design) */}
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-xs">
+                        {/* Section Header */}
+                        <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
                                 Price, Stock &amp; Variants
                             </h3>
-                            {saleProps.length > 0 && (
-                                <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold">
-                                    <input
-                                        type="checkbox"
-                                        checked={hasVariants}
-                                        onChange={(e) => setHasVariants(e.target.checked)}
-                                        className="rounded border-gray-300 text-orange-600"
-                                    />
-                                    Enable Variants
-                                </label>
-                            )}
+                            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                You can add variants to a product that has more than one option, such as size or color.
+                            </p>
                         </div>
 
-                        {!hasVariants ? (
-                            <div className="space-y-4">
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                    <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400">
-                                            Actual Selling Price (NPR) <span className="text-red-500">*</span>
-                                        </label>
+                        {/* Variant 1 Card */}
+                        <div className="bg-[#f8f9fa] dark:bg-zinc-850/50 border border-gray-200/90 dark:border-zinc-800 rounded-lg p-5 sm:p-6 space-y-4">
+                            {/* Variant 1 Info Header */}
+                            <div className="space-y-1">
+                                <div className="text-xs font-semibold text-gray-900 dark:text-zinc-100 flex items-center gap-1">
+                                    <span className="text-red-500 font-bold">*</span> Variant1
+                                </div>
+                                <div className="text-xs text-gray-500 dark:text-zinc-400 font-normal">Variant Name</div>
+                                <div className="text-xs font-medium text-gray-800 dark:text-zinc-200">
+                                    {variant1Name || 'Color Family'}
+                                </div>
+                                <div className="text-xs text-gray-400 font-normal">
+                                    Spot a missing attribute value?{' '}
+                                    <button
+                                        type="button"
+                                        onClick={() => variant1InputRef.current?.focus()}
+                                        className="text-blue-500 hover:text-blue-600 hover:underline"
+                                    >
+                                        click me
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Total Variants & Add Image Checkbox */}
+                            <div className="space-y-2.5 pt-1">
+                                <div className="text-xs font-medium text-gray-700 dark:text-zinc-300">
+                                    Total Variants
+                                </div>
+                                <label className="flex items-center gap-2 cursor-pointer text-xs select-none">
+                                    <input
+                                        type="checkbox"
+                                        checked={addVariantImages}
+                                        onChange={(e) => setAddVariantImages(e.target.checked)}
+                                        className="w-3.5 h-3.5 rounded border-gray-300 text-orange-500 focus:ring-orange-500 cursor-pointer"
+                                    />
+                                    <span className="text-gray-700 dark:text-zinc-300 font-normal">Add Image</span>
+                                    <span className="text-gray-400 text-xs font-normal">Max 8 images for each variant.</span>
+                                </label>
+
+                                {/* Dotted Container for Tags and Input */}
+                                <div className="border border-dashed border-gray-300 dark:border-zinc-700 rounded-md p-3.5 bg-white dark:bg-zinc-900 space-y-3">
+                                    {/* Integrated Input Box with Tags */}
+                                    <div className="flex flex-wrap items-center gap-1.5 p-1.5 border border-gray-300 dark:border-zinc-700 rounded-md bg-white dark:bg-zinc-850 focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange-500 transition-all min-h-[38px]">
+                                        {variant1Values.map(val => (
+                                            <span
+                                                key={val}
+                                                className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-[#f0f2f5] dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded text-xs font-medium text-gray-800 dark:text-zinc-200"
+                                            >
+                                                {val}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const next = variant1Values.filter(v => v !== val)
+                                                        setVariant1Values(next)
+                                                        if (next.length === 0 && variant2Values.length === 0) setHasVariants(false)
+                                                    }}
+                                                    className="text-gray-400 hover:text-red-500 font-bold ml-0.5 text-xs leading-none"
+                                                >
+                                                    ×
+                                                </button>
+                                            </span>
+                                        ))}
+
                                         <input
-                                            type="number"
-                                            value={specialPrice || ''}
-                                            onChange={(e) => {
-                                                const val = e.target.value ? Number(e.target.value) : undefined
-                                                setSpecialPrice(val)
-                                                if (val && val > 0) {
-                                                    setSellingPrice(val + 200)
-                                                } else {
-                                                    setSellingPrice(0)
+                                            ref={variant1InputRef}
+                                            type="text"
+                                            list="variant1-standard-options"
+                                            placeholder={variant1Values.length === 0 ? "Please type or select" : "Type more or select..."}
+                                            value={variantInputText}
+                                            onChange={(e) => setVariantInputText(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault()
+                                                    const val = variantInputText.trim()
+                                                    if (val && !variant1Values.includes(val)) {
+                                                        setVariant1Values([...variant1Values, val])
+                                                        setHasVariants(true)
+                                                        setVariantInputText('')
+                                                    }
                                                 }
                                             }}
-                                            placeholder="e.g. 500"
-                                            className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
-                                            required
+                                            className="flex-1 min-w-[140px] border-none outline-none text-xs bg-transparent text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 py-1 px-1.5"
                                         />
-                                        <p className="text-[10px] text-gray-400">Type what the customer pays</p>
-                                    </div>
 
-                                    <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400">
-                                            Original / Listed Price (NPR) <span className="text-red-500">*</span>
-                                        </label>
-                                        <input
-                                            type="number"
-                                            value={sellingPrice || ''}
-                                            onChange={(e) => setSellingPrice(Number(e.target.value))}
-                                            placeholder="Auto-calculated (Price + 200)"
-                                            className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-850 dark:border-zinc-700 focus:outline-none"
-                                            required
-                                        />
-                                        <p className="text-[10px] text-orange-600 font-medium">Auto-sets to Actual Price + NPR 200</p>
-                                    </div>
-
-                                    <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400">Stock</label>
-                                        <input
-                                            type="number"
-                                            value={stock}
-                                            onChange={(e) => setStock(Number(e.target.value))}
-                                            className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                            Color Family
-                                        </label>
-                                        <input
-                                            type="text"
-                                            list="variant-color-options"
-                                            value={singleColorFamily}
-                                            onChange={(e) => setSingleColorFamily(e.target.value)}
-                                            placeholder="e.g. Multicolour, Red, Black, etc."
-                                            className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
-                                        />
-                                        <p className="text-[10px] text-gray-400">Defaults to "Not Specified" if left empty or unchanged</p>
-                                    </div>
-
-                                    <div className="space-y-1">
-                                        <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">
-                                            Size
-                                        </label>
-                                        <input
-                                            type="text"
-                                            value={singleSize}
-                                            onChange={(e) => setSingleSize(e.target.value)}
-                                            placeholder="e.g. S, M, L, XL, 16 CM, etc."
-                                            className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
-                                        />
-                                        <p className="text-[10px] text-gray-400">Optional. Enter product size if applicable</p>
-                                    </div>
-                                </div>
-
-                                {/* Special Price Date Range (Always rendered when discount price is active) */}
-                                {specialPrice && (
-                                    <div className="border dark:border-zinc-800 rounded-lg p-4 space-y-3 bg-gray-50/50 dark:bg-zinc-800/20">
-                                        <label className="text-xs font-semibold text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
-                                            <Calendar size={14} className="text-orange-500" />
-                                            Discount Period (Default: 5 Years)
-                                        </label>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                            <div className="space-y-1">
-                                                <label className="text-[10px] text-gray-500 uppercase font-semibold">Valid From</label>
-                                                <input
-                                                    type="date"
-                                                    value={specialPriceFrom}
-                                                    onChange={(e) => setSpecialPriceFrom(e.target.value)}
-                                                    min={today()}
-                                                    className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700"
-                                                />
-                                            </div>
-                                            <div className="space-y-1">
-                                                <label className="text-[10px] text-gray-500 uppercase font-semibold">Valid To</label>
-                                                <input
-                                                    type="date"
-                                                    value={specialPriceTo}
-                                                    onChange={(e) => setSpecialPriceTo(e.target.value)}
-                                                    min={specialPriceFrom}
-                                                    className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700"
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                                    {specialPrice && (
-                                        <p className="text-xs text-orange-600 font-medium">
-                                            Discount: NPR {sellingPrice - specialPrice} off ({Math.round(((sellingPrice - specialPrice) / sellingPrice) * 100)}% off)
-                                        </p>
-                                    )}
-                                </div>
-                            ) : (
-                            /* Variants UI */
-                            <div className="space-y-4">
-                                {saleProps.map((prop, idx) => (
-                                    <div key={prop.name} className="space-y-2 border dark:border-zinc-800 p-3 rounded-lg bg-gray-50/50 dark:bg-zinc-800/30">
-                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
-                                            Variant {idx + 1}: {prop.label || prop.name}
-                                        </label>
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="text"
-                                                list={prop.name === 'color_family' || prop.label?.toLowerCase() === 'color family' ? "variant-color-options" : undefined}
-                                                placeholder={`Add value (e.g. ${idx === 0 ? 'Blue, Red' : 'M, L, XL'})`}
-                                                onKeyDown={(e) => {
-                                                    if (e.key === 'Enter') {
-                                                        e.preventDefault()
-                                                        const val = e.currentTarget.value.trim()
-                                                        if (val) {
-                                                            if (idx === 0) setVariant1Values([...variant1Values, val])
-                                                            else setVariant2Values([...variant2Values, val])
-                                                            e.currentTarget.value = ''
-                                                        }
+                                        {variantInputText.trim() && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const val = variantInputText.trim()
+                                                    if (val && !variant1Values.includes(val)) {
+                                                        setVariant1Values([...variant1Values, val])
+                                                        setHasVariants(true)
+                                                        setVariantInputText('')
                                                     }
                                                 }}
-                                                className="py-1 px-2.5 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700 flex-1 max-w-xs"
-                                            />
-                                        </div>
-                                        <div className="flex flex-wrap gap-1.5">
-                                            {(idx === 0 ? variant1Values : variant2Values).map(val => (
-                                                <span key={val} className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs bg-orange-100 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400 font-medium">
-                                                    {val}
-                                                    <button type="button" onClick={() => {
-                                                        if (idx === 0) setVariant1Values(variant1Values.filter(v => v !== val))
-                                                        else setVariant2Values(variant2Values.filter(v => v !== val))
-                                                    }} className="hover:text-red-500 font-bold ml-0.5">×</button>
-                                                </span>
-                                            ))}
-                                        </div>
+                                                className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-xs font-medium shrink-0"
+                                            >
+                                                Add
+                                            </button>
+                                        )}
                                     </div>
-                                ))}
 
-                                {skuRows.length > 0 && (
-                                    <div className="border rounded-lg dark:border-zinc-800 overflow-hidden text-xs">
-                                        <table className="w-full text-left">
-                                            <thead className="bg-gray-50 dark:bg-zinc-800/50 font-bold border-b dark:border-zinc-800">
-                                                <tr>
-                                                    {saleProps.map(p => <th key={p.name} className="p-2">{p.label}</th>)}
-                                                    <th className="p-2 w-24">Price</th>
-                                                    <th className="p-2 w-24">Special</th>
-                                                    <th className="p-2 w-20">Stock</th>
-                                                    <th className="p-2">SKU</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y dark:divide-zinc-800">
-                                                {skuRows.map((row, idx) => (
-                                                    <tr key={idx}>
-                                                        {row.colorFamily !== undefined && <td className="p-2 font-semibold">{row.colorFamily}</td>}
-                                                        {row.size !== undefined && <td className="p-2 font-semibold">{row.size}</td>}
-                                                        <td className="p-1.5"><input type="number" value={row.price} onChange={(e) => { const n = [...skuRows]; n[idx].price = Number(e.target.value); setSkuRows(n) }} className="w-full py-1 px-2 border rounded text-xs" /></td>
-                                                        <td className="p-1.5"><input type="number" value={row.specialPrice || ''} onChange={(e) => { const n = [...skuRows]; n[idx].specialPrice = e.target.value ? Number(e.target.value) : undefined; setSkuRows(n) }} className="w-full py-1 px-2 border rounded text-xs" /></td>
-                                                        <td className="p-1.5"><input type="number" value={row.quantity} onChange={(e) => { const n = [...skuRows]; n[idx].quantity = Number(e.target.value); setSkuRows(n) }} className="w-full py-1 px-2 border rounded text-xs" /></td>
-                                                        <td className="p-1.5"><input type="text" value={row.sellerSku} onChange={(e) => { const n = [...skuRows]; n[idx].sellerSku = e.target.value; setSkuRows(n) }} className="w-full py-1 px-2 border rounded font-mono text-[10px]" /></td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
+                                    <datalist id="variant1-standard-options">
+                                        {availableV1Options
+                                            .filter((opt: string) => !variant1Values.includes(opt))
+                                            .map((opt: string) => (
+                                                <option key={opt} value={opt} />
+                                            ))}
+                                    </datalist>
+
+                                    {/* Quick Select Chips */}
+                                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                        <span className="text-xs text-gray-400 font-normal mr-1">Quick Select:</span>
+                                        {availableV1Options
+                                            .filter((opt: string) => !variant1Values.includes(opt))
+                                            .slice(0, 14)
+                                            .map((opt: string) => (
+                                                <button
+                                                    key={opt}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setVariant1Values([...variant1Values, opt])
+                                                        setHasVariants(true)
+                                                    }}
+                                                    className="px-2 py-0.5 rounded text-xs bg-gray-50 dark:bg-zinc-800 hover:bg-orange-50 dark:hover:bg-orange-950/20 hover:text-orange-600 hover:border-orange-300 text-gray-600 dark:text-zinc-300 border border-gray-200 dark:border-zinc-700 transition-colors"
+                                                >
+                                                    + {opt}
+                                                </button>
+                                            ))}
+                                    </div>
+                                </div>
+
+                                {/* Per-Variant Image Uploaders (Shown when Add Image is enabled) */}
+                                {addVariantImages && variant1Values.length > 0 && (
+                                    <div className="pt-3 space-y-3">
+                                        <div className="text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                                            Variant Images (Max 8 per variant)
+                                        </div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                            {variant1Values.map(val => {
+                                                const currentImgs = variantImages[val] || []
+                                                return (
+                                                    <div key={val} className="p-3 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 rounded-lg space-y-2">
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="text-xs font-semibold text-gray-800 dark:text-zinc-200">{val}</span>
+                                                            <span className="text-[11px] text-gray-400">{currentImgs.length}/8 images</span>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {currentImgs.map((imgUrl, imgIdx) => (
+                                                                <div key={imgIdx} className="relative w-12 h-12 rounded border dark:border-zinc-700 overflow-hidden group">
+                                                                    <img src={imgUrl} alt="" className="w-full h-full object-cover" />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRemoveVariantImage(val, imgIdx)}
+                                                                        className="absolute inset-0 bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+                                                                    >
+                                                                        ×
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                            {currentImgs.length < 8 && (
+                                                                <label className="w-12 h-12 border border-dashed border-gray-300 dark:border-zinc-700 rounded flex flex-col items-center justify-center cursor-pointer hover:border-orange-500 text-gray-400 hover:text-orange-500 transition-colors">
+                                                                    <Upload size={14} />
+                                                                    <span className="text-[9px] mt-0.5">Upload</span>
+                                                                    <input
+                                                                        type="file"
+                                                                        accept="image/*"
+                                                                        className="hidden"
+                                                                        onChange={(e) => {
+                                                                            const file = e.target.files?.[0]
+                                                                            if (file) handleVariantImageUpload(val, file)
+                                                                        }}
+                                                                    />
+                                                                </label>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
                                     </div>
                                 )}
                             </div>
+                        </div>
+
+                        {/* Optional Variant 2 Card (e.g. Size) */}
+                        {showVariant2 ? (
+                            <div className="bg-[#f8f9fa] dark:bg-zinc-850/50 border border-gray-200/90 dark:border-zinc-800 rounded-lg p-5 sm:p-6 space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div className="space-y-1">
+                                        <div className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
+                                            Variant 2
+                                        </div>
+                                        <div className="text-xs text-gray-500 dark:text-zinc-400">Variant Name: <span className="font-medium text-gray-800 dark:text-zinc-200">{variant2Name || 'Size'}</span></div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowVariant2(false)
+                                            setVariant2Values([])
+                                        }}
+                                        className="text-xs text-red-500 hover:underline font-medium"
+                                    >
+                                        Remove Variant 2
+                                    </button>
+                                </div>
+
+                                <div className="border border-dashed border-gray-300 dark:border-zinc-700 rounded-md p-3.5 bg-white dark:bg-zinc-900 space-y-3">
+                                    <div className="flex flex-wrap items-center gap-1.5 p-1.5 border border-gray-300 dark:border-zinc-700 rounded-md bg-white dark:bg-zinc-850 focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange-500 transition-all min-h-[38px]">
+                                        {variant2Values.map(val => (
+                                            <span
+                                                key={val}
+                                                className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-[#f0f2f5] dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded text-xs font-medium text-gray-800 dark:text-zinc-200"
+                                            >
+                                                {val}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setVariant2Values(variant2Values.filter(v => v !== val))}
+                                                    className="text-gray-400 hover:text-red-500 font-bold ml-0.5 text-xs leading-none"
+                                                >
+                                                    ×
+                                                </button>
+                                            </span>
+                                        ))}
+
+                                        <input
+                                            ref={variant2InputRef}
+                                            type="text"
+                                            list="variant2-standard-options"
+                                            placeholder={variant2Values.length === 0 ? "Please type or select size" : "Type more or select size..."}
+                                            value={variant2InputText}
+                                            onChange={(e) => setVariant2InputText(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault()
+                                                    const val = variant2InputText.trim()
+                                                    if (val && !variant2Values.includes(val)) {
+                                                        setVariant2Values([...variant2Values, val])
+                                                        setVariant2InputText('')
+                                                    }
+                                                }
+                                            }}
+                                            className="flex-1 min-w-[140px] border-none outline-none text-xs bg-transparent text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 py-1 px-1.5"
+                                        />
+
+                                        {variant2InputText.trim() && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const val = variant2InputText.trim()
+                                                    if (val && !variant2Values.includes(val)) {
+                                                        setVariant2Values([...variant2Values, val])
+                                                        setVariant2InputText('')
+                                                    }
+                                                }}
+                                                className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded text-xs font-medium shrink-0"
+                                            >
+                                                Add
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <datalist id="variant2-standard-options">
+                                        {availableV2Options
+                                            .filter((opt: string) => !variant2Values.includes(opt))
+                                            .map((opt: string) => (
+                                                <option key={opt} value={opt} />
+                                            ))}
+                                    </datalist>
+
+                                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                        <span className="text-xs text-gray-400 font-normal mr-1">Quick Select:</span>
+                                        {availableV2Options
+                                            .filter((opt: string) => !variant2Values.includes(opt))
+                                            .slice(0, 12)
+                                            .map((opt: string) => (
+                                                <button
+                                                    key={opt}
+                                                    type="button"
+                                                    onClick={() => setVariant2Values([...variant2Values, opt])}
+                                                    className="px-2 py-0.5 rounded text-xs bg-gray-50 dark:bg-zinc-800 hover:bg-orange-50 dark:hover:bg-orange-950/20 hover:text-orange-600 hover:border-orange-300 text-gray-600 dark:text-zinc-300 border border-gray-200 dark:border-zinc-700 transition-colors"
+                                                >
+                                                    + {opt}
+                                                </button>
+                                            ))}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => setShowVariant2(true)}
+                                className="px-3.5 py-2 border border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-500 text-gray-600 dark:text-zinc-400 hover:text-orange-600 hover:bg-orange-50/40 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors"
+                            >
+                                <Plus size={14} /> Add Second Variant ({variant2Name || 'Size'})
+                            </button>
                         )}
+
+                        {/* Price & Stock Section */}
+                        <div className="space-y-3 pt-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                <h4 className="text-sm font-semibold text-gray-900 dark:text-zinc-100 flex items-center gap-1">
+                                    <span className="text-red-500 font-bold">*</span> Price &amp; Stock
+                                </h4>
+
+                                {skuRows.length > 1 && (
+                                    <span className="text-xs text-gray-400">
+                                        {skuRows.length} variant combinations
+                                    </span>
+                                )}
+                            </div>
+
+                            {/* Batch Edit Bar */}
+                            {skuRows.length > 1 && (
+                                <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-[#f8f9fa] dark:bg-zinc-850/60 rounded-md border border-gray-200 dark:border-zinc-800">
+                                    <div className="flex flex-wrap items-center gap-2.5">
+                                        <span className="text-xs font-semibold text-gray-700 dark:text-zinc-300">Batch Edit:</span>
+                                        <div className="relative w-32">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                            <input
+                                                type="number"
+                                                placeholder="Price"
+                                                value={batchPrice}
+                                                onChange={(e) => setBatchPrice(e.target.value)}
+                                                className="w-full pl-9 pr-2.5 py-1.5 h-8 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500"
+                                            />
+                                        </div>
+                                        <div className="relative w-32">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                            <input
+                                                type="number"
+                                                placeholder="Special Price"
+                                                value={batchSpecialPrice}
+                                                onChange={(e) => setBatchSpecialPrice(e.target.value)}
+                                                className="w-full pl-9 pr-2.5 py-1.5 h-8 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500"
+                                            />
+                                        </div>
+                                        <div className="w-24">
+                                            <input
+                                                type="number"
+                                                placeholder="Stock"
+                                                value={batchStock}
+                                                onChange={(e) => setBatchStock(e.target.value)}
+                                                className="w-full px-2.5 py-1.5 h-8 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500"
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={handleBatchApply}
+                                            className="px-3.5 py-1.5 h-8 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded text-xs font-semibold shadow-2xs transition-all"
+                                        >
+                                            Apply to All
+                                        </button>
+                                    </div>
+                                    <span className="text-[11px] text-gray-400 font-normal">Apply common price/stock to all variants</span>
+                                </div>
+                            )}
+
+                            {/* Daraz Seller Center Style Table */}
+                            <div className="border border-gray-200 dark:border-zinc-800 rounded-md overflow-x-auto bg-white dark:bg-zinc-900">
+                                <table className="w-full text-left text-xs border-collapse">
+                                    <thead className="bg-[#f8f9fa] dark:bg-zinc-800/70 font-semibold border-b border-gray-200 dark:border-zinc-800 text-gray-600 dark:text-zinc-300">
+                                        <tr>
+                                            {skuRows.length > 0 && (
+                                                <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 w-44 font-semibold">
+                                                    Variant
+                                                </th>
+                                            )}
+                                            <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 w-36 font-semibold">
+                                                <span className="text-red-500 font-bold mr-0.5">*</span> Price
+                                            </th>
+                                            <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 w-36 font-semibold">
+                                                Special Price
+                                            </th>
+                                            <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 w-28 font-semibold">
+                                                Stock <span className="text-gray-400 font-normal text-[11px]">ⓘ</span>
+                                            </th>
+                                            <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 min-w-[200px] font-semibold">
+                                                SellerSKU
+                                            </th>
+                                            <th className="py-3 px-3.5 border-r border-gray-200 dark:border-zinc-800 min-w-[160px] font-semibold">
+                                                Free Items
+                                            </th>
+                                            <th className="py-3 px-3.5 text-center w-28 font-semibold">
+                                                Availability
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-200 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
+                                        {skuRows.length > 0 ? (
+                                            /* Multi-variant Rows */
+                                            skuRows.map((row, idx) => (
+                                                <tr key={idx} className="hover:bg-gray-50/40 dark:hover:bg-zinc-850/30 transition-colors">
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        <div className="flex items-center gap-2.5">
+                                                            {row.images && row.images.length > 0 && (
+                                                                <img src={row.images[0]} alt="" className="w-9 h-9 rounded border border-gray-200 dark:border-zinc-750 object-cover shrink-0 bg-gray-50" />
+                                                            )}
+                                                            <div className="leading-tight">
+                                                                <div className="font-semibold text-gray-800 dark:text-zinc-100 text-xs">
+                                                                    {row.colorFamily || 'Standard'}
+                                                                </div>
+                                                                {row.size && (
+                                                                    <div className="text-[11px] text-gray-400 font-normal mt-0.5">
+                                                                        Size: {row.size}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </td>
+
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        <div className="relative">
+                                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                                            <input
+                                                                type="number"
+                                                                value={row.price || ''}
+                                                                onChange={(e) => {
+                                                                    const n = [...skuRows]
+                                                                    n[idx].price = Number(e.target.value)
+                                                                    setSkuRows(n)
+                                                                }}
+                                                                placeholder="0"
+                                                                className="w-full pl-9 pr-3 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                                required
+                                                            />
+                                                        </div>
+                                                    </td>
+
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        {row.specialPrice !== undefined ? (
+                                                            <div className="relative">
+                                                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                                                <input
+                                                                    type="number"
+                                                                    value={row.specialPrice || ''}
+                                                                    onChange={(e) => {
+                                                                        const n = [...skuRows]
+                                                                        n[idx].specialPrice = e.target.value ? Number(e.target.value) : undefined
+                                                                        setSkuRows(n)
+                                                                    }}
+                                                                    placeholder="Special"
+                                                                    className="w-full pl-9 pr-6 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    title="Remove special price"
+                                                                    onClick={() => {
+                                                                        const n = [...skuRows]
+                                                                        n[idx].specialPrice = undefined
+                                                                        setSkuRows(n)
+                                                                    }}
+                                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500 text-xs font-bold leading-none p-0.5"
+                                                                >
+                                                                    ×
+                                                                </button>
+                                                            </div>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const n = [...skuRows]
+                                                                    n[idx].specialPrice = n[idx].price && n[idx].price > 100 ? n[idx].price - 50 : 0
+                                                                    setSkuRows(n)
+                                                                }}
+                                                                className="text-xs text-blue-500 hover:text-blue-600 font-medium hover:underline py-1 px-1.5"
+                                                            >
+                                                                Add
+                                                            </button>
+                                                        )}
+                                                    </td>
+
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        <input
+                                                            type="number"
+                                                            value={row.quantity ?? ''}
+                                                            onChange={(e) => {
+                                                                const n = [...skuRows]
+                                                                n[idx].quantity = Number(e.target.value)
+                                                                setSkuRows(n)
+                                                            }}
+                                                            placeholder="0"
+                                                            className="w-full px-3 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                            required
+                                                        />
+                                                    </td>
+
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        <div className="relative">
+                                                            <input
+                                                                type="text"
+                                                                value={row.sellerSku || ''}
+                                                                maxLength={200}
+                                                                onChange={(e) => {
+                                                                    const n = [...skuRows]
+                                                                    n[idx].sellerSku = e.target.value
+                                                                    setSkuRows(n)
+                                                                }}
+                                                                placeholder="Seller SKU"
+                                                                className="w-full pl-3 pr-14 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-mono"
+                                                            />
+                                                            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-gray-400 pointer-events-none select-none">
+                                                                {(row.sellerSku || '').length}/200
+                                                            </span>
+                                                        </div>
+                                                    </td>
+
+                                                    <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                        <input
+                                                            type="text"
+                                                            value={row.freeItems || ''}
+                                                            onChange={(e) => {
+                                                                const n = [...skuRows]
+                                                                n[idx].freeItems = e.target.value
+                                                                setSkuRows(n)
+                                                            }}
+                                                            placeholder=""
+                                                            className="w-full px-3 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500"
+                                                        />
+                                                    </td>
+
+                                                    <td className="p-3 text-center align-middle">
+                                                        <div className="flex justify-center items-center">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const n = [...skuRows]
+                                                                    n[idx].available = !(n[idx].available ?? true)
+                                                                    setSkuRows(n)
+                                                                }}
+                                                                className={`w-10 h-5 inline-flex items-center rounded-full p-0.5 transition-colors cursor-pointer ${
+                                                                    (row.available ?? true) ? 'bg-orange-500 justify-end' : 'bg-gray-300 dark:bg-zinc-700 justify-start'
+                                                                }`}
+                                                                title={(row.available ?? true) ? 'Available' : 'Unavailable'}
+                                                            >
+                                                                <span className="w-4 h-4 rounded-full bg-white shadow-xs" />
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        ) : (
+                                            /* Single-Item Row (No Variants Added Yet) */
+                                            <tr className="hover:bg-gray-50/40 dark:hover:bg-zinc-850/30 transition-colors">
+                                                <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                    <div className="relative">
+                                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                                        <input
+                                                            type="number"
+                                                            value={sellingPrice || ''}
+                                                            onChange={(e) => setSellingPrice(Number(e.target.value))}
+                                                            placeholder="0"
+                                                            className="w-full pl-9 pr-3 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                            required
+                                                        />
+                                                    </div>
+                                                </td>
+
+                                                <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                    {specialPrice !== undefined ? (
+                                                        <div className="relative">
+                                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-normal">Rs.</span>
+                                                            <input
+                                                                type="number"
+                                                                value={specialPrice || ''}
+                                                                onChange={(e) => setSpecialPrice(e.target.value ? Number(e.target.value) : undefined)}
+                                                                placeholder="Special"
+                                                                className="w-full pl-9 pr-6 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                title="Remove special price"
+                                                                onClick={() => setSpecialPrice(undefined)}
+                                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500 text-xs font-bold leading-none p-0.5"
+                                                            >
+                                                                ×
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setSpecialPrice(sellingPrice && sellingPrice > 100 ? sellingPrice - 50 : 0)}
+                                                            className="text-xs text-blue-500 hover:text-blue-600 font-medium hover:underline py-1 px-1.5"
+                                                        >
+                                                            Add
+                                                        </button>
+                                                    )}
+                                                </td>
+
+                                                <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                    <input
+                                                        type="number"
+                                                        value={stock ?? ''}
+                                                        onChange={(e) => setStock(Number(e.target.value))}
+                                                        placeholder="0"
+                                                        className="w-full px-3 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-medium"
+                                                        required
+                                                    />
+                                                </td>
+
+                                                <td className="p-3 border-r border-gray-200 dark:border-zinc-800 align-middle">
+                                                    <div className="relative">
+                                                        <input
+                                                            type="text"
+                                                            value={singleSellerSku || (rawName ? `${rawName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 15).toUpperCase()}` : '')}
+                                                            maxLength={200}
+                                                            onChange={(e) => setSingleSellerSku(e.target.value)}
+                                                            placeholder="Seller SKU"
+                                                            className="w-full pl-3 pr-14 py-1.5 h-9 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 font-mono"
+                                                        />
+                                                        <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-gray-400 pointer-events-none select-none">
+                                                            {(singleSellerSku || rawName || '').length}/200
+                                                        </span>
+                                                    </div>
+                                                </td>
+
+                                                <td className="p-3">
+                                                    <input
+                                                        type="text"
+                                                        value={singleFreeItems}
+                                                        onChange={(e) => setSingleFreeItems(e.target.value)}
+                                                        placeholder=""
+                                                        className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-850 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                                                    />
+                                                </td>
+
+                                                <td className="p-3 text-center">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setSingleAvailable(!singleAvailable)}
+                                                        className={`w-11 h-6 inline-flex items-center rounded-full p-1 transition-colors cursor-pointer ${
+                                                            singleAvailable ? 'bg-orange-500 justify-end' : 'bg-gray-300 dark:bg-zinc-700 justify-start'
+                                                        }`}
+                                                        title={singleAvailable ? 'Available' : 'Unavailable'}
+                                                    >
+                                                        <span className="w-4 h-4 rounded-full bg-white shadow-xs" />
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
 
                     {/* Section 4: Product Description */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
-                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">4</span>
-                            Product Description
-                        </h3>
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-xs">
+                        <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                Product Description
+                            </h3>
+                            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                Add rich product details, formatting, specifications, and highlights.
+                            </p>
+                        </div>
 
                         {/* Main Description */}
                         <div className="space-y-1.5">
-                            <label className="text-sm font-medium text-gray-700 dark:text-zinc-200 block">
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
                                 Main Description
                             </label>
-                            <div className="border border-gray-200 dark:border-zinc-700 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-gray-400 dark:focus-within:border-zinc-500 transition-colors shadow-xs">
+                            <div className="border border-gray-300 dark:border-zinc-700 rounded-md overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange-500 transition-colors shadow-xs">
                                 {/* Daraz Toolbar */}
-                                <div className="bg-white dark:bg-zinc-800/80 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex flex-wrap items-center justify-between gap-2 select-none">
+                                <div className="bg-[#f8f9fa] dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex flex-wrap items-center justify-between gap-2 select-none">
                                     <div className="flex items-center gap-2 text-gray-600 dark:text-zinc-400">
                                         {/* Font size */}
                                         <div className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-300 cursor-pointer border border-transparent hover:border-gray-200 dark:hover:border-zinc-600">
@@ -2478,7 +3738,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 {/* Textarea or Preview */}
                                 {previewDesc ? (
                                     <div
-                                        className={`p-4 prose dark:prose-invert max-w-none text-sm bg-gray-50/50 dark:bg-zinc-900/30 overflow-y-auto ${
+                                        className={`p-4 prose dark:prose-invert max-w-none text-xs bg-gray-50/50 dark:bg-zinc-900/30 overflow-y-auto ${
                                             isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
                                         }`}
                                         dangerouslySetInnerHTML={{
@@ -2491,7 +3751,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         onChange={(e) => setDescription(e.target.value)}
                                         placeholder="Please input"
                                         style={{ textAlign: descAlign }}
-                                        className={`w-full p-4 text-sm text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans ${
+                                        className={`w-full p-3.5 text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans ${
                                             isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
                                         }`}
                                         required
@@ -2502,18 +3762,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         {/* Highlights */}
                         <div className="space-y-1.5">
-                            <label className="text-sm font-medium text-gray-700 dark:text-zinc-200 flex items-center gap-1">
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
                                 <span className="text-red-500 font-bold">*</span> Highlights
                             </label>
-                            <div className="border border-gray-200 dark:border-zinc-700 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-gray-400 dark:focus-within:border-zinc-500 transition-colors shadow-xs">
+                            <div className="border border-gray-300 dark:border-zinc-700 rounded-md overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange-500 transition-colors shadow-xs">
                                 {/* Daraz Toolbar */}
-                                <div className="bg-white dark:bg-zinc-800/80 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex items-center justify-between select-none">
+                                <div className="bg-[#f8f9fa] dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex items-center justify-between select-none">
                                     <button
                                         type="button"
                                         title="Bulleted List"
-                                        className="p-1.5 rounded bg-gray-100 dark:bg-zinc-700 text-gray-800 dark:text-zinc-200 cursor-default"
+                                        className="p-1.5 rounded bg-white dark:bg-zinc-700 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-600 cursor-default"
                                     >
-                                        <List size={16} />
+                                        <List size={14} />
                                     </button>
                                     <span className="text-[11px] text-gray-400">
                                         {highlights.filter(h => h.trim()).length} point{highlights.filter(h => h.trim()).length === 1 ? '' : 's'} (1 per line)
@@ -2526,20 +3786,25 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     onChange={(e) => {
                                         setHighlights(e.target.value.split('\n'))
                                     }}
-                                    placeholder="Please input"
+                                    placeholder="Please input bullet points..."
                                     rows={6}
-                                    className="w-full p-4 min-h-[160px] text-sm text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans"
+                                    className="w-full p-3.5 min-h-[140px] text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans"
                                 />
                             </div>
                         </div>
                     </div>
 
-                    {/* Section 5: Shipping */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-6 space-y-4 shadow-sm">
-                        <h3 className="text-base font-bold border-b dark:border-zinc-800 pb-3 flex items-center gap-2.5 text-gray-800 dark:text-zinc-100">
-                            <span className="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">5</span>
-                            Shipping &amp; Package
-                        </h3>
+                    {/* Section 5: Shipping & Package */}
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-6 shadow-xs">
+                        <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                Shipping &amp; Package
+                            </h3>
+                            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                                Enter package weight, dimensions, and dangerous goods classification.
+                            </p>
+                        </div>
+
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                             {[
                                 { label: 'Weight (kg)', val: weight, set: setWeight, step: '0.01' },
@@ -2547,55 +3812,86 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 { label: 'Width (cm)', val: width, set: setWidth, step: '1' },
                                 { label: 'Height (cm)', val: height, set: setHeight, step: '1' },
                             ].map(({ label, val, set, step }) => (
-                                <div key={label} className="space-y-1">
-                                    <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400">{label} <span className="text-red-500">*</span></label>
+                                <div key={label} className="space-y-1.5">
+                                    <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                        {label} <span className="text-red-500 font-bold">*</span>
+                                    </label>
                                     <input
                                         type="number"
                                         step={step}
                                         value={val}
                                         onChange={(e) => set(Number(e.target.value))}
-                                        className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700"
+                                        className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
                                         required
                                     />
                                 </div>
                             ))}
                         </div>
 
-                        <div className="space-y-1.5">
-                            <label className="text-xs font-semibold text-gray-600 dark:text-zinc-400 block">Dangerous Goods</label>
-                            <div className="flex gap-4">
+                        <div className="bg-[#f8f9fa] dark:bg-zinc-850/50 border border-gray-200/90 dark:border-zinc-800 rounded-lg p-4 space-y-2">
+                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">Dangerous Goods</label>
+                            <div className="flex flex-wrap gap-5">
                                 {['None', 'Battery', 'Flammable', 'Liquid'].map(opt => (
-                                    <label key={opt} className="flex items-center gap-1.5 text-xs">
+                                    <label key={opt} className="flex items-center gap-2 text-xs text-gray-700 dark:text-zinc-300 cursor-pointer select-none">
                                         <input
                                             type="radio"
                                             name="danger"
                                             value={opt}
                                             checked={dangerousGoods === opt}
                                             onChange={() => setDangerousGoods(opt)}
-                                            className="text-orange-600 border-gray-300 focus:ring-orange-500"
+                                            className="w-3.5 h-3.5 text-orange-500 border-gray-300 focus:ring-orange-500 cursor-pointer"
                                         />
-                                        {opt}
+                                        <span>{opt}</span>
                                     </label>
                                 ))}
                             </div>
                         </div>
                     </div>
 
-                    {/* Action buttons */}
-                    <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-xl p-4 flex justify-between items-center gap-3 shadow-sm">
-                        <button type="button" onClick={handleBackToList} className="px-4 py-2 border dark:border-zinc-700 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-zinc-800 text-gray-600 dark:text-gray-400 transition-all font-medium">
+                    {/* Floating Sticky Footer Bar (Matching Daraz Seller Center) */}
+                    <div className="sticky bottom-0 z-30 -mx-4 px-6 py-3.5 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-sm border-t border-gray-200 dark:border-zinc-800 shadow-[0_-4px_20px_rgba(0,0,0,0.08)] flex items-center justify-between gap-3 mt-6">
+                        <button
+                            type="button"
+                            onClick={handleBackToList}
+                            className="px-4 py-2 border border-gray-300 dark:border-zinc-700 rounded text-xs sm:text-sm hover:bg-gray-50 dark:hover:bg-zinc-800 text-gray-700 dark:text-gray-300 transition-all font-medium"
+                        >
                             ← Back to List
                         </button>
-                        <button
-                            type="submit"
-                            disabled={submitting}
-                            className="px-7 py-2.5 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded-lg font-bold text-sm shadow-md shadow-orange-200 dark:shadow-none flex items-center gap-2 disabled:opacity-50 transition-all"
-                        >
-                            {submitting
-                                ? <><Loader2 className="animate-spin" size={16} /> Pushing to Daraz...</>
-                                : <><Send size={16} /> Push to Daraz ({selectedStores.length} store{selectedStores.length !== 1 ? 's' : ''})</>
-                            }
-                        </button>
+
+                        <div className="flex items-center gap-3">
+                            {/* Save as Draft Button */}
+                            <button
+                                type="button"
+                                onClick={handleSaveAsDraft}
+                                disabled={savingDraft}
+                                className={`px-6 py-2 rounded font-semibold text-xs sm:text-sm transition-all flex items-center gap-1.5 border active:scale-95 disabled:opacity-50 ${
+                                    draftSavedSuccess
+                                        ? 'border-green-500 bg-green-50 text-green-700 dark:bg-green-950/20 dark:text-green-400'
+                                        : 'border-orange-500 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20'
+                                }`}
+                            >
+                                {savingDraft ? (
+                                    <><Loader2 className="animate-spin" size={15} /> Saving...</>
+                                ) : draftSavedSuccess ? (
+                                    <><CheckCircle2 size={15} className="text-green-600" /> Saved as Draft</>
+                                ) : (
+                                    'Save Draft'
+                                )}
+                            </button>
+
+                            {/* Submit Button */}
+                            <button
+                                type="submit"
+                                disabled={submitting}
+                                className="px-7 py-2 bg-orange-500 hover:bg-orange-600 active:scale-95 text-white rounded font-semibold text-xs sm:text-sm shadow-xs flex items-center gap-2 disabled:opacity-50 transition-all"
+                            >
+                                {submitting ? (
+                                    <><Loader2 className="animate-spin" size={15} /> Submitting...</>
+                                ) : (
+                                    <><Send size={15} /> Submit ({selectedStores.length} store{selectedStores.length !== 1 ? 's' : ''})</>
+                                )}
+                            </button>
+                        </div>
                     </div>
             </form>
 

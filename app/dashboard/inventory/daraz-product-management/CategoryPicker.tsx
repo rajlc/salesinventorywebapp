@@ -13,12 +13,13 @@ interface Category {
 interface CategoryPickerProps {
     productName: string
     selectedCategoryId: number | null
+    selectedCategoryPath?: string | null
     onSelectCategory: (categoryId: number, path: string) => void
     // When set, the AI-suggested path — used to BOTH show top suggestion AND auto-select
     autoSelectCategoryPath?: string | null
 }
 
-export default function CategoryPicker({ productName, selectedCategoryId, onSelectCategory, autoSelectCategoryPath }: CategoryPickerProps) {
+export default function CategoryPicker({ productName, selectedCategoryId, selectedCategoryPath, onSelectCategory, autoSelectCategoryPath }: CategoryPickerProps) {
     const [categories, setCategories] = useState<Category[]>([])
     const [loading, setLoading] = useState(false)
 
@@ -264,8 +265,8 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
     return (
         <div className="space-y-3">
             <div className="flex justify-between items-center">
-                <label className="block text-sm font-semibold text-gray-700 dark:text-zinc-300">
-                    Category <span className="text-red-500">*</span>
+                <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                    Category <span className="text-red-500 font-bold">*</span>
                 </label>
                 <button
                     type="button"
@@ -276,17 +277,30 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
                 </button>
             </div>
 
+            {/* Currently Selected Category Banner */}
+            {selectedCategoryPath && (
+                <div className="flex items-center justify-between p-3 bg-[#f8f9fa] dark:bg-zinc-850/50 border border-gray-200/90 dark:border-zinc-800 rounded-lg text-xs">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-bold text-orange-600 dark:text-orange-400 uppercase tracking-wide">Selected:</span>
+                        <span className="font-medium text-gray-800 dark:text-zinc-200">{selectedCategoryPath}</span>
+                    </div>
+                    <span className="text-[10px] text-green-700 dark:text-green-400 font-semibold bg-green-50 dark:bg-green-950/30 px-2 py-0.5 rounded border border-green-200 dark:border-green-900/40">
+                        Saved ✓
+                    </span>
+                </div>
+            )}
+
             {/* Category Suggestions */}
             {suggestions.length > 0 && (
-                <div className="bg-orange-50/50 dark:bg-orange-950/10 p-4 rounded-lg border dark:border-zinc-800 space-y-2">
+                <div className="bg-[#f8f9fa] dark:bg-zinc-850/50 p-4 rounded-lg border border-gray-200/90 dark:border-zinc-800 space-y-2.5">
                     <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs text-orange-700 dark:text-orange-400 font-bold flex items-center gap-1.5">
+                        <span className="text-xs text-gray-700 dark:text-zinc-300 font-bold flex items-center gap-1.5">
                             Category Suggestions
-                            {fetchingSuggestions && <Loader2 className="animate-spin text-orange-500" size={10} />}
+                            {fetchingSuggestions && <Loader2 className="animate-spin text-orange-500" size={12} />}
                         </span>
                         {suggestions.some(s => s.isAiSuggested) && (
                             <span className="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold flex items-center gap-1">
-                                <Sparkles size={9} /> AI Suggested
+                                <Sparkles size={10} /> AI Suggested
                             </span>
                         )}
                     </div>
@@ -306,7 +320,7 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
                                 <span className={`${selectedCategoryId === sug.id ? 'font-bold text-orange-600' : ''} ${sug.isAiSuggested ? 'font-medium' : ''}`}>
                                     {sug.path}
                                     {sug.isAiSuggested && selectedCategoryId === sug.id && (
-                                        <span className="ml-1 text-[9px] bg-orange-100 text-orange-500 px-1 py-0.5 rounded">AI Pick</span>
+                                        <span className="ml-1 text-[9px] bg-orange-100 text-orange-500 px-1 py-0.5 rounded font-bold">AI Pick</span>
                                     )}
                                 </span>
                             </label>
@@ -317,17 +331,17 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
 
             {/* Tree Browser */}
             {isBrowsing ? (
-                <div className="border dark:border-zinc-800 rounded-lg p-3 bg-gray-50 dark:bg-zinc-800/40 space-y-2">
+                <div className="border border-gray-200/90 dark:border-zinc-800 rounded-lg p-3.5 bg-[#f8f9fa] dark:bg-zinc-850/50 space-y-2">
                     <div className="flex flex-wrap items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
-                        <button type="button" onClick={handleResetTree} className="hover:underline hover:text-orange-500">Root</button>
+                        <button type="button" onClick={handleResetTree} className="hover:underline hover:text-orange-500 font-medium">Root</button>
                         {currentPath.map((node, i) => (
                             <span key={node.category_id} className="flex items-center gap-1">
                                 <ChevronRight size={12} />
-                                <button type="button" onClick={() => handleBackNode(i)} className="hover:underline hover:text-orange-500">{node.name}</button>
+                                <button type="button" onClick={() => handleBackNode(i)} className="hover:underline hover:text-orange-500 font-medium">{node.name}</button>
                             </span>
                         ))}
                     </div>
-                    <div className="max-h-52 overflow-y-auto divide-y dark:divide-zinc-800 text-sm">
+                    <div className="max-h-52 overflow-y-auto divide-y divide-gray-100 dark:divide-zinc-800 text-xs bg-white dark:bg-zinc-900 rounded-md border border-gray-200 dark:border-zinc-700">
                         {loading ? (
                             <div className="p-4 text-center text-gray-400">Loading categories...</div>
                         ) : activeList.length === 0 ? (
@@ -338,13 +352,13 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
                                     key={node.category_id}
                                     type="button"
                                     onClick={() => handleNodeClick(node)}
-                                    className="w-full text-left p-2 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 flex justify-between items-center rounded"
+                                    className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 flex justify-between items-center transition-colors"
                                 >
                                     <span className="flex items-center gap-2">
-                                        <Folder size={16} className="text-gray-400" />
+                                        <Folder size={14} className="text-gray-400" />
                                         {node.name}
                                     </span>
-                                    {!node.leaf && <ChevronRight size={14} className="text-gray-400" />}
+                                    {!node.leaf && <ChevronRight size={13} className="text-gray-400" />}
                                 </button>
                             ))
                         )}
@@ -352,18 +366,18 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
                 </div>
             ) : (
                 <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400">
-                        <Search size={16} />
+                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-gray-400 pointer-events-none">
+                        <Search size={14} />
                     </span>
                     <input
                         type="text"
                         placeholder="Search category path (e.g. Bracelet, Wireless Adapter...)"
                         value={searchQuery}
                         onChange={(e) => handleSearch(e.target.value)}
-                        className="w-full pl-9 pr-4 py-2 border rounded-md text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                        className="w-full pl-9 pr-4 h-9 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors"
                     />
                     {searchResults.length > 0 && searchQuery && (
-                        <div className="absolute w-full z-50 mt-1 bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-md shadow-lg max-h-52 overflow-y-auto divide-y dark:divide-zinc-800 text-xs">
+                        <div className="absolute w-full z-50 mt-1 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-lg max-h-52 overflow-y-auto divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
                             {searchResults.map(res => (
                                 <button
                                     key={res.id}
@@ -373,7 +387,7 @@ export default function CategoryPicker({ productName, selectedCategoryId, onSele
                                         setSearchQuery('')
                                         setSearchResults([])
                                     }}
-                                    className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300"
+                                    className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 transition-colors"
                                 >
                                     {res.path}
                                 </button>

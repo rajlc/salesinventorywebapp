@@ -185,6 +185,24 @@ export async function POST(request: NextRequest) {
                                 filteredAttributes[key] = String(val)
                             }
                         })
+
+                        // Auto-fill any mandatory category attributes that were not provided by the user
+                        allAttrs.forEach((a: any) => {
+                            if ((a.is_mandatory === 1 || a.is_mandatory === '1') && !filteredAttributes[a.name]) {
+                                const notSpecOpt = a.options?.find((o: any) =>
+                                    o.name?.toLowerCase() === 'not specified' ||
+                                    o.name?.toLowerCase() === 'no' ||
+                                    o.name?.toLowerCase() === 'none'
+                                )
+                                if (notSpecOpt) {
+                                    filteredAttributes[a.name] = notSpecOpt.name
+                                } else if (a.options && a.options.length > 0) {
+                                    filteredAttributes[a.name] = a.options[0].name
+                                } else if (a.input_type === 'text') {
+                                    filteredAttributes[a.name] = 'Standard'
+                                }
+                            }
+                        })
                     } else {
                         filteredAttributes = attributes || {}
                     }
@@ -396,8 +414,21 @@ export async function POST(request: NextRequest) {
             }
         }
 
+        // If all stores failed, return success: false and 400 status
+        if (successfulPushes.length === 0) {
+            const allErrors = results.map((r: any) => `${r.sellerAccount || 'Store'}: ${r.error}`).join('; ')
+            return NextResponse.json({
+                success: false,
+                error: allErrors || 'Product creation failed for all selected stores',
+                results
+            }, { status: 400 })
+        }
+
+        const anyFailed = results.some((r: any) => !r.success)
+
         return NextResponse.json({
             success: true,
+            partialFailure: anyFailed,
             results
         })
 

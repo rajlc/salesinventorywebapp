@@ -17,26 +17,120 @@ export async function GET() {
     }
 }
 
+// Helper to compute draft_type based on provided fields
+function computeDraftType(item: {
+    status?: string
+    raw_name?: string | null
+    images?: string[]
+    product_link?: string | null
+    title?: string | null
+    description?: string | null
+    highlights?: string[] | null
+    category_id?: number | null
+}): 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed' {
+    if (item.status === 'pushed') return 'pushed'
+
+    const hasTitle = !!item.title && item.title.trim().length > 0
+    const hasDesc = !!item.description && item.description.trim().length > 0
+    const hasHighlights = Array.isArray(item.highlights) && item.highlights.length > 0
+    const hasCategory = !!item.category_id
+
+    // Fully generated / ready
+    if (hasTitle && hasDesc && hasHighlights && hasCategory) {
+        return 'ready'
+    }
+
+    const hasImages = Array.isArray(item.images) && item.images.length > 0
+    const hasLink = !!item.product_link && item.product_link.trim().length > 0
+    const raw = (item.raw_name || '').trim()
+    const isGenericName = !raw || raw.startsWith('[Image Only]') || raw.startsWith('[Link') || raw.startsWith('Untitled')
+    const hasCustomName = !!raw && !isGenericName
+
+    // Single source additions
+    if (hasImages && !hasLink && !hasCustomName) {
+        return 'image_only'
+    }
+    if (hasLink && !hasImages && !hasCustomName) {
+        return 'link_only'
+    }
+    if (hasCustomName && !hasImages && !hasLink) {
+        return 'name_only'
+    }
+
+    // Combination / pending completion
+    return 'pending'
+}
+
 // POST /api/daraz/drafts — create a new draft
-// Body: { raw_name, images?, target_stores?, price?, supplier_id?, wholesale_price? }
 export async function POST(req: NextRequest) {
     try {
         const supabase = await createAdminClient()
         const body = await req.json()
 
+        const productLink = (body.product_link || body.attributes?.product_link || '').trim() || null
+        const images = body.images || []
+        let rawName = (body.raw_name || '').trim()
+
+        // Smart name assignment if omitted
+        if (!rawName) {
+            if (images.length > 0 && !productLink) {
+                const now = new Date()
+                rawName = `[Image Only] - ${now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`
+            } else if (productLink) {
+                try {
+                    const host = new URL(productLink).hostname.replace('www.', '')
+                    rawName = `[Link] - ${host}`
+                } catch {
+                    rawName = `[Link] - Competitor Product`
+                }
+            } else {
+                rawName = 'Untitled Draft'
+            }
+        }
+
+        const draftType = body.draft_type || computeDraftType({
+            status: body.status,
+            raw_name: rawName,
+            images,
+            product_link: productLink,
+            title: body.title,
+            description: body.description,
+            highlights: body.highlights,
+            category_id: body.category_id
+        })
+
+        const attributesPayload = {
+            ...(body.attributes || {}),
+            product_link: productLink,
+            draft_type: draftType
+        }
+
         const { data, error } = await supabase
             .from('daraz_draft_listings')
             .insert({
-                raw_name: body.raw_name,
-                images: body.images || [],
+                raw_name: rawName,
+                title: body.title || null,
+                titles_per_store: body.titles_per_store || {},
+                description: body.description || null,
+                highlights: body.highlights || [],
+                category_id: body.category_id || null,
+                category_path: body.category_path || null,
+                images,
+                attributes: attributesPayload,
                 target_stores: body.target_stores || [],
                 price: body.price || null,
                 special_price: body.special_price || null,
+                special_price_from: body.special_price_from || null,
+                special_price_to: body.special_price_to || null,
+                weight: body.weight ?? 0.1,
+                pkg_length: body.pkg_length ?? 1,
+                pkg_width: body.pkg_width ?? 1,
+                pkg_height: body.pkg_height ?? 1,
                 supplier_id: body.supplier_id || null,
                 wholesale_price: body.wholesale_price || null,
-                status: 'draft'
+                status: body.status || (draftType === 'ready' ? 'generated' : 'draft')
             })
-            .select('id, raw_name, status, supplier_id, wholesale_price, created_at')
+            .select('*')
             .single()
 
         if (error) throw error
@@ -56,11 +150,64 @@ export async function PATCH(req: NextRequest) {
 
         if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
 
+        // Get existing draft to recompute draft_type if relevant fields changed
+        const { data: existing } = await supabase
+            .from('daraz_draft_listings')
+            .select('*')
+            .eq('id', id)
+            .single()
+
+        if (!existing) {
+            return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+        }
+
+        const mergedAttributes = {
+            ...(existing.attributes || {}),
+            ...(fields.attributes || {})
+        }
+
+        if (fields.product_link !== undefined) {
+            mergedAttributes.product_link = fields.product_link
+        }
+
+        const productLink = mergedAttributes.product_link || null
+        const images = fields.images !== undefined ? fields.images : existing.images
+        const rawName = fields.raw_name !== undefined ? fields.raw_name : existing.raw_name
+        const title = fields.title !== undefined ? fields.title : existing.title
+        const description = fields.description !== undefined ? fields.description : existing.description
+        const highlights = fields.highlights !== undefined ? fields.highlights : existing.highlights
+        const categoryId = fields.category_id !== undefined ? fields.category_id : existing.category_id
+        const status = fields.status !== undefined ? fields.status : existing.status
+
+        const draftType = fields.draft_type || computeDraftType({
+            status,
+            raw_name: rawName,
+            images,
+            product_link: productLink,
+            title,
+            description,
+            highlights,
+            category_id: categoryId
+        })
+
+        mergedAttributes.draft_type = draftType
+
+        const updateData: Record<string, any> = {
+            ...fields,
+            attributes: mergedAttributes,
+            updated_at: new Date().toISOString()
+        }
+
+        // Auto update status to 'generated' if ready
+        if (draftType === 'ready' && updateData.status === 'draft') {
+            updateData.status = 'generated'
+        }
+
         const { data, error } = await supabase
             .from('daraz_draft_listings')
-            .update({ ...fields, updated_at: new Date().toISOString() })
+            .update(updateData)
             .eq('id', id)
-            .select('id, status')
+            .select('*')
             .single()
 
         if (error) throw error

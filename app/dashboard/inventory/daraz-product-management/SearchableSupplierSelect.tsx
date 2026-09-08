@@ -32,9 +32,10 @@ export default function SearchableSupplierSelect({
     const customSelectStyles = {
         control: (base: any, state: any) => ({
             ...base,
-            minHeight: '34px',
-            fontSize: '0.8125rem',
-            borderColor: state.isFocused ? '#f97316' : '#e5e7eb',
+            minHeight: '36px',
+            height: '36px',
+            fontSize: '0.75rem',
+            borderColor: state.isFocused ? '#f97316' : '#d1d5db',
             borderRadius: '0.375rem',
             backgroundColor: 'white',
             boxShadow: 'none',

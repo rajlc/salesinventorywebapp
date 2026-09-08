@@ -1,6 +1,6 @@
 # Claude AI Custom Connector Guide
 
-Connect **Claude AI** (via claude.ai Custom Connector or Claude Desktop MCP) to your inventory webapp to manage your Daraz listings using plain English!
+Connect **Claude AI** (via claude.ai Custom Connector, Projects, or Claude Desktop MCP) to your inventory webapp to manage your Daraz listings, drafts, variations, categories, and specifications using plain English!
 
 ---
 
@@ -8,30 +8,101 @@ Connect **Claude AI** (via claude.ai Custom Connector or Claude Desktop MCP) to 
 
 You can type naturally in Claude chat to manage your Daraz listings and inventory:
 
-### 📝 1. Save in Draft (Single Product)
-> **Prompt:** *"Add Product A at price rs 500 in daraz account Bagmati, save only in draft"*  
-> **What Claude does:** Automatically connects to your webapp and creates a draft in your database under **Bagmati Traders**. It immediately shows up in your **New Listing &rarr; Drafts** table in the webapp!
-
-### 📦 2. Bulk Add Arrived Inventory
-> **Prompt:** *"New products arrived: 10 Cotton Shirts at 450, 20 Slim Denim Jeans at 900. Save in draft for Bagmati"*  
-> **What Claude does:** Creates multiple draft rows simultaneously in your webapp inventory.
-
-### 🚀 3. Push Directly to Daraz
-> **Prompt:** *"Add Product A at price rs 500 in daraz account Bagmati, push product in daraz"*  
-> **What Claude does:** Matches the category, auto-generates SEO titles, rich description, and bullet highlights, and connects with the Daraz Open API to push to your seller account!  
-> *(Note: If no image URL is provided, Claude will prepare the draft as "Ready" and prompt you to attach a product image in the webapp).*
-
-### 🏪 4. Query Connected Daraz Accounts
-> **Prompt:** *"Which Daraz accounts are currently connected to my webapp?"*  
-> **What Claude does:** Lists all active seller accounts (e.g. *Bagmati Traders*, *BTAS*, *Cosmetic Shop*, etc.).
-
-### 📋 5. Check Draft Statuses
-> **Prompt:** *"Show me my recent drafts and their status"*  
-> **What Claude does:** Displays current drafts and whether they are `draft`, `generated`, `pushed`, or `failed`.
+### 🎨 1. Add Product with Variations & Special Price
+> **Prompt:** *"Add Product Name A with variation of Black and Red at price rs 450 for both. Category is Kitchen Cookware. Save in draft for Bagmati"*  
+> **What Claude & Connector do:**
+> - Recognizes `450` as the **Special Price** (customer discount selling price).
+> - Auto-calculates the **Regular MRP Price** (~25% markup, e.g. Rs 570) so Daraz displays a proper discount.
+> - Automatically generates unique **Seller SKUs** for each variation (e.g. `PROD-NAME-A-BLACK-7281` and `PROD-NAME-A-RED-3849`).
+> - Sets stock to **100** by default.
+> - Formats highlights with bullet points (`• `).
+> - Saves the category, specifications, and variation matrix directly into your database draft!
 
 ---
 
-## 2. Setting Up in Claude.ai (Custom Connector)
+### 📝 2. Save Draft with Specifications & Categories
+> **Prompt:** *"Save a draft for Stainless Steel Electric Kettle, category Electric Kettles, brand No Brand, material 304 Stainless Steel, capacity 2L, price rs 1200 for Balaju Shop and Bagmati Traders"*  
+> **What Claude does:**
+> - Saves category ID/path and all dynamic specifications (`attributes: { brand: 'No Brand', material: '304 Stainless Steel', capacity: '2L' }`) directly to the database.
+> - Creates SEO titles for both stores in a single draft.
+> - Prepares clean formatted HTML descriptions (`<p>`, `<strong>`) without messy code clutter.
+
+---
+
+### ✏️ 3. Edit / Update Existing Draft via Claude
+> **Prompt:** *"In draft Product Name A, change the price of Black to rs 500 and add variation Blue"*  
+> *(or: "Update draft Stainless Steel Kettle to add specification color: Matte Black")*  
+> **What Claude does:**
+> - Uses `update_product_draft` to locate the draft by name or ID and updates its variants, specifications, prices, or descriptions in real-time.
+
+---
+
+### 🔍 4. View Full Product Draft Details
+> **Prompt:** *"Show me full details and variants of draft Product Name A"*  
+> **What Claude does:**
+> - Uses `get_draft_details` to return all SKU rows, variation attributes, store titles, prices, and specifications for your review.
+
+---
+
+### 🗑️ 5. Delete a Draft Listing
+> **Prompt:** *"Delete the draft for Product Name A"*  
+> **What Claude does:**
+> - Uses `delete_product_draft` to remove the draft from the database.
+
+---
+
+### 📦 6. Bulk Add Arrived Inventory
+> **Prompt:** *"New products arrived: 10 Cotton Shirts at 450, 20 Slim Denim Jeans at 900. Save in draft for Bagmati"*  
+> **What Claude does:**
+> - Creates multiple draft rows simultaneously in your webapp database with proper pricing markup and stock 100.
+
+---
+
+### 🚀 7. Push Directly to Daraz
+> **Prompt:** *"Push Product Name A to Daraz store Bagmati Traders"*  
+> **What Claude does:**
+> - Builds Daraz multi-SKU payload with all variants, specifications, bullet points (`• `), and HTML descriptions and sends to the Daraz Open API!
+
+---
+
+### 🏪 8. Query Connected Daraz Accounts
+> **Prompt:** *"Which Daraz accounts are currently connected to my webapp?"*  
+> **What Claude does:** Lists all active seller accounts (e.g. *Bagmati Traders*, *BTAS*, *Cosmetic Shop*, etc.).
+
+---
+
+### 👁️ 10. Visual Product Image Inspection (Claude Vision)
+> **Prompt:** *"Check my image-only drafts, look at the product images, and generate the product title, description, highlights, and category"*  
+> **What Claude does:**
+> - Calls `get_draft_listings(type: 'image_only')` to find pending image-only drafts.
+> - Calls `view_draft_images(id)` or `get_draft_details(id)`.
+> - The connector downloads the high-res image from Supabase/CDN, optimizes it, and passes it directly into Claude's visual context as a native MCP image block!
+> - Claude **visually inspects the actual product image** (appearance, color, design, branding, specifications) and generates the full listing details.
+
+---
+
+### ⚡ 11. Extract Competitor Product Links
+> **Prompt:** *"Check this competitor link https://www.daraz.com.np/products/... and generate a draft"*  
+> **What Claude does:**
+> - Uses `extract_product_link` to scrape competitor title, pricing, high-res images, description, highlights, and matching Daraz category path.
+> - Can save or update draft directly.
+
+---
+
+## 2. Core Rules Implemented in the Connector
+
+| Feature | How It Works |
+|---|---|
+| **Pricing** | When you tell Claude a price (e.g. `450`), this is treated as the **Special Price** (your selling/promotional price). The connector automatically marks up the regular MRP (e.g. `570`) so Daraz displays a discount badge. |
+| **Stock** | Every SKU and variant default stock is set to **100**. |
+| **Seller SKU** | Automatically generated per variant (e.g. `PROD-BLACK-4821`). |
+| **Highlights** | Every bullet point is guaranteed to start with `• `. |
+| **Description** | Formatted using paragraphs (`<p>`) and bold tags (`<strong>`), ensuring clean readable view in the webapp and rich rendering on Daraz. |
+| **Variants in Webapp** | When you open a draft in the webapp, all variants created by Claude are automatically restored into the "Price, Stock & Variants" table. |
+
+---
+
+## 3. Setting Up in Claude.ai (Custom Connector)
 
 ### Step 1: Your Connector URL
 Your app provides two public endpoints:
@@ -48,12 +119,20 @@ Your app provides two public endpoints:
    ```
    https://madelaine-unaged-napoleon.ngrok-free.dev/api/claude-connector
    ```
-   *(Note: Both `/api/claude-connector` and `/api/claude-connector/openapi` are supported).*
-5. Save the connector. Claude will automatically detect all 5 tools (`list_daraz_stores`, `save_product_draft`, `bulk_add_products`, `push_product_to_daraz`, `get_draft_listings`).
+5. Save the connector. Claude will automatically detect all 9 tools:
+   - `search_daraz_categories` (look up official Daraz leaf categories)
+   - `save_product_draft`
+   - `update_product_draft`
+   - `delete_product_draft`
+   - `get_draft_details`
+   - `get_draft_listings`
+   - `push_product_to_daraz`
+   - `bulk_add_products`
+   - `list_daraz_stores`
 
 ---
 
-## 3. Setting Up in Claude Desktop (MCP)
+## 4. Setting Up in Claude Desktop (MCP)
 
 If you use the **Claude Desktop App**, you can connect via the Model Context Protocol (MCP):
 
@@ -66,41 +145,28 @@ If you use the **Claude Desktop App**, you can connect via the Model Context Pro
    {
      "mcpServers": {
        "daraz-inventory": {
-         "command": "node",
+         "command": "npx",
          "args": [
-           "-e",
-           "const url = 'http://localhost:3000/api/claude-connector'; ... "
+           "-y",
+           "mcp-remote",
+           "https://madelaine-unaged-napoleon.ngrok-free.dev/api/claude-connector"
          ]
        }
      }
    }
    ```
-   Or use an HTTP SSE proxy pointing to `http://localhost:3000/api/claude-connector`.
 
 ---
 
-## 4. Optional Security (API Key)
+## 5. Security & Authorization (Optional)
 
-To protect your connector from unauthorized requests:
-
-1. Open `.env.local` and add:
+To secure the connector:
+1. In `.env.local`:
    ```env
    CLAUDE_CONNECTOR_API_KEY=your-secret-password-or-token
    ```
-2. When configuring Claude or sending requests, include the header:
+2. Include header in Claude requests:
    ```
    Authorization: Bearer your-secret-password-or-token
    ```
-   *(If `CLAUDE_CONNECTOR_API_KEY` is omitted, the endpoint is open for easy local testing).*
-
----
-
-## 5. Summary of Built-in Tools
-
-| Tool Name | Purpose | Example Input |
-|---|---|---|
-| `save_product_draft` | Save product draft in database | `{ raw_name: "Product A", price: 500, store_account_name: "Bagmati" }` |
-| `bulk_add_products` | Bulk save multiple items | `{ store_account_name: "Bagmati", products: [{ name: "Item 1", price: 300 }] }` |
-| `push_product_to_daraz` | Create and publish to Daraz | `{ product_name: "Product A", price: 500, store_account_name: "Bagmati" }` |
-| `list_daraz_stores` | List all connected Daraz stores | `{}` |
-| `get_draft_listings` | View drafts and push statuses | `{ status: "draft", limit: 10 }` |
+*(If unset, the endpoint allows requests for smooth development and testing).*

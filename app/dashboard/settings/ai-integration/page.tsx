@@ -17,10 +17,13 @@ const TEMPLATE_VARIABLES = [
 
 export default function AiIntegrationPage() {
     const [loading, setLoading] = useState(false)
-    const [model, setModel] = useState('gpt-4o-mini')
-    const [apiKey, setApiKey] = useState('')
+    const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini')
+    const [model, setModel] = useState('gemini-3.6-flash')
+    const [geminiApiKey, setGeminiApiKey] = useState('')
+    const [openaiApiKey, setOpenaiApiKey] = useState('')
     const [listingPrompt, setListingPrompt] = useState('')
     const [promptLoaded, setPromptLoaded] = useState(false)
+    const [testingKey, setTestingKey] = useState(false)
 
     useEffect(() => {
         fetchSettings()
@@ -30,8 +33,16 @@ export default function AiIntegrationPage() {
         try {
             const res = await fetch('/api/settings/ai-integration')
             const data = await res.json()
-            if (data.model) setModel(data.model)
-            if (data.apiKey) setApiKey(data.apiKey)
+            if (data.model) {
+                // Normalize legacy model names
+                const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(data.model)
+                    ? 'gemini-3.6-flash'
+                    : data.model
+                setModel(normalized)
+                setProvider(normalized.startsWith('gemini') ? 'gemini' : 'openai')
+            }
+            if (data.geminiApiKey) setGeminiApiKey(data.geminiApiKey)
+            if (data.openaiApiKey) setOpenaiApiKey(data.openaiApiKey)
             if (data.listingPrompt) {
                 setListingPrompt(data.listingPrompt)
                 setPromptLoaded(true)
@@ -46,7 +57,14 @@ export default function AiIntegrationPage() {
         try {
             const res = await fetch('/api/settings/ai-integration', {
                 method: 'POST',
-                body: JSON.stringify({ model, apiKey, listingPrompt }),
+                body: JSON.stringify({
+                    provider,
+                    model,
+                    geminiApiKey,
+                    openaiApiKey,
+                    apiKey: provider === 'gemini' ? geminiApiKey : openaiApiKey,
+                    listingPrompt
+                }),
                 headers: { 'Content-Type': 'application/json' }
             })
 
@@ -59,37 +77,128 @@ export default function AiIntegrationPage() {
         }
     }
 
+    const handleTestKey = async () => {
+        const keyToTest = provider === 'gemini' ? geminiApiKey : openaiApiKey
+        if (!keyToTest.trim()) {
+            return toast.error(`Please enter your ${provider === 'gemini' ? 'Google Gemini' : 'OpenAI'} API key first`)
+        }
+        setTestingKey(true)
+        try {
+            if (provider === 'gemini') {
+                const targetModel = model.startsWith('gemini') && !model.includes('1.5') ? model : 'gemini-3.6-flash'
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': keyToTest.trim()
+                    },
+                    body: JSON.stringify({
+                        contents: [{ role: 'user', parts: [{ text: 'Reply with JSON: {"status":"connected","provider":"gemini"}' }] }],
+                        generationConfig: { responseMimeType: 'application/json' }
+                    })
+                })
+                const json = await res.json()
+                if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+                    toast.success('✅ Google Gemini API Key verified successfully! Connection is working.')
+                } else {
+                    throw new Error(json.error?.message || 'Invalid Gemini API response')
+                }
+            } else {
+                const res = await fetch('https://api.openai.com/v1/models', {
+                    headers: { 'Authorization': `Bearer ${keyToTest.trim()}` }
+                })
+                if (res.ok) {
+                    toast.success('✅ OpenAI API Key verified successfully!')
+                } else {
+                    const err = await res.json()
+                    throw new Error(err.error?.message || 'OpenAI authentication failed')
+                }
+            }
+        } catch (err: any) {
+            toast.error(`❌ Verification failed: ${err.message}`)
+        } finally {
+            setTestingKey(false)
+        }
+    }
+
     return (
         <div className="space-y-6 max-w-3xl">
             <div>
                 <h1 className="text-2xl font-bold tracking-tight">AI Integration</h1>
-                <p className="text-sm text-gray-500">Configure your global AI model, credentials, and the listing generation prompt used for Daraz product listings.</p>
+                <p className="text-sm text-gray-500">Configure your AI provider, API credentials, and listing generation prompt used for Daraz product listings.</p>
             </div>
 
-            {/* Model Preferences */}
+            {/* AI Provider & Model */}
             <Card>
                 <CardHeader className="flex flex-row items-center gap-2 pb-2">
-                    <Brain className="text-orange-500" size={20} />
-                    <CardTitle className="text-base">Model Preferences</CardTitle>
+                    <Brain size={18} className="text-orange-600" />
+                    <CardTitle className="text-base font-semibold">AI Provider &amp; Model</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                    {/* Provider Toggle Tabs */}
+                    <div className="flex gap-2 p-1 bg-gray-100 dark:bg-zinc-800 rounded-lg max-w-sm">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setProvider('gemini')
+                                if (!model.startsWith('gemini')) setModel('gemini-3.6-flash')
+                            }}
+                            className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                                provider === 'gemini'
+                                    ? 'bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                                    : 'text-gray-600 hover:text-gray-900'
+                            }`}
+                        >
+                            ✨ Google Gemini (Free Tier)
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setProvider('openai')
+                                if (model.startsWith('gemini')) setModel('gpt-4o-mini')
+                            }}
+                            className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${
+                                provider === 'openai'
+                                    ? 'bg-white dark:bg-zinc-900 text-emerald-600 dark:text-emerald-400 shadow-sm'
+                                    : 'text-gray-600 hover:text-gray-900'
+                            }`}
+                        >
+                            OpenAI (GPT-4o)
+                        </button>
+                    </div>
+
                     <div className="space-y-2">
                         <label className="text-sm font-medium flex items-center gap-1.5">
                             <Cpu size={14} className="text-gray-400" />
                             Default AI Generation Model
                         </label>
                         <div className="text-xs text-gray-500 mb-2">
-                            Choose which AI model is used when generating product titles, descriptions, and attributes.
-                            GPT-4o supports image analysis for image-aware generation.
+                            {provider === 'gemini' 
+                                ? 'Google Gemini models include native image vision for analyzing raw product photos, extracting variations, and generating listings for free.' 
+                                : 'Choose an OpenAI model. GPT-4o supports vision and image analysis.'}
                         </div>
                         <select
                             value={model}
-                            onChange={(e) => setModel(e.target.value)}
-                            className="w-full sm:w-[320px] p-2 border rounded-md text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                            onChange={(e) => {
+                                setModel(e.target.value)
+                                setProvider(e.target.value.startsWith('gemini') ? 'gemini' : 'openai')
+                            }}
+                            className="w-full sm:w-[420px] p-2 border rounded-md text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
                         >
-                            <option value="gpt-4o-mini">GPT-4o Mini (Fast &amp; Cost Efficient)</option>
-                            <option value="gpt-4o">GPT-4o (High-quality Copy &amp; Vision / Image Reading)</option>
-                            <option value="gpt-4-turbo">GPT-4 Turbo (Balanced Quality)</option>
+                            {provider === 'gemini' ? (
+                                <>
+                                    <option value="gemini-3.6-flash">Gemini 3.6 Flash (100% Free Tier — Fast Multimodal Vision)</option>
+                                    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite (100% Free Tier — Ultra-Fast &amp; High Volume)</option>
+                                    <option value="gemini-3.7-flash">Gemini 3.7 Flash (100% Free Tier — Advanced Reasoning &amp; Vision)</option>
+                                    <option value="gemini-flash-latest">Gemini Flash Latest (Auto-Updating Latest Free Flash)</option>
+                                </>
+                            ) : (
+                                <>
+                                    <option value="gpt-4o-mini">GPT-4o Mini (Fast &amp; Cost Efficient)</option>
+                                    <option value="gpt-4o">GPT-4o (High-quality Copy &amp; Vision / Image Reading)</option>
+                                    <option value="gpt-4-turbo">GPT-4 Turbo (Balanced Quality)</option>
+                                </>
+                            )}
                         </select>
                     </div>
                 </CardContent>
@@ -99,23 +208,60 @@ export default function AiIntegrationPage() {
             <Card>
                 <CardHeader className="flex flex-row items-center gap-2 pb-2">
                     <Key className="text-orange-500" size={20} />
-                    <CardTitle className="text-base">API Authentication</CardTitle>
+                    <CardTitle className="text-base">
+                        {provider === 'gemini' ? 'Google Gemini API Key' : 'OpenAI API Key'}
+                    </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                    <div className="space-y-2">
-                        <label className="text-sm font-medium flex items-center gap-1.5">
-                            AI Provider API Key
-                        </label>
-                        <div className="text-xs text-gray-500 mb-2">
-                            Enter your OpenAI API key. Leave blank to fall back on system-configured keys.
+                    {provider === 'gemini' ? (
+                        <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-zinc-800 rounded-lg p-3 text-xs text-emerald-800 dark:text-emerald-400 space-y-1.5">
+                            <p className="font-semibold flex items-center gap-1.5">
+                                <ShieldCheck size={14} className="text-emerald-600" />
+                                Google Gemini is 100% Free (No Credit Card Required)
+                            </p>
+                            <p>
+                                Google AI Studio provides 15 requests/minute and 1,500 requests/day for free. You can generate a free key with your regular Google account in 10 seconds.
+                            </p>
+                            <a
+                                href="https://aistudio.google.com/app/apikey"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 font-semibold underline text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 mt-1"
+                            >
+                                👉 Click here to get your Free Gemini API Key at Google AI Studio &rarr;
+                            </a>
                         </div>
-                        <Input
-                            type="password"
-                            placeholder="sk-..."
-                            value={apiKey}
-                            onChange={(e) => setApiKey(e.target.value)}
-                            className="w-full sm:w-[450px]"
-                        />
+                    ) : (
+                        <div className="text-xs text-gray-500 mb-2">
+                            Enter your OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="underline">platform.openai.com</a>.
+                        </div>
+                    )}
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">
+                            {provider === 'gemini' ? 'Gemini API Key' : 'OpenAI Secret Key'}
+                        </label>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                            <Input
+                                type="password"
+                                placeholder={provider === 'gemini' ? 'AIzaSy...' : 'sk-...'}
+                                value={provider === 'gemini' ? geminiApiKey : openaiApiKey}
+                                onChange={(e) => {
+                                    if (provider === 'gemini') setGeminiApiKey(e.target.value)
+                                    else setOpenaiApiKey(e.target.value)
+                                }}
+                                className="w-full sm:w-[450px]"
+                            />
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={handleTestKey}
+                                disabled={testingKey}
+                                className="text-xs whitespace-nowrap"
+                            >
+                                {testingKey ? 'Testing...' : 'Test Key ⚡'}
+                            </Button>
+                        </div>
                     </div>
                 </CardContent>
             </Card>
