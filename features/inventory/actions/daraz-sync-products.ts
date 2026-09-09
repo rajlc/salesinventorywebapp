@@ -236,6 +236,7 @@ export async function syncAllDarazProductsAction() {
                             category_name: categoryName,
                             website_category: matchedWebsiteCategory,
                             marketplace_category: matchedMarketplaceCategory,
+                            daraz_item_id: item.item_id ? String(item.item_id) : null,
                             updated_at: new Date().toISOString()
                         }
 

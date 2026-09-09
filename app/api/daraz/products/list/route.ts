@@ -83,18 +83,34 @@ export async function GET(request: NextRequest) {
             const sellerAccount = p.seller_account1 || p.seller_account2 || p.seller_account3 || p.seller_account4 || 'Unknown'
             const sellerSku = p.seller_sku1 || p.seller_sku2 || p.seller_sku3 || p.seller_sku4 || ''
             
+            // Combine primary image_url with other_images
+            const allImages: string[] = []
+            if (p.image_url) allImages.push(p.image_url)
+            if (Array.isArray(p.other_images)) {
+                p.other_images.forEach((u: string) => {
+                    if (u && typeof u === 'string' && !allImages.includes(u)) {
+                        allImages.push(u)
+                    }
+                })
+            }
+
             return {
-                item_id: p.id,
+                item_id: p.daraz_item_id || p.id,
+                productId: p.id,
+                daraz_item_id: p.daraz_item_id || null,
+                daraz_edit_draft: p.daraz_edit_draft || null,
+                daraz_push_status: p.daraz_push_status || (p.is_new_pushed ? 'pushed' : (p.marketplace_sync_status === 'Pushed' ? 'pushed' : null)),
                 name: p.product_name || '',
                 primaryCategory: p.category_name || '',
                 status: p.status || 'Active',
-                images: p.image_url ? [p.image_url] : (p.other_images || []),
+                images: allImages.length > 0 ? allImages : (p.image_url ? [p.image_url] : []),
                 created_time: p.created_at,
                 updated_time: p.updated_at,
                 attributes: {
                     name: p.product_name || '',
                     description: p.description || '',
                     short_description: p.highlights || '',
+                    brand: p.brand || 'Remark',
                 },
                 skus: [{
                     SellerSku: sellerSku,

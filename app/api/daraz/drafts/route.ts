@@ -11,7 +11,17 @@ export async function GET() {
             .order('created_at', { ascending: false })
 
         if (error) throw error
-        return NextResponse.json({ success: true, data: data || [] })
+
+        const normalized = (data || []).map((item: any) => ({
+            ...item,
+            product_link: item.attributes?.product_link || null,
+            draft_type: item.attributes?.draft_type || null,
+            campaign_price: item.campaign_price !== undefined && item.campaign_price !== null
+                ? Number(item.campaign_price)
+                : (item.attributes?.campaign_price !== undefined && item.attributes?.campaign_price !== null ? Number(item.attributes.campaign_price) : null)
+        }))
+
+        return NextResponse.json({ success: true, data: normalized })
     } catch (err: any) {
         return NextResponse.json({ error: err.message }, { status: 500 })
     }
@@ -99,46 +109,99 @@ export async function POST(req: NextRequest) {
             category_id: body.category_id
         })
 
+        const campaignPrice = body.campaign_price !== undefined && body.campaign_price !== null ? Number(body.campaign_price) : null
+
         const attributesPayload = {
             ...(body.attributes || {}),
             product_link: productLink,
-            draft_type: draftType
+            draft_type: draftType,
+            ...(campaignPrice !== null ? { campaign_price: campaignPrice } : {})
         }
 
-        const { data, error } = await supabase
+        const insertRow: Record<string, any> = {
+            raw_name: rawName,
+            title: body.title || null,
+            titles_per_store: body.titles_per_store || {},
+            description: body.description || null,
+            highlights: body.highlights || [],
+            category_id: body.category_id || null,
+            category_path: body.category_path || null,
+            images,
+            attributes: attributesPayload,
+            target_stores: body.target_stores || [],
+            price: body.price || null,
+            special_price: body.special_price || null,
+            special_price_from: body.special_price_from || null,
+            special_price_to: body.special_price_to || null,
+            weight: body.weight ?? 0.1,
+            pkg_length: body.pkg_length ?? 1,
+            pkg_width: body.pkg_width ?? 1,
+            pkg_height: body.pkg_height ?? 1,
+            supplier_id: body.supplier_id || null,
+            wholesale_price: body.wholesale_price || null,
+            status: body.status || (draftType === 'ready' ? 'generated' : 'draft')
+        }
+
+        if (campaignPrice !== null) {
+            insertRow.campaign_price = campaignPrice
+        }
+
+        let { data, error } = await supabase
             .from('daraz_draft_listings')
-            .insert({
-                raw_name: rawName,
-                title: body.title || null,
-                titles_per_store: body.titles_per_store || {},
-                description: body.description || null,
-                highlights: body.highlights || [],
-                category_id: body.category_id || null,
-                category_path: body.category_path || null,
-                images,
-                attributes: attributesPayload,
-                target_stores: body.target_stores || [],
-                price: body.price || null,
-                special_price: body.special_price || null,
-                special_price_from: body.special_price_from || null,
-                special_price_to: body.special_price_to || null,
-                weight: body.weight ?? 0.1,
-                pkg_length: body.pkg_length ?? 1,
-                pkg_width: body.pkg_width ?? 1,
-                pkg_height: body.pkg_height ?? 1,
-                supplier_id: body.supplier_id || null,
-                wholesale_price: body.wholesale_price || null,
-                status: body.status || (draftType === 'ready' ? 'generated' : 'draft')
-            })
+            .insert(insertRow)
             .select('*')
             .single()
 
+        if (error && (error.code === 'PGRST204' || error.message?.includes('campaign_price'))) {
+            delete insertRow.campaign_price
+            const retry = await supabase.from('daraz_draft_listings').insert(insertRow).select('*').single()
+            data = retry.data
+            error = retry.error
+        }
+
         if (error) throw error
-        return NextResponse.json({ success: true, data })
+
+        const normalizedData = data ? {
+            ...data,
+            product_link: data.attributes?.product_link || null,
+            draft_type: data.attributes?.draft_type || null,
+            campaign_price: data.campaign_price !== undefined && data.campaign_price !== null
+                ? Number(data.campaign_price)
+                : (data.attributes?.campaign_price !== undefined && data.attributes?.campaign_price !== null ? Number(data.attributes.campaign_price) : null)
+        } : data
+
+        return NextResponse.json({ success: true, data: normalizedData })
     } catch (err: any) {
         return NextResponse.json({ error: err.message }, { status: 500 })
     }
 }
+
+// Valid columns on the daraz_draft_listings table to prevent PGRST204 errors
+const VALID_DRAFT_COLUMNS = new Set([
+    'raw_name',
+    'title',
+    'titles_per_store',
+    'description',
+    'highlights',
+    'category_id',
+    'category_path',
+    'images',
+    'attributes',
+    'target_stores',
+    'price',
+    'special_price',
+    'special_price_from',
+    'special_price_to',
+    'weight',
+    'pkg_length',
+    'pkg_width',
+    'pkg_height',
+    'status',
+    'error',
+    'supplier_id',
+    'wholesale_price',
+    'updated_at'
+])
 
 // PATCH /api/daraz/drafts — update a draft by id (bulk-compatible)
 // Body: { id, ...fields }
@@ -168,6 +231,10 @@ export async function PATCH(req: NextRequest) {
 
         if (fields.product_link !== undefined) {
             mergedAttributes.product_link = fields.product_link
+        }
+
+        if (fields.campaign_price !== undefined) {
+            mergedAttributes.campaign_price = fields.campaign_price !== null ? Number(fields.campaign_price) : null
         }
 
         const productLink = mergedAttributes.product_link || null
@@ -203,15 +270,38 @@ export async function PATCH(req: NextRequest) {
             updateData.status = 'generated'
         }
 
+        // Filter updateData to only valid table columns to avoid PGRST204 errors
+        // (fields like product_link, draft_type, campaign_price live inside attributes JSONB)
+        const filteredUpdateData: Record<string, any> = {
+            attributes: mergedAttributes,
+            updated_at: updateData.updated_at
+        }
+
+        for (const [key, val] of Object.entries(updateData)) {
+            if (VALID_DRAFT_COLUMNS.has(key)) {
+                filteredUpdateData[key] = val
+            }
+        }
+
         const { data, error } = await supabase
             .from('daraz_draft_listings')
-            .update(updateData)
+            .update(filteredUpdateData)
             .eq('id', id)
             .select('*')
             .single()
 
         if (error) throw error
-        return NextResponse.json({ success: true, data })
+
+        const normalizedData = data ? {
+            ...data,
+            product_link: data.attributes?.product_link || null,
+            draft_type: data.attributes?.draft_type || null,
+            campaign_price: data.campaign_price !== undefined && data.campaign_price !== null
+                ? Number(data.campaign_price)
+                : (data.attributes?.campaign_price !== undefined && data.attributes?.campaign_price !== null ? Number(data.attributes.campaign_price) : null)
+        } : data
+
+        return NextResponse.json({ success: true, data: normalizedData })
     } catch (err: any) {
         return NextResponse.json({ error: err.message }, { status: 500 })
     }

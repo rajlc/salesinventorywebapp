@@ -2,6 +2,7 @@
 // Based on Daraz Open Platform documentation
 
 export interface DarazSkuVariant {
+    skuId?: string | number
     sellerSku?: string
     price: number
     specialPrice?: number
@@ -134,3 +135,94 @@ ${skusXml}
     </Product>
 </Request>`
 }
+
+export interface DarazProductUpdatePayload {
+    itemId: string | number
+    name?: string
+    shortDescription?: string
+    description?: string
+    brand?: string
+    images?: string[] // Daraz CDN URLs
+    attributes?: Record<string, string>
+    skus?: DarazSkuVariant[]
+}
+
+export function buildProductUpdateXml(payload: DarazProductUpdatePayload): string {
+    const {
+        itemId,
+        name,
+        shortDescription,
+        description,
+        brand,
+        images = [],
+        attributes = {},
+        skus = [],
+    } = payload
+
+    // Build images XML if provided
+    let imagesXml = ''
+    if (images && images.length > 0) {
+        imagesXml = `        <Images>\n${images.slice(0, 8).map(url => `            <Image>${escapeXml(url)}</Image>`).join('\n')}\n        </Images>`
+    }
+
+    // Build attributes XML
+    const attrLines: string[] = []
+    if (name) {
+        attrLines.push(`                <name>${escapeXml(name)}</name>`)
+    }
+    if (shortDescription) {
+        attrLines.push(`                <short_description>${escapeXml(shortDescription)}</short_description>`)
+    }
+    if (description) {
+        attrLines.push(`                <description>${escapeXml(description)}</description>`)
+    }
+    if (brand) {
+        attrLines.push(`                <brand>${escapeXml(brand)}</brand>`)
+    }
+    Object.entries(attributes).forEach(([key, value]) => {
+        if (key !== 'name' && key !== 'short_description' && key !== 'description' && key !== 'brand' && value) {
+            attrLines.push(`                <${key}>${escapeXml(value)}</${key}>`)
+        }
+    })
+
+    const attributesXml = attrLines.length > 0
+        ? `        <Attributes>\n${attrLines.join('\n')}\n        </Attributes>`
+        : ''
+
+    // Build SKUs XML
+    let skusXml = ''
+    if (skus && skus.length > 0) {
+        const today = new Date().toISOString().split('T')[0]
+        const defaultSpecialTo = new Date(Date.now() + 5 * 365 * 24 * 3600 * 1000).toISOString().split('T')[0]
+
+        const skuEntries = skus.map(sku => {
+            const skuImagesXml = sku.images && sku.images.length > 0
+                ? `                     <Images>\n${sku.images.slice(0, 8).map(u => `                          <Image>${escapeXml(u)}</Image>`).join('\n')}\n                     </Images>`
+                : ''
+
+            const specialFrom = sku.specialPriceFrom || today
+            const specialTo = sku.specialPriceTo || defaultSpecialTo
+
+            return `                <Sku>
+${sku.skuId ? `                     <SkuId>${sku.skuId}</SkuId>` : ''}
+${sku.sellerSku ? `                     <SellerSku>${escapeXml(sku.sellerSku)}</SellerSku>` : ''}
+                     <price>${sku.price.toFixed(2)}</price>
+${sku.specialPrice ? `                     <special_price>${sku.specialPrice.toFixed(2)}</special_price>` : ''}
+${sku.specialPrice ? `                     <special_from_date>${specialFrom}</special_from_date>` : ''}
+${sku.specialPrice ? `                     <special_to_date>${specialTo}</special_to_date>` : ''}
+${sku.quantity !== undefined ? `                     <quantity>${sku.quantity}</quantity>` : ''}
+${skuImagesXml}
+                </Sku>`
+        }).join('\n')
+
+        skusXml = `        <Skus>\n${skuEntries}\n        </Skus>`
+    }
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Request>
+    <Product>
+        <ItemId>${itemId}</ItemId>
+${imagesXml ? imagesXml + '\n' : ''}${attributesXml ? attributesXml + '\n' : ''}${skusXml ? skusXml + '\n' : ''}    </Product>
+</Request>`
+}
+

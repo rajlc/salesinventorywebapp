@@ -49,7 +49,11 @@ export async function POST(request: NextRequest) {
             supplier_id,
             supplierId,
             wholesale_price,
-            wholesalePrice
+            wholesalePrice,
+            sales_price,
+            salesPrice,
+            campaign_price,
+            campaignPrice
         } = body
 
         if (!storeIds && storeId) {
@@ -364,11 +368,18 @@ export async function POST(request: NextRequest) {
                             }
                         }
 
-                        const baseUpdate = {
+                        const effectiveSalesPrice = sales_price ?? salesPrice ?? skus[0]?.specialPrice ?? skus[0]?.special_price
+                        const baseUpdate: Record<string, any> = {
                             updated_at: new Date().toISOString(),
                             is_new_pushed: true,
                             pushed_at: new Date().toISOString(),
                             approval_status: 'Pending'
+                        }
+                        if (effectiveSalesPrice !== undefined && effectiveSalesPrice !== null) {
+                            baseUpdate.special_price = Number(effectiveSalesPrice)
+                        }
+                        if (skus[0]?.price) {
+                            baseUpdate.regular_price = Number(skus[0].price)
                         }
 
                         if (Object.keys(updatePayload).length > 0) {
@@ -387,6 +398,7 @@ export async function POST(request: NextRequest) {
                         }
 
                     } else {
+                        const effectiveSalesPrice = sales_price ?? salesPrice ?? skus[0]?.specialPrice ?? skus[0]?.special_price
                         console.log(`[DarazCreate] Inserting new product into inventory: "${rawProductName}"...`)
                         const { data: newProd, error: insertErr } = await supabase
                             .from('products')
@@ -412,7 +424,7 @@ export async function POST(request: NextRequest) {
                                 description: description || '',
                                 highlights: shortDescription || '',
                                 regular_price: skus[0]?.price || 0,
-                                special_price: skus[0]?.specialPrice || null,
+                                special_price: effectiveSalesPrice !== undefined && effectiveSalesPrice !== null ? Number(effectiveSalesPrice) : (skus[0]?.specialPrice || null),
                                 is_new_pushed: true,
                                 pushed_at: new Date().toISOString()
                             })
@@ -437,6 +449,35 @@ export async function POST(request: NextRequest) {
                                 supplier_id: targetSupplierId,
                                 wholesale_price: Number(targetWholesalePrice)
                             })
+                    }
+
+                    // Auto-upsert sales price (market_price) & campaign price into daraz_avg_prices
+                    const effectiveMarketPrice = sales_price ?? salesPrice ?? skus[0]?.specialPrice ?? skus[0]?.special_price
+                    const effectiveCampPrice = campaign_price ?? campaignPrice
+
+                    const marketPriceNum = (effectiveMarketPrice !== undefined && effectiveMarketPrice !== null && String(effectiveMarketPrice).trim() !== '' && !isNaN(Number(effectiveMarketPrice)))
+                        ? Number(effectiveMarketPrice)
+                        : null
+                    const campaignPriceNum = (effectiveCampPrice !== undefined && effectiveCampPrice !== null && String(effectiveCampPrice).trim() !== '' && !isNaN(Number(effectiveCampPrice)))
+                        ? Number(effectiveCampPrice)
+                        : null
+
+                    if (targetProductId && (marketPriceNum !== null || campaignPriceNum !== null)) {
+                        console.log(`[DarazCreate] Syncing to daraz_avg_prices for ${targetProductId}: market_price=${marketPriceNum}, campaign_price=${campaignPriceNum}`)
+                        const avgPayload: Record<string, any> = {
+                            product_id: targetProductId,
+                            updated_at: new Date().toISOString()
+                        }
+                        if (marketPriceNum !== null) avgPayload.market_price = marketPriceNum
+                        if (campaignPriceNum !== null) avgPayload.campaign_price = campaignPriceNum
+
+                        const { error: avgErr } = await supabase
+                            .from('daraz_avg_prices')
+                            .upsert(avgPayload, { onConflict: 'product_id' })
+
+                        if (avgErr) {
+                            console.error('[DarazCreate] Failed to upsert daraz_avg_prices:', avgErr.message)
+                        }
                     }
                 }
             } catch (dbErr: any) {

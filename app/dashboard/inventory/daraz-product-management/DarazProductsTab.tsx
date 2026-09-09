@@ -1,10 +1,75 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Search, RefreshCw, Layers, ExternalLink, ChevronDown, CheckCircle, AlertTriangle, MoreVertical, Settings } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { Search, RefreshCw, Layers, ExternalLink, ChevronDown, CheckCircle, AlertTriangle, MoreVertical, Settings, Edit3, FileText, CheckCircle2, Info } from 'lucide-react'
 import { Card } from '@/components/ui-shim'
 import ProductDetailDrawer from './ProductDetailDrawer'
+import EditProductDrawer from './EditProductDrawer'
 import { syncAllDarazProductsAction } from '@/features/inventory/actions/daraz-sync-products'
+
+// ── Content Score Calculation (User Specification) ───────────────────────────
+// Excellent: 3+ images, highlights with bullet points, and description with at least one image
+// Incomplete: less than 3 images OR no description
+// To be Improved: missing bullet points OR short description OR no image in description
+export function calculateDarazContentScore(product: any) {
+    const imagesCount = (product.images || []).length
+    const shortDesc = (product.attributes?.short_description || product.highlights || '').trim()
+    const desc = (product.attributes?.description || product.description || '').trim()
+
+    const hasBulletPoints = shortDesc.includes('<li') ||
+        shortDesc.includes('•') ||
+        shortDesc.includes('* ') ||
+        shortDesc.includes('- ') ||
+        shortDesc.split('\n').filter((l: string) => l.trim().length > 3).length >= 2
+
+    const hasImageInDesc = desc.includes('<img') ||
+        desc.includes('data:image') ||
+        /https?:\/\/[^\s"']+\.(jpeg|jpg|png|webp|gif)/i.test(desc) ||
+        desc.includes('slatic.net')
+
+    const isShortDesc = desc.replace(/<[^>]*>/g, '').trim().length < 60
+
+    // 1. Incomplete: missing images completely OR missing description OR both <3 images and missing highlights
+    if (imagesCount === 0 || !desc || (imagesCount < 3 && (!desc || !shortDesc))) {
+        const missingReasons: string[] = []
+        if (imagesCount === 0) missingReasons.push('No product images')
+        else if (imagesCount < 3) missingReasons.push(`Only ${imagesCount} image(s) and missing highlights`)
+        if (!desc) missingReasons.push('Missing description')
+        return {
+            status: 'incomplete',
+            label: 'Incomplete',
+            colorClass: 'bg-red-50 text-red-600 border border-red-200 dark:bg-red-950/40 dark:text-red-400 dark:border-red-800',
+            dotClass: 'bg-red-500',
+            missing: missingReasons
+        }
+    }
+
+    // 2. Excellent: 3+ images AND highlights with bullet points AND description with at least one image
+    if (imagesCount >= 3 && hasBulletPoints && hasImageInDesc) {
+        return {
+            status: 'excellent',
+            label: 'Excellent',
+            colorClass: 'bg-green-50 text-green-700 border border-green-200 dark:bg-green-950/40 dark:text-green-400 dark:border-green-800',
+            dotClass: 'bg-green-500',
+            missing: []
+        }
+    }
+
+    // 3. To be Improved: everything else (e.g. only 1-2 images, missing bullets, short description, or no image in description)
+    const missingReasons: string[] = []
+    if (imagesCount < 3) missingReasons.push(`Only ${imagesCount} image(s) (needs 3+ for Excellent)`)
+    if (!hasBulletPoints) missingReasons.push('Missing bullet points in highlights')
+    if (isShortDesc) missingReasons.push('Short description (under 60 chars)')
+    if (!hasImageInDesc) missingReasons.push('No image in description')
+
+    return {
+        status: 'to_be_improved',
+        label: 'To be Improved',
+        colorClass: 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800',
+        dotClass: 'bg-amber-500',
+        missing: missingReasons
+    }
+}
 
 interface DarazProductsTabProps {
     onPushToAnotherAccount: (product: any) => void
@@ -15,6 +80,7 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
     const [loading, setLoading] = useState(true)
     const [syncing, setSyncing] = useState(false)
     const [statusFilter, setStatusFilter] = useState<string>('all')
+    const [contentScoreFilter, setContentScoreFilter] = useState<string>('all')
     const [searchTerm, setSearchTerm] = useState('')
     const [storeFilter, setStoreFilter] = useState('')
     const [stores, setStores] = useState<any[]>([])
@@ -38,6 +104,9 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
     
     // Detail Drawer state
     const [detailProduct, setDetailProduct] = useState<any>(null)
+
+    // Edit Product Drawer state
+    const [editProduct, setEditProduct] = useState<any>(null)
 
     // Manual full sync from Daraz to local database
     const handleManualSync = async () => {
@@ -216,6 +285,18 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                         ))}
                     </select>
 
+                    {/* Content Score Filter Dropdown */}
+                    <select
+                        value={contentScoreFilter}
+                        onChange={(e) => setContentScoreFilter(e.target.value)}
+                        className="py-2 px-3 border rounded-md text-sm bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                    >
+                        <option value="all">All Content Scores</option>
+                        <option value="excellent">● Excellent</option>
+                        <option value="to_be_improved">● To be Improved</option>
+                        <option value="incomplete">● Incomplete</option>
+                    </select>
+
                     <button
                         onClick={fetchProducts}
                         disabled={loading}
@@ -292,16 +373,29 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                                     </div>
                                 </td>
                             </tr>
-                        ) : products.length === 0 ? (
-                            <tr>
-                                <td colSpan={7} className="p-12 text-center text-gray-400">
-                                    No products found on Daraz for selected filters.
-                                </td>
-                            </tr>
-                        ) : (
-                            products.map(product => {
+                        ) : (() => {
+                            const filteredProducts = products.filter(product => {
+                                if (contentScoreFilter === 'all') return true
+                                const score = calculateDarazContentScore(product)
+                                return score.status === contentScoreFilter
+                            })
+
+                            if (filteredProducts.length === 0) {
+                                return (
+                                    <tr>
+                                        <td colSpan={7} className="p-12 text-center text-gray-400">
+                                            No products match the selected Content Score filter ({contentScoreFilter.replace(/_/g, ' ')}).
+                                        </td>
+                                    </tr>
+                                )
+                            }
+
+                            return filteredProducts.map(product => {
                                 const mainSku = product.skus?.[0] || {}
                                 const matchedInvId = mainSku.inventoryProductId
+                                const score = calculateDarazContentScore(product)
+                                const isDraftSaved = product.daraz_push_status === 'draft_saved' || !!product.daraz_edit_draft
+                                const isPushed = product.daraz_push_status === 'pushed'
 
                                 return (
                                     <tr key={product.item_id} className="hover:bg-gray-50/55 dark:hover:bg-zinc-800/40">
@@ -316,12 +410,12 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                                             <img
                                                 src={product.images?.[0] || '/placeholder.png'}
                                                 alt={product.name}
-                                                className="w-14 h-14 rounded object-cover border dark:border-zinc-700"
+                                                className="w-14 h-14 rounded object-cover border dark:border-zinc-700 flex-shrink-0"
                                             />
-                                            <div className="space-y-1">
+                                            <div className="space-y-1 min-w-0">
                                                 <button
                                                     onClick={() => setDetailProduct(product)}
-                                                    className="font-semibold text-gray-800 dark:text-gray-100 hover:text-orange-500 text-left"
+                                                    className="font-semibold text-gray-800 dark:text-gray-100 hover:text-orange-500 text-left line-clamp-2"
                                                 >
                                                     {product.name}
                                                 </button>
@@ -333,15 +427,17 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                                                             🔗 Linked Inv: {matchedInvId}
                                                         </span>
                                                     ) : (
-                                                        <span className="text-red-500">❌ Not Linked</span>
+                                                        <span className="text-gray-400">
+                                                            No Linked Inventory
+                                                        </span>
                                                     )}
                                                 </div>
                                             </div>
                                         </td>
-                                        <td className="p-3 text-right align-middle font-medium">
+                                        <td className="p-3 text-center align-middle">
                                             {mainSku.special_price ? (
-                                                <div className="flex flex-col text-right">
-                                                    <span className="text-gray-900 dark:text-white font-semibold">
+                                                <div className="flex flex-col">
+                                                    <span className="text-orange-600 font-bold">
                                                         Rs. {mainSku.special_price}
                                                     </span>
                                                     <span className="text-xs text-gray-400 line-through">
@@ -367,26 +463,71 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                                             </span>
                                         </td>
                                         <td className="p-3 text-center align-middle">
-                                            {/* Content Score Badge */}
-                                            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400 flex items-center justify-center gap-1 w-fit mx-auto">
-                                                To be Improved (62)
-                                            </span>
+                                            {/* Dynamic Content Score Badge with Tooltip */}
+                                            <div className="relative group inline-block">
+                                                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 cursor-default transition-all ${score.colorClass}`}>
+                                                    <span className={`w-2 h-2 rounded-full ${score.dotClass}`}></span>
+                                                    {score.label}
+                                                    {score.missing.length > 0 && (
+                                                        <Info size={12} className="opacity-70 group-hover:opacity-100" />
+                                                    )}
+                                                </span>
+                                                {score.missing.length > 0 && (
+                                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-30 w-52 p-2.5 bg-gray-900 text-white text-[11px] rounded-lg shadow-xl text-left pointer-events-none">
+                                                        <p className="font-bold text-amber-400 mb-1">To improve score:</p>
+                                                        <ul className="list-disc pl-3.5 space-y-0.5 text-gray-200">
+                                                            {score.missing.map((m, i) => (
+                                                                <li key={i}>{m}</li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </td>
                                         <td className="p-3 text-right align-middle">
-                                            <div className="flex justify-end gap-1">
-                                                <button
-                                                    onClick={() => onPushToAnotherAccount(product)}
-                                                    className="px-2 py-1 bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-gray-300 rounded text-xs font-medium hover:bg-orange-500 hover:text-white transition-all"
-                                                    title="Copy / Push this listing to another account"
-                                                >
-                                                    Push Account
-                                                </button>
+                                            <div className="flex flex-col items-end gap-1.5">
+                                                {/* Top Status Indicators */}
+                                                {isPushed && (
+                                                    <span className="flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 dark:bg-green-950/40 dark:text-green-400 px-2 py-0.5 rounded-full border border-green-200 dark:border-green-800">
+                                                        <CheckCircle2 size={11} className="text-green-600" />
+                                                        Pushed
+                                                    </span>
+                                                )}
+                                                {isDraftSaved && (
+                                                    <span className="flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 dark:bg-amber-950/40 dark:text-amber-400 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800">
+                                                        <FileText size={11} className="text-amber-600" />
+                                                        Draft Saved
+                                                    </span>
+                                                )}
+
+                                                {/* Action Buttons Row */}
+                                                <div className="flex items-center justify-end gap-1.5">
+                                                    <button
+                                                        onClick={() => setEditProduct(product)}
+                                                        className={`px-2 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-all ${
+                                                            isDraftSaved
+                                                                ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-700 shadow-xs'
+                                                                : 'bg-white dark:bg-zinc-800 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-700 border dark:border-zinc-700'
+                                                        }`}
+                                                        title="Edit product details, images, description, or pricing"
+                                                    >
+                                                        <Edit3 size={11} />
+                                                        {isDraftSaved ? 'Edit Draft' : 'Edit'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => onPushToAnotherAccount(product)}
+                                                        className="px-2 py-1 bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-gray-300 rounded text-xs font-medium hover:bg-orange-500 hover:text-white transition-all border dark:border-zinc-700"
+                                                        title="Copy / Push this listing to another account"
+                                                    >
+                                                        Push Account
+                                                    </button>
+                                                </div>
                                             </div>
                                         </td>
                                     </tr>
                                 )
                             })
-                        )}
+                        })()}
                     </tbody>
                 </table>
 
@@ -427,6 +568,18 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                     product={detailProduct}
                     onClose={() => setDetailProduct(null)}
                     onPushToAnotherAccount={onPushToAnotherAccount}
+                />
+            )}
+
+            {/* Slide-over Edit Product Drawer */}
+            {editProduct && (
+                <EditProductDrawer
+                    product={editProduct}
+                    onClose={() => setEditProduct(null)}
+                    onSuccess={() => {
+                        fetchProducts()
+                        setEditProduct(null)
+                    }}
                 />
             )}
         </div>

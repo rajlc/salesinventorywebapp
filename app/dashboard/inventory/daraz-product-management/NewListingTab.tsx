@@ -53,6 +53,7 @@ interface DraftListing {
     pkg_height?: number
     supplier_id?: string
     wholesale_price?: number
+    campaign_price?: number
     product_link?: string
     draft_type?: 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed'
     status: 'draft' | 'generating' | 'generated' | 'pushing' | 'pushed' | 'failed'
@@ -69,6 +70,7 @@ interface BulkAddRow {
     targetStores: string[]
     price?: number
     special_price?: number
+    campaign_price?: number
     supplier_id?: string
     wholesale_price?: number
     extractedCategory?: { id: number; path: string }
@@ -217,6 +219,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [selectedStores, setSelectedStores] = useState<string[]>([])
     const [selectedSupplierId, setSelectedSupplierId] = useState<string>('')
     const [wholesalePrice, setWholesalePrice] = useState<number | undefined>(undefined)
+    const [campaignPrice, setCampaignPrice] = useState<number | undefined>(undefined)
 
     // ── Quick Edit Modals on Card (Desktop) ─────────────────────────────────
     const [imageModalDraft, setImageModalDraft] = useState<DraftListing | null>(null)
@@ -843,6 +846,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 pkg_height: height || 1,
                 supplier_id: selectedSupplierId || null,
                 wholesale_price: wholesalePrice || null,
+                campaign_price: campaignPrice || null,
                 status: 'draft'
             }
 
@@ -1075,6 +1079,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             targetStores: stores.length > 0 ? [stores[0].id] : [],
             price: undefined,
             special_price: undefined,
+            campaign_price: undefined,
             supplier_id: undefined,
             wholesale_price: undefined
         }])
@@ -1230,6 +1235,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     target_stores: r.targetStores,
                     price: r.price || null,
                     special_price: r.special_price || null,
+                    campaign_price: r.campaign_price || null,
                     supplier_id: r.supplier_id || null,
                     wholesale_price: r.wholesale_price || null,
                     status: 'draft'
@@ -1353,6 +1359,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setSingleProductLink(draft.product_link || draft.attributes?.product_link || '')
         setSelectedSupplierId(draft.supplier_id || '')
         setWholesalePrice(draft.wholesale_price || undefined)
+        setCampaignPrice(draft.campaign_price || (draft as any).attributes?.campaign_price || undefined)
         
         // Populate titles per store from draft.titles_per_store and draft.title fallback
         const initialTitles: Record<string, string> = { ...(draft.titles_per_store || {}) }
@@ -1419,6 +1426,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setViewMode('list')
         setEditingDraftId(null)
         setAiCategorySuggestion(null)
+        setSelectedSupplierId('')
+        setWholesalePrice(undefined)
+        setCampaignPrice(undefined)
         if (onClearPrefilled) onClearPrefilled()
         fetchDrafts()
     }
@@ -1548,6 +1558,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     attributes: draft.attributes || {},
                     supplier_id: draft.supplier_id || undefined,
                     wholesale_price: draft.wholesale_price || undefined,
+                    sales_price: draft.special_price || undefined,
+                    campaign_price: draft.campaign_price || (draft as any).attributes?.campaign_price || undefined,
                     skus: [{
                         price: draft.price || 100,
                         specialPrice: draft.special_price || undefined,
@@ -1714,6 +1726,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     attributes: submissionAttributes,
                     supplier_id: selectedSupplierId || undefined,
                     wholesale_price: wholesalePrice || undefined,
+                    sales_price: specialPrice || undefined,
+                    campaign_price: campaignPrice || undefined,
                     skus: finalSkus,
                     images
                 })
@@ -1970,6 +1984,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         setRawName(''); setTitlesPerStore({}); setImages([])
                                         setDescription(''); setHighlights(['']); setCategoryId(null)
                                         setCategoryPath(''); setSellingPrice(0); setSpecialPrice(undefined)
+                                        setSelectedSupplierId(''); setWholesalePrice(undefined); setCampaignPrice(undefined)
                                         setSpecialPriceFrom(today()); setSpecialPriceTo(fiveYearsFromNow())
                                         setDynamicAttributes({}); setAiCategorySuggestion(null)
                                         setViewMode('add-single'); setIsAddMenuOpen(false)
@@ -2874,172 +2889,228 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
                 </div>
 
-                <div className="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-lg p-5 space-y-4 shadow-sm">
-                    <div className="divide-y dark:divide-zinc-800 space-y-4">
+                <div className="space-y-4">
+                    <div className="space-y-4">
                         {bulkRows.map((row, idx) => (
-                            <div key={row.id} className="pt-4 first:pt-0 flex flex-col md:flex-row gap-3 items-start">
-                                {/* Row Index & Status Badge */}
-                                <div className="flex md:flex-col items-center gap-1 self-center md:self-start md:pt-1 shrink-0 w-16">
-                                    <span className="font-bold text-gray-400 text-xs">#{idx + 1}</span>
-                                    {(() => {
-                                        const hasImg = row.images && row.images.length > 0
-                                        const hasLnk = Boolean(row.productLink && row.productLink.trim().length > 0)
-                                        const hasNm = Boolean(row.rawName && row.rawName.trim().length > 0)
-                                        if (hasImg && !hasLnk && !hasNm) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200" title="Image Only">📷 Img</span>
-                                        if (hasLnk && !hasImg && !hasNm) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200" title="Link Only">🔗 Link</span>
-                                        if (hasNm && !hasImg && !hasLnk) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200" title="Name Only">📝 Name</span>
-                                        if (hasNm || hasImg || hasLnk) return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300 border border-orange-200" title="Pending Draft">⏳ Draft</span>
-                                        return null
-                                    })()}
-                                </div>
-
-                                {/* Competitor Link & Auto Extract */}
-                                <div className="flex-1 space-y-1 min-w-[200px]">
-                                    <div className="flex items-center justify-between">
-                                        <label className="text-xs font-bold text-gray-600 dark:text-zinc-300 block">Competitor / Product Link</label>
+                            <div
+                                key={row.id}
+                                className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-5 shadow-xs space-y-4 transition-all"
+                            >
+                                {/* Top Header: Index Badge, Status Badge, Competitor Link + Extract Button, and Delete */}
+                                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-gray-100 dark:border-zinc-800">
+                                    <div className="flex items-center gap-2">
+                                        <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-orange-500/10 text-orange-600 font-bold text-xs">
+                                            #{idx + 1}
+                                        </span>
+                                        {(() => {
+                                            const hasImg = row.images && row.images.length > 0
+                                            const hasLnk = Boolean(row.productLink && row.productLink.trim().length > 0)
+                                            const hasNm = Boolean(row.rawName && row.rawName.trim().length > 0)
+                                            if (hasImg && !hasLnk && !hasNm) return <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200" title="Image Only">📷 Img Only</span>
+                                            if (hasLnk && !hasImg && !hasNm) return <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200" title="Link Only">🔗 Link Only</span>
+                                            if (hasNm && !hasImg && !hasLnk) return <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200" title="Name Only">📝 Name Only</span>
+                                            if (hasNm || hasImg || hasLnk) return <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300 border border-orange-200" title="Pending Draft">⏳ Draft</span>
+                                            return null
+                                        })()}
                                         {row.extractedCategory?.path && (
-                                            <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate max-w-[140px]" title={row.extractedCategory.path}>
+                                            <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-950/30 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800 truncate max-w-[200px]" title={row.extractedCategory.path}>
                                                 ✓ {row.extractedCategory.path.split('>').pop()?.trim()}
                                             </span>
                                         )}
                                     </div>
-                                    <div className="flex gap-1.5">
+
+                                    {/* Competitor URL Input with Extract & Delete */}
+                                    <div className="flex items-center gap-2 w-full sm:w-auto flex-1 sm:max-w-xl sm:ml-auto">
+                                        <div className="relative flex-1 flex gap-1.5">
+                                            <input
+                                                type="url"
+                                                value={row.productLink || ''}
+                                                onChange={(e) => {
+                                                    const next = [...bulkRows]
+                                                    next[idx].productLink = e.target.value
+                                                    setBulkRows(next)
+                                                }}
+                                                placeholder="Auto-fill from Competitor URL (Daraz, Amazon, etc.)"
+                                                className="flex-1 h-8 px-2.5 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-gray-50/50 dark:bg-zinc-800/60 focus:bg-white dark:focus:bg-zinc-850 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                            />
+                                            <button
+                                                type="button"
+                                                disabled={row.isExtracting || !row.productLink?.trim()}
+                                                onClick={() => handleExtractRowLink(idx)}
+                                                className="h-8 px-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md text-xs font-semibold flex items-center gap-1 shrink-0 transition-all shadow-xs"
+                                                title="Auto-extract name, price, images, and category"
+                                            >
+                                                {row.isExtracting ? (
+                                                    <Loader2 size={12} className="animate-spin" />
+                                                ) : (
+                                                    <>
+                                                        <Zap size={11} />
+                                                        Extract
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+                                        {bulkRows.length > 1 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setBulkRows(bulkRows.filter(r => r.id !== row.id))}
+                                                className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-md transition-colors shrink-0"
+                                                title="Remove this product"
+                                            >
+                                                <Trash2 size={15} />
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Section 1: Product Raw Name + Target Accounts */}
+                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                                    <div className="lg:col-span-7 space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                            Product Raw Name
+                                            <span className="text-[10px] text-gray-400 font-normal">(Optional if link or images provided)</span>
+                                        </label>
                                         <input
-                                            type="url"
-                                            value={row.productLink || ''}
+                                            type="text"
+                                            value={row.rawName}
                                             onChange={(e) => {
                                                 const next = [...bulkRows]
-                                                next[idx].productLink = e.target.value
+                                                next[idx].rawName = e.target.value
                                                 setBulkRows(next)
                                             }}
-                                            placeholder="Daraz, Amazon, etc. link"
-                                            className="flex-1 py-1.5 px-2.5 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                            placeholder="e.g. Zodiac Bracelet Watch Gold Tone"
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:ring-1 focus:ring-orange-500 focus:outline-none font-medium"
                                         />
-                                        <button
-                                            type="button"
-                                            disabled={row.isExtracting || !row.productLink?.trim()}
-                                            onClick={() => handleExtractRowLink(idx)}
-                                            className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0 transition-all shadow-xs"
-                                            title="Auto-extract name, price, images, and category"
-                                        >
-                                            {row.isExtracting ? (
-                                                <Loader2 size={12} className="animate-spin" />
-                                            ) : (
-                                                <>
-                                                    <Zap size={11} />
-                                                    Extract
-                                                </>
-                                            )}
-                                        </button>
                                     </div>
-                                </div>
 
-                                {/* Product name */}
-                                <div className="flex-1 space-y-1 min-w-[180px]">
-                                    <label className="text-xs font-bold text-gray-600 dark:text-zinc-300 flex items-center gap-1">
-                                        Product Raw Name
-                                        <span className="text-[10px] text-gray-400 font-normal">(Optional if link/img)</span>
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={row.rawName}
-                                        onChange={(e) => {
-                                            const next = [...bulkRows]
-                                            next[idx].rawName = e.target.value
-                                            setBulkRows(next)
-                                        }}
-                                        placeholder="e.g. Zodiac Bracelet Watch Gold Tone"
-                                        className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:ring-1 focus:ring-orange-500 focus:outline-none"
-                                    />
-                                </div>
-
-                                {/* Price */}
-                                <div className="w-28 space-y-1">
-                                    <label className="text-xs font-bold text-gray-600 block">Price (NPR)</label>
-                                    <input
-                                        type="number"
-                                        placeholder="500"
-                                        value={row.special_price || ''}
-                                        onChange={(e) => {
-                                            const next = [...bulkRows]
-                                            const val = Number(e.target.value)
-                                            next[idx].special_price = val
-                                            next[idx].price = val > 0 ? val + 200 : undefined
-                                            setBulkRows(next)
-                                        }}
-                                        className="w-full py-1.5 px-3 border rounded text-sm bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none"
-                                    />
-                                    {row.special_price ? (
-                                        <p className="text-[10px] text-orange-600 font-semibold mt-0.5">Listed: NPR {row.price}</p>
-                                    ) : null}
-                                </div>
-
-                                {/* Supplier (Optional) */}
-                                <div className="w-full md:w-44 space-y-1">
-                                    <label className="text-xs font-bold text-gray-600 block">Supplier</label>
-                                    <SearchableSupplierSelect
-                                        suppliers={suppliers}
-                                        value={row.supplier_id || ''}
-                                        onChange={(val) => {
-                                            const next = [...bulkRows]
-                                            next[idx].supplier_id = val || undefined
-                                            setBulkRows(next)
-                                        }}
-                                        placeholder="Search Supplier..."
-                                    />
-                                </div>
-
-                                {/* Wholesale Price (Optional) */}
-                                <div className="w-28 space-y-1">
-                                    <label className="text-xs font-bold text-gray-600 block">Wholesale (NPR)</label>
-                                    <input
-                                        type="number"
-                                        placeholder="Cost Price"
-                                        value={row.wholesale_price || ''}
-                                        onChange={(e) => {
-                                            const next = [...bulkRows]
-                                            const val = e.target.value ? Number(e.target.value) : undefined
-                                            next[idx].wholesale_price = val
-                                            setBulkRows(next)
-                                        }}
-                                        className="w-full py-1.5 px-2 border rounded text-xs bg-white dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none"
-                                    />
-                                </div>
-
-                                {/* Stores */}
-                                <div className="w-full md:w-52 space-y-1">
-                                    <label className="text-xs font-bold text-gray-600 block">Target Accounts</label>
-                                    <div className="flex flex-wrap gap-1">
-                                        {stores.map(store => {
-                                            const active = row.targetStores.includes(store.id)
-                                            return (
-                                                <button
-                                                    key={store.id}
-                                                    type="button"
-                                                    onClick={() => {
-                                                        const next = [...bulkRows]
-                                                        const target = next[idx].targetStores
-                                                        next[idx].targetStores = target.includes(store.id)
-                                                            ? target.filter(id => id !== store.id)
-                                                            : [...target, store.id]
-                                                        setBulkRows(next)
-                                                    }}
-                                                    className={`px-2 py-1 rounded text-[10px] font-semibold border ${active
-                                                        ? 'bg-orange-500/10 text-orange-600 border-orange-500'
-                                                        : 'bg-gray-50 dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-500'
+                                    <div className="lg:col-span-5 space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                            Target Seller Accounts
+                                        </label>
+                                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                            {stores.map(store => {
+                                                const active = row.targetStores.includes(store.id)
+                                                return (
+                                                    <button
+                                                        key={store.id}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const next = [...bulkRows]
+                                                            const target = next[idx].targetStores
+                                                            next[idx].targetStores = target.includes(store.id)
+                                                                ? target.filter(id => id !== store.id)
+                                                                : [...target, store.id]
+                                                            setBulkRows(next)
+                                                        }}
+                                                        className={`px-2.5 py-1 rounded-md text-xs font-semibold border transition-all ${
+                                                            active
+                                                                ? 'bg-orange-500/10 text-orange-600 border-orange-500 shadow-xs'
+                                                                : 'bg-gray-50 dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-500 hover:text-gray-700'
                                                         }`}
-                                                >
-                                                    {store.seller_account}
-                                                </button>
-                                            )
-                                        })}
+                                                    >
+                                                        {store.seller_account}
+                                                    </button>
+                                                )
+                                            })}
+                                        </div>
                                     </div>
                                 </div>
 
-                                {/* Image upload */}
-                                <div className="space-y-1 flex-1 min-w-[200px]">
-                                    <label className="text-xs font-bold text-gray-600 block">Images (Drag to reorder)</label>
-                                    <div className="flex flex-wrap gap-1.5 items-center">
+                                {/* Section 2: 4-Col Pricing & Supplier Row */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-gray-50/70 dark:bg-zinc-850/40 p-3.5 rounded-lg border border-gray-200/80 dark:border-zinc-800">
+                                    {/* Supplier */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                            Supplier
+                                        </label>
+                                        <SearchableSupplierSelect
+                                            suppliers={suppliers}
+                                            value={row.supplier_id || ''}
+                                            onChange={(val) => {
+                                                const next = [...bulkRows]
+                                                next[idx].supplier_id = val || undefined
+                                                setBulkRows(next)
+                                            }}
+                                            placeholder="Search Supplier..."
+                                        />
+                                    </div>
+
+                                    {/* Wholesale Price */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                            Wholesale Price (NPR)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            placeholder="Cost Price"
+                                            value={row.wholesale_price || ''}
+                                            onChange={(e) => {
+                                                const next = [...bulkRows]
+                                                const val = e.target.value ? Number(e.target.value) : undefined
+                                                next[idx].wholesale_price = val
+                                                setBulkRows(next)
+                                            }}
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                                        />
+                                    </div>
+
+                                    {/* Sales Price (Special Price) */}
+                                    <div className="space-y-1">
+                                        <div className="flex items-center justify-between">
+                                            <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                                Sales Price (NPR)
+                                                <span className="text-[10px] text-orange-600 font-normal ml-1">(Special)</span>
+                                            </label>
+                                            {row.price ? (
+                                                <span className="text-[10px] font-semibold text-orange-600">Listed: {row.price}</span>
+                                            ) : null}
+                                        </div>
+                                        <input
+                                            type="number"
+                                            placeholder="Special Price"
+                                            value={row.special_price || ''}
+                                            onChange={(e) => {
+                                                const next = [...bulkRows]
+                                                const val = e.target.value ? Number(e.target.value) : undefined
+                                                next[idx].special_price = val
+                                                next[idx].price = (val && val > 0) ? val + 200 : undefined
+                                                setBulkRows(next)
+                                            }}
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                                        />
+                                    </div>
+
+                                    {/* Campaign Price */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                            Campaign Price (NPR)
+                                            <span className="text-[10px] text-purple-600 font-semibold ml-1">(Optional)</span>
+                                        </label>
+                                        <input
+                                            type="number"
+                                            placeholder="Campaign Price"
+                                            value={row.campaign_price || ''}
+                                            onChange={(e) => {
+                                                const next = [...bulkRows]
+                                                const val = e.target.value ? Number(e.target.value) : undefined
+                                                next[idx].campaign_price = val
+                                                setBulkRows(next)
+                                            }}
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Section 3: Product Images Strip */}
+                                <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                            <span>Images</span>
+                                            <span className="text-[10px] text-gray-400 font-normal">(Drag to reorder - first image is Primary)</span>
+                                        </label>
+                                        <span className="text-[11px] text-gray-400">{row.images.length}/8 images</span>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2 items-center">
                                         {row.images.map((img, imgIdx) => (
                                             <div 
                                                 key={imgIdx} 
@@ -3076,19 +3147,19 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     setBulkDragImageIdx(null);
                                                     setBulkDragOverIdx(null);
                                                 }}
-                                                className={`relative w-20 h-20 border-2 rounded overflow-hidden group cursor-grab active:cursor-grabbing transition-all
-                                                    ${bulkDragSourceRowId === row.id && bulkDragOverIdx === imgIdx 
-                                                        ? 'border-orange-500 scale-105' 
+                                                className={`relative w-16 h-16 sm:w-20 sm:h-20 border-2 rounded-lg overflow-hidden group cursor-grab active:cursor-grabbing transition-all ${
+                                                    bulkDragSourceRowId === row.id && bulkDragOverIdx === imgIdx 
+                                                        ? 'border-orange-500 scale-105 shadow-md' 
                                                         : imgIdx === 0 
-                                                            ? 'border-orange-400' 
-                                                            : 'border-gray-200 dark:border-zinc-700'
-                                                    }`}
+                                                            ? 'border-orange-500 shadow-xs' 
+                                                            : 'border-gray-200 dark:border-zinc-700 hover:border-gray-300'
+                                                }`}
                                             >
                                                 <img src={img} className="w-full h-full object-cover" alt="" />
                                                 
                                                 {/* Primary badge */}
                                                 {imgIdx === 0 && (
-                                                    <span className="absolute top-0 left-0 bg-orange-500 text-white text-[9px] font-bold px-1 py-0.5 rounded-br select-none">
+                                                    <span className="absolute top-0 left-0 bg-orange-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-br shadow-xs select-none">
                                                         Primary
                                                     </span>
                                                 )}
@@ -3100,18 +3171,20 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         next[idx].images = next[idx].images.filter((_, i) => i !== imgIdx)
                                                         setBulkRows(next)
                                                     }}
-                                                    className="absolute inset-0 bg-black/75 opacity-0 group-hover:opacity-100 text-white flex items-center justify-center text-xs font-bold transition-opacity"
+                                                    className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 text-white flex items-center justify-center text-sm font-bold transition-opacity"
+                                                    title="Remove image"
                                                 >
                                                     ×
                                                 </button>
                                             </div>
                                         ))}
                                         {row.images.length < 8 && (
-                                            <label className="w-20 h-20 border border-dashed rounded flex flex-col items-center justify-center cursor-pointer hover:border-orange-500 transition-colors shrink-0">
+                                            <label className="w-16 h-16 sm:w-20 sm:h-20 border border-dashed border-gray-300 dark:border-zinc-700 rounded-lg flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-orange-500 hover:bg-orange-50/20 transition-all shrink-0">
                                                 {bulkUploadingId === row.id
-                                                    ? <Loader2 className="animate-spin text-gray-400" size={16} />
-                                                    : <Upload className="text-gray-400" size={16} />
+                                                    ? <Loader2 className="animate-spin text-orange-500" size={16} />
+                                                    : <Upload className="text-gray-400 group-hover:text-orange-500 transition-colors" size={16} />
                                                 }
+                                                <span className="text-[10px] text-gray-400 font-medium">Upload</span>
                                                 <input
                                                     type="file"
                                                     accept="image/*"
@@ -3124,42 +3197,45 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         )}
                                     </div>
                                 </div>
-
-                                {bulkRows.length > 1 && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setBulkRows(bulkRows.filter(r => r.id !== row.id))}
-                                        className="p-1.5 hover:text-red-500 self-center text-gray-400"
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
-                                )}
                             </div>
                         ))}
                     </div>
 
-                    <div className="pt-4 flex justify-between items-center border-t dark:border-zinc-800">
+                    {/* Bottom Action Bar */}
+                    <div className="p-4 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-xs flex justify-between items-center">
                         <button
                             type="button"
                             onClick={() => setBulkRows([...bulkRows, {
-                                id: crypto.randomUUID(), rawName: '', images: [],
-                                targetStores: stores.length > 0 ? [stores[0].id] : []
+                                id: crypto.randomUUID(),
+                                rawName: '',
+                                images: [],
+                                targetStores: stores.length > 0 ? [stores[0].id] : [],
+                                price: undefined,
+                                special_price: undefined,
+                                campaign_price: undefined,
+                                supplier_id: undefined,
+                                wholesale_price: undefined
                             }])}
-                            className="px-3 py-1.5 border dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded font-bold flex items-center gap-1 text-sm"
+                            className="px-3.5 py-2 border border-gray-300 dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded-lg font-bold flex items-center gap-1.5 text-xs text-gray-700 dark:text-zinc-200 transition-colors"
                         >
-                            <Plus size={14} /> Add Row
+                            <Plus size={14} /> Add Another Product
                         </button>
 
-                        <div className="flex gap-2">
-                            <button type="button" onClick={handleBackToList} className="px-4 py-2 border dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded text-sm">
+                        <div className="flex items-center gap-2.5">
+                            <button
+                                type="button"
+                                onClick={handleBackToList}
+                                className="px-4 py-2 border border-gray-300 dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded-lg text-xs font-medium text-gray-600 dark:text-zinc-300 transition-colors"
+                            >
                                 Cancel
                             </button>
                             <button
                                 type="button"
                                 onClick={handleSaveBulkDrafts}
-                                className="px-5 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded font-bold shadow text-sm"
+                                className="px-5 py-2 bg-orange-500 hover:bg-orange-600 active:scale-[0.98] text-white rounded-lg font-bold shadow-xs text-xs transition-all flex items-center gap-1.5"
                             >
-                                Save Drafts ({bulkRows.filter(r => r.rawName.trim()).length})
+                                <Check size={14} />
+                                Save Drafts ({bulkRows.filter(r => r.rawName.trim() || r.productLink?.trim() || r.images.length > 0).length})
                             </button>
                         </div>
                     </div>
@@ -3226,18 +3302,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
             <form onSubmit={handleSubmit} className="space-y-5">
 
-                    {/* Wholesale Pricing & Supplier Card (Internal Inventory) */}
+                    {/* Wholesale Pricing & Supplier Card (Internal Inventory & Target Pricing) */}
                     <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-6 space-y-5 shadow-xs">
                         <div>
                             <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
                                 Wholesale Price &amp; Supplier
-                                <span className="text-xs font-normal text-gray-400 dark:text-zinc-500">(Optional - Internal Inventory)</span>
+                                <span className="text-xs font-normal text-gray-400 dark:text-zinc-500">(Optional - Internal Inventory &amp; Target Pricing)</span>
                             </h3>
                             <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                                Link a supplier and cost price for internal inventory tracking and profit calculation.
+                                Link a supplier and prices for internal inventory tracking and profit calculation on Daraz Average Sales Price.
                             </p>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                             {/* Supplier Dropdown */}
                             <div className="space-y-1.5">
                                 <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
@@ -3267,6 +3343,50 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         const val = e.target.value ? Number(e.target.value) : undefined
                                         setWholesalePrice(val)
                                         patchDraft({ wholesale_price: val })
+                                    }}
+                                    className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
+                                />
+                            </div>
+
+                            {/* Sales Price (Special Price) Input */}
+                            <div className="space-y-1.5">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
+                                    Sales Price (NPR)
+                                    <span className="text-[10px] text-orange-600 font-semibold ml-1">(Special Price)</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    placeholder="e.g. 500"
+                                    value={specialPrice !== undefined && specialPrice !== null ? specialPrice : ''}
+                                    onChange={(e) => {
+                                        const val = e.target.value ? Number(e.target.value) : undefined
+                                        setSpecialPrice(val)
+                                        if (val && (!sellingPrice || sellingPrice <= val)) {
+                                            setSellingPrice(val + 200)
+                                        }
+                                        patchDraft({ special_price: val })
+                                    }}
+                                    className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
+                                />
+                                {specialPrice && sellingPrice ? (
+                                    <p className="text-[10px] text-gray-400 truncate">Listed Price: NPR {sellingPrice}</p>
+                                ) : null}
+                            </div>
+
+                            {/* Campaign Price Input */}
+                            <div className="space-y-1.5">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
+                                    Campaign Price (NPR)
+                                    <span className="text-[10px] text-purple-600 font-semibold ml-1">(Optional)</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    placeholder="e.g. 450"
+                                    value={campaignPrice !== undefined && campaignPrice !== null ? campaignPrice : ''}
+                                    onChange={(e) => {
+                                        const val = e.target.value ? Number(e.target.value) : undefined
+                                        setCampaignPrice(val)
+                                        patchDraft({ campaign_price: val })
                                     }}
                                     className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
                                 />
