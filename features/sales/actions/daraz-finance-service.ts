@@ -252,7 +252,7 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
                 statement: t.statement || null,
                 transaction_date: t.transaction_date,
                 order_no: t.order_no || null,
-                details: t,
+                details: {},
                 created_at: new Date().toISOString()
             }
         })
@@ -816,7 +816,7 @@ export async function fetchDarazStatementLineItems(
                             statement: t.statement || period || statementNumber,
                             transaction_date: t.transaction_date,
                             order_no: t.order_no || null,
-                            details: t,
+                            details: {},
                             created_at: new Date().toISOString()
                         }
                     })
