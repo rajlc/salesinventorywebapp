@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getProducts, exportProducts, toggleProductStatus, updateProduct, approveProduct, rejectProduct, updateSyncStatuses, syncWebsiteStatus, remapAllCategories } from '@/features/inventory/actions/product-actions'
+import { getProducts, exportProducts, toggleProductStatus, updateProduct, approveProduct, rejectProduct, updateSyncStatuses, syncWebsiteStatus, remapAllCategories, permanentlyDeleteSelectedProducts } from '@/features/inventory/actions/product-actions'
 import { syncSelectedProductsFromDaraz } from '@/features/inventory/actions/daraz-sync-products'
 import { ArrowLeft, Plus, Upload, Download, Search, X, Package, Trash2, Box, Image as ImageIcon, Check, RefreshCw, ExternalLink, Filter, CheckSquare, Square, Zap, Tags } from 'lucide-react'
 import Link from 'next/link'
@@ -110,6 +110,7 @@ export default function ProductListPage() {
     const [isSyncingFromDaraz, setIsSyncingFromDaraz] = useState(false)
     const [isRemapping, setIsRemapping] = useState(false)
     const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false)
+    const [isDeletingSelected, setIsDeletingSelected] = useState(false)
 
     // Selection & filter state
     const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set())
@@ -180,6 +181,26 @@ export default function ProductListPage() {
             alert(`Sync from Daraz failed: ${err.message}`)
         } finally {
             setIsSyncingFromDaraz(false)
+        }
+    }
+
+    const handleDeleteSelectedProducts = async () => {
+        const ids = Array.from(selectedProductIds)
+        if (ids.length === 0) return
+
+        const confirmMsg = `⚠️ PERMANENT DELETE\n\nYou are about to permanently delete ${ids.length} product${ids.length > 1 ? 's' : ''} FOREVER from the database.\n\nThis CANNOT be undone. Products with order/purchase history will be hidden instead to preserve records.\n\nAre you sure you want to continue?`
+        if (!confirm(confirmMsg)) return
+
+        setIsDeletingSelected(true)
+        try {
+            const result = await permanentlyDeleteSelectedProducts(ids)
+            setSelectedProductIds(new Set())
+            queryClient.invalidateQueries({ queryKey: ['products'] })
+            alert(result.message)
+        } catch (err: any) {
+            alert(`Delete failed: ${err.message}`)
+        } finally {
+            setIsDeletingSelected(false)
         }
     }
 
@@ -537,6 +558,18 @@ export default function ProductListPage() {
                             >
                                 <Zap size={14} className={isSyncingFromDaraz ? 'animate-pulse' : ''} />
                                 {isSyncingFromDaraz ? 'Syncing...' : `Sync From Daraz (${selectedProductIds.size})`}
+                            </button>
+                        )}
+                        {/* Delete Selected — shown when 1+ product is selected */}
+                        {selectedProductIds.size > 0 && (
+                            <button
+                                onClick={handleDeleteSelectedProducts}
+                                disabled={isDeletingSelected}
+                                className="hidden md:flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 rounded-lg shadow-md shadow-red-500/20 hover:shadow-lg hover:shadow-red-500/30 transition-all active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed"
+                                title={`Permanently delete ${selectedProductIds.size} selected product(s) forever`}
+                            >
+                                <Trash2 size={14} className={isDeletingSelected ? 'animate-pulse' : ''} />
+                                {isDeletingSelected ? 'Deleting...' : `Delete (${selectedProductIds.size})`}
                             </button>
                         )}
                         <button

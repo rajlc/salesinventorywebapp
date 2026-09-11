@@ -1254,6 +1254,120 @@ export async function permanentlyDeleteAllDeletedProducts() {
     }
 }
 
+/**
+ * Permanently delete a selected set of products by ID (admin/editor — called from Inventory List bulk delete).
+ * - Cleans up combo, wholesale_prices, deleted_items, approval_requests, daraz_live_prices, daraz_avg_prices, damage_resolutions.
+ * - Hard-deletes products with no FK references to order/purchase history.
+ * - Soft-deletes (is_deleted=true, status=Inactive) products that have FK references so ledger integrity is preserved.
+ */
+export async function permanentlyDeleteSelectedProducts(productIds: string[]) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error('Not authenticated')
+
+    if (!productIds || productIds.length === 0) {
+        return { success: true, message: 'No products selected.', details: { deleted: 0, softDeleted: 0 } }
+    }
+
+    // Auth check — admin or editor
+    const { data: profile } = await supabase
+        .from('user_profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single()
+
+    if (!profile || (profile.role !== 'admin' && profile.role !== 'editor')) {
+        throw new Error('Only admins or editors can delete products permanently')
+    }
+
+    // ── Determine which products are referenced by orders/purchases (FK-constrained) ──
+    const referencedIds = new Set<string>()
+
+    const refChecks = [
+        supabase.from('purchases').select('product_id').in('product_id', productIds),
+        supabase.from('order_items').select('product_id').in('product_id', productIds),
+        supabase.from('daraz_order_items').select('product_id').in('product_id', productIds),
+        supabase.from('marketplace_order_items').select('product_id').in('product_id', productIds),
+        supabase.from('stock_adjustments').select('product_id').in('product_id', productIds),
+        supabase.from('damaged_stocks').select('product_id').in('product_id', productIds),
+    ]
+
+    const results = await Promise.allSettled(refChecks)
+    results.forEach(result => {
+        if (result.status === 'fulfilled' && result.value.data) {
+            result.value.data.forEach((row: any) => {
+                if (row.product_id) referencedIds.add(row.product_id)
+            })
+        }
+    })
+
+    const hardDeleteIds = productIds.filter(id => !referencedIds.has(id))
+    const softDeleteIds = productIds.filter(id => referencedIds.has(id))
+
+    // ── Clean up related data before hard-deleting ──
+    const BATCH = 100
+
+    for (let i = 0; i < hardDeleteIds.length; i += BATCH) {
+        const batch = hardDeleteIds.slice(i, i + BATCH)
+
+        // 1. Remove combo relationships (as parent or child)
+        await supabase.from('product_combos').delete().in('parent_product_id', batch)
+        await supabase.from('product_combos').delete().in('child_product_id', batch)
+
+        // 2. Remove wholesale prices
+        await supabase.from('wholesale_prices').delete().in('product_id', batch)
+
+        // 3. Remove damage resolutions
+        await supabase.from('damage_resolutions').delete().in('product_id', batch)
+
+        // 4. Remove daraz live prices
+        await supabase.from('daraz_live_prices').delete().in('product_id', batch)
+
+        // 5. Remove daraz avg prices
+        await supabase.from('daraz_avg_prices').delete().in('product_id', batch)
+
+        // 6. Remove any existing backup/deleted_items entries
+        await supabase.from('deleted_items').delete().eq('resource_type', 'product').in('resource_id', batch)
+
+        // 7. Remove any pending approval requests
+        await supabase.from('approval_requests').delete().eq('resource_type', 'product').in('resource_id', batch)
+
+        // 8. Hard-delete the products
+        await supabase.from('products').delete().in('id', batch)
+    }
+
+    // ── Soft-delete products that are referenced (preserve ledger integrity) ──
+    if (softDeleteIds.length > 0) {
+        for (let i = 0; i < softDeleteIds.length; i += BATCH) {
+            const batch = softDeleteIds.slice(i, i + BATCH)
+            await supabase
+                .from('products')
+                .update({ is_deleted: true, status: 'Inactive' })
+                .in('id', batch)
+        }
+    }
+
+    revalidatePath('/dashboard/inventory/product-list')
+    revalidatePath('/dashboard/settings/backup')
+
+    let message = ''
+    if (hardDeleteIds.length > 0) {
+        message += `✅ ${hardDeleteIds.length} product${hardDeleteIds.length > 1 ? 's' : ''} permanently deleted forever.`
+    }
+    if (softDeleteIds.length > 0) {
+        message += ` ⚠️ ${softDeleteIds.length} product${softDeleteIds.length > 1 ? 's' : ''} have order/purchase history and were hidden (not hard-deleted to preserve records).`
+    }
+
+    return {
+        success: true,
+        message: message.trim() || 'Done.',
+        details: {
+            deleted: hardDeleteIds.length,
+            softDeleted: softDeleteIds.length,
+        }
+    }
+}
+
 
 // ============================================================================
 // CSV IMPORT/EXPORT
