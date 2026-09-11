@@ -5,7 +5,7 @@ import {
     Sparkles, Copy, Check, Pencil, X, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
     RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store,
     AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2,
-    Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock
+    Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock, Download
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import CategoryPicker from './CategoryPicker'
@@ -226,6 +226,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [modalImages, setModalImages] = useState<string[]>([])
     const [imageModalUploading, setImageModalUploading] = useState(false)
     const [imageModalSaving, setImageModalSaving] = useState(false)
+    const [downloadingIndices, setDownloadingIndices] = useState<Set<number>>(new Set())
+    const [isDownloadingAll, setIsDownloadingAll] = useState(false)
 
     const [copiedTitleId, setCopiedTitleId] = useState<string | null>(null)
 
@@ -239,6 +241,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [editRegularPrice, setEditRegularPrice] = useState<string>('')
     const [editSpecialPrice, setEditSpecialPrice] = useState<string>('')
     const [priceModalSaving, setPriceModalSaving] = useState(false)
+    const [storeModalDraft, setStoreModalDraft] = useState<DraftListing | null>(null)
+    const [editSelectedStores, setEditSelectedStores] = useState<string[]>([])
+    const [storeModalSaving, setStoreModalSaving] = useState(false)
 
     // Per-store titles: { storeId: title }
     const [titlesPerStore, setTitlesPerStore] = useState<Record<string, string>>({})
@@ -632,6 +637,95 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
+    const handleDownloadModalImage = async (url: string, index: number) => {
+        setDownloadingIndices(prev => new Set(prev).add(index))
+        try {
+            let blob: Blob | null = null
+
+            // 1. Try direct CORS fetch
+            try {
+                const res = await fetch(url, { mode: 'cors' })
+                if (res.ok) {
+                    blob = await res.blob()
+                }
+            } catch (fetchErr) {
+                console.warn('[ImageDownload] Direct fetch failed, trying proxy fallback:', fetchErr)
+            }
+
+            // 2. Fallback to image-proxy if direct fetch failed
+            if (!blob) {
+                try {
+                    const proxyUrl = `/api/daraz/image-proxy?url=${encodeURIComponent(url)}`
+                    const res = await fetch(proxyUrl)
+                    if (res.ok) {
+                        blob = await res.blob()
+                    }
+                } catch (proxyErr) {
+                    console.warn('[ImageDownload] Proxy fetch failed:', proxyErr)
+                }
+            }
+
+            // Determine file extension and sanitize filename
+            let ext = 'jpg'
+            if (blob) {
+                if (blob.type.includes('png')) ext = 'png'
+                else if (blob.type.includes('webp')) ext = 'webp'
+                else if (blob.type.includes('gif')) ext = 'gif'
+                else if (blob.type.includes('jpeg')) ext = 'jpg'
+            } else {
+                const cleanUrl = url.split('?')[0].split('#')[0]
+                const match = cleanUrl.match(/\.([a-zA-Z0-9]+)$/)
+                if (match && match[1]) ext = match[1].toLowerCase()
+            }
+
+            const rawTitle = imageModalDraft?.title || imageModalDraft?.raw_name || 'daraz_product'
+            const safeTitle = rawTitle.replace(/[/\\?%*:|"<>]/g, '_').trim().slice(0, 50) || 'product'
+            const filename = `${safeTitle}-photo-${index + 1}.${ext}`
+
+            if (blob) {
+                const objectUrl = window.URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = objectUrl
+                a.download = filename
+                document.body.appendChild(a)
+                a.click()
+                document.body.removeChild(a)
+                setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1500)
+            } else {
+                // 3. Fallback: direct anchor download or open
+                const a = document.createElement('a')
+                a.href = url
+                a.target = '_blank'
+                a.rel = 'noopener noreferrer'
+                a.download = filename
+                document.body.appendChild(a)
+                a.click()
+                document.body.removeChild(a)
+            }
+        } catch (err: any) {
+            console.error('Failed to download image:', err)
+            alert('Failed to download image: ' + (err.message || 'Unknown error'))
+        } finally {
+            setDownloadingIndices(prev => {
+                const next = new Set(prev)
+                next.delete(index)
+                return next
+            })
+        }
+    }
+
+    const handleDownloadAllImages = async () => {
+        if (!modalImages || modalImages.length === 0) return
+        setIsDownloadingAll(true)
+        for (let i = 0; i < modalImages.length; i++) {
+            await handleDownloadModalImage(modalImages[i], i)
+            if (i < modalImages.length - 1) {
+                await new Promise(r => setTimeout(r, 350))
+            }
+        }
+        setIsDownloadingAll(false)
+    }
+
     const handleOpenCategoryModal = (draft: DraftListing) => {
         setCategoryModalDraft(draft)
         setEditCatId(draft.category_id || null)
@@ -705,6 +799,38 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             alert('Failed to save price: ' + err.message)
         } finally {
             setPriceModalSaving(false)
+        }
+    }
+
+    const handleOpenStoreModal = (draft: DraftListing) => {
+        setStoreModalDraft(draft)
+        setEditSelectedStores(Array.isArray(draft.target_stores) ? [...draft.target_stores] : [])
+    }
+
+    const handleSaveStoreModal = async () => {
+        if (!storeModalDraft) return
+        setStoreModalSaving(true)
+        try {
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: storeModalDraft.id,
+                    target_stores: editSelectedStores
+                })
+            })
+            const json = await res.json()
+            if (!res.ok || json.error) throw new Error(json.error || 'Failed to update seller accounts')
+
+            setDrafts(prev => prev.map(d => d.id === storeModalDraft.id ? {
+                ...d,
+                target_stores: editSelectedStores
+            } : d))
+            setStoreModalDraft(null)
+        } catch (err: any) {
+            alert('Failed to save seller accounts: ' + err.message)
+        } finally {
+            setStoreModalSaving(false)
         }
     }
 
@@ -2247,16 +2373,50 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             <Pencil size={11} />
                                                         </button>
                                                     </div>
-                                                    <div className="flex flex-wrap gap-1 mt-1">
-                                                        {draft.target_stores && draft.target_stores.map(storeId => {
-                                                            const sName = stores.find(s => s.id === storeId)?.seller_account || 'Account'
-                                                            return (
-                                                                <span key={storeId} className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 bg-amber-50/70 dark:bg-amber-950/20 text-amber-800 dark:text-amber-300 border border-amber-200/50 dark:border-amber-900/30 rounded font-medium transition-all hover:bg-amber-100/50 dark:hover:bg-amber-950/40">
-                                                                    <Store size={10} className="shrink-0 text-amber-600 dark:text-amber-500" />
-                                                                    {sName}
-                                                                </span>
-                                                            )
-                                                        })}
+                                                    <div className="flex items-center flex-wrap gap-1 mt-1">
+                                                        {draft.target_stores && draft.target_stores.length > 0 ? (
+                                                            <>
+                                                                {draft.target_stores.map(storeId => {
+                                                                    const sName = stores.find(s => s.id === storeId)?.seller_account || 'Account'
+                                                                    return (
+                                                                        <span 
+                                                                            key={storeId} 
+                                                                            onClick={() => handleOpenStoreModal(draft)}
+                                                                            className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 bg-amber-50/70 dark:bg-amber-950/20 text-amber-800 dark:text-amber-300 border border-amber-200/50 dark:border-amber-900/30 rounded font-medium transition-all hover:bg-amber-100/50 dark:hover:bg-amber-950/40 cursor-pointer"
+                                                                            title="Click to edit seller account"
+                                                                        >
+                                                                            <Store size={10} className="shrink-0 text-amber-600 dark:text-amber-500" />
+                                                                            {sName}
+                                                                        </span>
+                                                                    )
+                                                                })}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        handleOpenStoreModal(draft)
+                                                                    }}
+                                                                    className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
+                                                                    title="Edit Seller Accounts"
+                                                                >
+                                                                    <Pencil size={11} />
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    handleOpenStoreModal(draft)
+                                                                }}
+                                                                className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 text-gray-500 dark:text-zinc-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20 border border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-400 rounded font-medium transition-all"
+                                                                title="Select Seller Account"
+                                                            >
+                                                                <Store size={10} className="shrink-0" />
+                                                                <span>Select Seller Account</span>
+                                                                <Pencil size={10} className="shrink-0 ml-0.5" />
+                                                            </button>
+                                                        )}
                                                     </div>
                                                     {(() => {
                                                         const pLink = draft.product_link || draft.attributes?.product_link
@@ -2496,13 +2656,31 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-2xl w-full flex flex-col max-h-[90vh] overflow-hidden">
                             {/* Header */}
                             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-zinc-800">
-                                <div>
-                                    <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
-                                        Product Photos
-                                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-orange-600 dark:bg-orange-950/30 dark:text-orange-400 border border-orange-200 dark:border-orange-900/30">
-                                            {modalImages.length}/8
-                                        </span>
-                                    </h3>
+                                <div className="min-w-0 flex-1 mr-3">
+                                    <div className="flex items-center gap-2">
+                                        <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                            Product Photos
+                                            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-orange-600 dark:bg-orange-950/30 dark:text-orange-400 border border-orange-200 dark:border-orange-900/30">
+                                                {modalImages.length}/8
+                                            </span>
+                                        </h3>
+                                        {modalImages.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={handleDownloadAllImages}
+                                                disabled={isDownloadingAll}
+                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-gray-700 dark:text-zinc-200 bg-gray-100 dark:bg-zinc-800 hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-950/30 dark:hover:text-orange-400 border border-gray-200 dark:border-zinc-700 rounded-md transition-colors disabled:opacity-50"
+                                                title="Download all photos"
+                                            >
+                                                {isDownloadingAll ? (
+                                                    <Loader2 size={12} className="animate-spin text-orange-600" />
+                                                ) : (
+                                                    <Download size={12} />
+                                                )}
+                                                <span>Download All</span>
+                                            </button>
+                                        )}
+                                    </div>
                                     <div className="flex items-center gap-1.5 mt-0.5 max-w-md min-w-0">
                                         <p className="text-xs text-gray-500 dark:text-zinc-400 truncate" title={imageModalDraft.title || imageModalDraft.raw_name}>
                                             {imageModalDraft.title || imageModalDraft.raw_name}
@@ -2553,24 +2731,44 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             <img src={url} alt={`Photo ${idx + 1}`} className="w-full h-full object-cover" />
 
                                             {idx === 0 && (
-                                                <span className="absolute top-1.5 left-1.5 bg-orange-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                                                <span className="absolute top-1.5 left-1.5 z-10 bg-orange-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs">
                                                     Main
                                                 </span>
                                             )}
 
-                                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-between p-2">
-                                                <div className="flex justify-end">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setModalImages(prev => prev.filter((_, i) => i !== idx))
-                                                        }}
-                                                        className="p-1 bg-red-600 hover:bg-red-700 text-white rounded shadow-xs transition-colors"
-                                                        title="Delete photo"
-                                                    >
-                                                        <Trash2 size={12} />
-                                                    </button>
-                                                </div>
+                                            {/* Top-Right Action Buttons: Download (Always Visible) & Delete (Revealed on Hover) */}
+                                            <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation()
+                                                        handleDownloadModalImage(url, idx)
+                                                    }}
+                                                    disabled={downloadingIndices.has(idx)}
+                                                    className="p-1.5 bg-black/60 hover:bg-orange-600 text-white rounded-md backdrop-blur-xs transition-colors shadow-xs flex items-center justify-center disabled:opacity-50"
+                                                    title="Download photo"
+                                                >
+                                                    {downloadingIndices.has(idx) ? (
+                                                        <Loader2 size={12} className="animate-spin text-white" />
+                                                    ) : (
+                                                        <Download size={12} />
+                                                    )}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation()
+                                                        setModalImages(prev => prev.filter((_, i) => i !== idx))
+                                                    }}
+                                                    className="p-1.5 bg-red-600/90 hover:bg-red-600 text-white rounded-md shadow-xs transition-opacity opacity-0 group-hover:opacity-100 flex items-center justify-center"
+                                                    title="Delete photo"
+                                                >
+                                                    <Trash2 size={12} />
+                                                </button>
+                                            </div>
+
+                                            {/* Hover Overlay for Reordering / Set as Main */}
+                                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pointer-events-none">
                                                 {idx !== 0 && (
                                                     <button
                                                         type="button"
@@ -2578,7 +2776,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             const updated = [url, ...modalImages.filter((_, i) => i !== idx)]
                                                             setModalImages(updated)
                                                         }}
-                                                        className="w-full py-1 bg-white/90 hover:bg-white text-gray-900 text-[10px] font-bold rounded shadow-xs transition-colors"
+                                                        className="w-full py-1 bg-white/90 hover:bg-white text-gray-900 text-[10px] font-bold rounded shadow-xs transition-colors pointer-events-auto"
                                                     >
                                                         Set as Main
                                                     </button>
@@ -2616,7 +2814,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 </div>
 
                                 <p className="text-[11px] text-gray-500 dark:text-zinc-400">
-                                    💡 The first photo is your Daraz cover image. Up to 8 photos supported. Hover on any photo to delete or set as Main.
+                                    💡 The first photo is your Daraz cover image. Up to 8 photos supported. Click the download icon on any photo to save it, or hover to delete or set as Main.
                                 </p>
                             </div>
 
@@ -2863,6 +3061,164 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 >
                                     {priceModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
                                     Save Price
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── 4. Seller Account / Store Quick Edit Modal ───────────── */}
+                {storeModalDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-md w-full flex flex-col overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-zinc-800">
+                                <div>
+                                    <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2">
+                                        <Store size={18} className="text-orange-500" />
+                                        Seller Accounts
+                                    </h3>
+                                    <div className="flex items-center gap-1.5 mt-0.5 max-w-xs min-w-0">
+                                        <p className="text-xs text-gray-500 dark:text-zinc-400 truncate" title={storeModalDraft.title || storeModalDraft.raw_name}>
+                                            {storeModalDraft.title || storeModalDraft.raw_name}
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const textToCopy = storeModalDraft.title || storeModalDraft.raw_name || ''
+                                                navigator.clipboard.writeText(textToCopy)
+                                                setCopiedTitleId('modal-store-' + storeModalDraft.id)
+                                                setTimeout(() => setCopiedTitleId(null), 2000)
+                                            }}
+                                            className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 rounded transition-colors"
+                                            title={copiedTitleId === 'modal-store-' + storeModalDraft.id ? 'Copied!' : 'Copy Product Title'}
+                                        >
+                                            {copiedTitleId === 'modal-store-' + storeModalDraft.id ? (
+                                                <Check size={12} className="text-emerald-500" />
+                                            ) : (
+                                                <Copy size={12} />
+                                            )}
+                                        </button>
+                                        {copiedTitleId === 'modal-store-' + storeModalDraft.id && (
+                                            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                                                Copied!
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setStoreModalDraft(null)}
+                                    className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </div>
+
+                            {/* Store Checkbox List */}
+                            <div className="p-5 space-y-3">
+                                <p className="text-xs text-gray-600 dark:text-zinc-400">
+                                    Select the Daraz seller accounts where this product draft should be published or synced:
+                                </p>
+
+                                <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5">
+                                    {stores.length === 0 ? (
+                                        <div className="p-4 rounded-lg bg-gray-50 dark:bg-zinc-800/50 border border-dashed border-gray-200 dark:border-zinc-700 text-center">
+                                            <p className="text-xs text-gray-400 italic">No connected seller accounts found.</p>
+                                        </div>
+                                    ) : (
+                                        stores.map(store => {
+                                            const isSelected = editSelectedStores.includes(store.id)
+                                            return (
+                                                <label
+                                                    key={store.id}
+                                                    className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-all select-none ${
+                                                        isSelected
+                                                            ? 'border-orange-500 bg-orange-50/60 dark:bg-orange-950/20 text-orange-950 dark:text-orange-200 shadow-2xs'
+                                                            : 'border-gray-200 dark:border-zinc-800 hover:border-gray-300 dark:hover:border-zinc-700 bg-white dark:bg-zinc-850 text-gray-800 dark:text-zinc-200'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() => {
+                                                                setEditSelectedStores(prev =>
+                                                                    prev.includes(store.id)
+                                                                        ? prev.filter(id => id !== store.id)
+                                                                        : [...prev, store.id]
+                                                                )
+                                                            }}
+                                                            className="w-4 h-4 text-orange-600 border-gray-300 dark:border-zinc-700 rounded focus:ring-orange-500 cursor-pointer"
+                                                        />
+                                                        <div className="flex flex-col">
+                                                            <span className="text-xs font-semibold flex items-center gap-1.5">
+                                                                <Store size={13} className={isSelected ? 'text-orange-600' : 'text-gray-400'} />
+                                                                {store.seller_account}
+                                                            </span>
+                                                            {store.short_code && (
+                                                                <span className="text-[10px] text-gray-400 dark:text-zinc-500">
+                                                                    Code: {store.short_code}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    {isSelected && (
+                                                        <span className="text-[11px] font-bold text-orange-600 dark:text-orange-400 flex items-center gap-1">
+                                                            <Check size={13} />
+                                                            Selected
+                                                        </span>
+                                                    )}
+                                                </label>
+                                            )
+                                        })
+                                    )}
+                                </div>
+
+                                {stores.length > 1 && (
+                                    <div className="flex items-center justify-between text-xs pt-2 border-t border-gray-100 dark:border-zinc-800">
+                                        <span className="text-[11px] text-gray-500 dark:text-zinc-400">
+                                            {editSelectedStores.length} of {stores.length} accounts selected
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setEditSelectedStores(stores.map(s => s.id))}
+                                                className="text-[11px] text-orange-600 dark:text-orange-400 hover:underline font-medium"
+                                            >
+                                                Select All
+                                            </button>
+                                            <span className="text-gray-300 dark:text-zinc-700">|</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setEditSelectedStores([])}
+                                                className="text-[11px] text-gray-500 dark:text-zinc-400 hover:underline font-medium"
+                                            >
+                                                Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Footer */}
+                            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/50">
+                                <button
+                                    type="button"
+                                    onClick={() => setStoreModalDraft(null)}
+                                    disabled={storeModalSaving}
+                                    className="px-3.5 py-1.5 text-xs font-semibold text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleSaveStoreModal}
+                                    disabled={storeModalSaving}
+                                    className="px-4 py-1.5 text-xs font-semibold bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                >
+                                    {storeModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                                    Save Accounts
                                 </button>
                             </div>
                         </div>
