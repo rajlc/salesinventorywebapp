@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, use } from 'react'
+import { useState, use, useEffect, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -9,10 +9,10 @@ import { getSupplierStats, getSupplierDetailedTransactions, LedgerDetailType } f
 import { Card } from '@/components/ui-shim'
 
 import { useDashboard } from '@/app/dashboard/context'
-import { useEffect } from 'react'
 
-export default function SupplierDetailLedgerPage({ params }: { params: Promise<{ supplierId: string }> }) {
-    const { supplierId } = use(params)
+export const dynamic = 'force-dynamic'
+
+function SupplierDetailLedgerContent({ supplierId }: { supplierId: string }) {
     const searchParams = useSearchParams()
     const fiscalYearId = searchParams.get('fiscalYearId') || undefined
     const paramSupplierName = searchParams.get('supplierName') ? decodeURIComponent(searchParams.get('supplierName')!) : null
@@ -288,5 +288,18 @@ export default function SupplierDetailLedgerPage({ params }: { params: Promise<{
                 )}
             </div>
         </div>
+    )
+}
+
+export default function SupplierDetailLedgerPage({ params }: { params: Promise<{ supplierId: string }> }) {
+    const { supplierId } = use(params)
+    return (
+        <Suspense fallback={
+            <div className="flex items-center justify-center min-h-[400px]">
+                <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+            </div>
+        }>
+            <SupplierDetailLedgerContent supplierId={supplierId} />
+        </Suspense>
     )
 }

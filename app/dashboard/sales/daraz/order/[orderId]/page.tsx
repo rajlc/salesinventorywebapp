@@ -1,11 +1,11 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, Suspense } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
 import { getDarazOrderById } from '@/features/sales/actions/daraz-actions'
 import { getUserRole } from '@/features/sales/actions/daraz-deletion-actions'
-import { ArrowLeft, Edit, Calendar, Printer, Trash2, Clock } from 'lucide-react'
+import { ArrowLeft, Edit, Calendar, Printer, Trash2, Clock, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { Card } from '@/components/ui-shim'
 import { EditDarazOrderModal } from '@/features/sales/components/EditDarazOrderModal'
@@ -15,8 +15,9 @@ import { useDashboard } from '@/app/dashboard/context'
 import { usePermissions } from '@/lib/permissions/PermissionContext'
 // DarazInvoice removed
 
+export const dynamic = 'force-dynamic'
 
-export default function DarazOrderViewPage() {
+function DarazOrderViewContent() {
     const params = useParams()
     const router = useRouter()
     const orderId = params.orderId as string
@@ -428,5 +429,17 @@ export default function DarazOrderViewPage() {
             )}
 
         </div>
+    )
+}
+
+export default function DarazOrderViewPage() {
+    return (
+        <Suspense fallback={
+            <div className="flex items-center justify-center min-h-[400px]">
+                <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+            </div>
+        }>
+            <DarazOrderViewContent />
+        </Suspense>
     )
 }

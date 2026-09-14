@@ -1,13 +1,17 @@
 'use client'
 
+import { Suspense } from 'react'
 import { Card, CardContent } from '@/components/ui-shim'
 import { SettingsPageHeader } from "@/components/settings/SettingsPageHeader"
 import RoleList from '@/features/settings/components/RoleList'
 import { Shield } from 'lucide-react'
 
+export const dynamic = 'force-dynamic'
+
 export default function RolesPage() {
     return (
-        <div className="space-y-6">
+        <Suspense fallback={<div className="p-8 text-center text-gray-500">Loading roles...</div>}>
+            <div className="space-y-6">
             <SettingsPageHeader
                 title="Page Roles Reference"
                 subtitle="View all available page roles and sub-roles in the system"
@@ -27,5 +31,6 @@ export default function RolesPage() {
                 </CardContent>
             </Card>
         </div>
+    </Suspense>
     )
 }
