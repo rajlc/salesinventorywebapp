@@ -1,4 +1,4 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr'
+import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
@@ -111,6 +111,23 @@ export async function middleware(request: NextRequest) {
         })
     }
 
+    // ── Early exit for routes that do NOT need Supabase auth ──────────────
+    // These are background jobs, webhooks, and internal API routes.
+    // Skipping auth check here saves 50-200ms per request and prevents
+    // unnecessary load on the Supabase auth service.
+    const noAuthPrefixes = [
+        '/api/cron/',
+        '/api/daraz/webhook',
+        '/api/claude-connector',
+        '/api/settings/',
+        '/api/sales/',
+        '/api/inventory/',
+        '/api/products/',
+    ]
+    if (noAuthPrefixes.some(prefix => pathname.startsWith(prefix))) {
+        return NextResponse.next({ request: { headers: request.headers } })
+    }
+
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
@@ -130,7 +147,7 @@ export async function middleware(request: NextRequest) {
                     return request.cookies.getAll()
                 },
                 setAll(cookiesToSet) {
-                    cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value))
+                    cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
                     response = NextResponse.next({
                         request,
                     })
@@ -144,22 +161,29 @@ export async function middleware(request: NextRequest) {
 
     let user = null
     try {
-        const { data } = await supabase.auth.getUser()
-        user = data?.user || null
+        // Race against an 8-second timeout so that a slow/unavailable Supabase
+        // cannot hang every page request indefinitely. If it times out, the user
+        // is treated as unauthenticated (will be redirected to login).
+        const authResult = await Promise.race([
+            supabase.auth.getUser(),
+            new Promise<{ data: { user: null } }>((resolve) =>
+                setTimeout(() => resolve({ data: { user: null } }), 8000)
+            )
+        ])
+        user = (authResult as any).data?.user || null
     } catch (e) {
-        console.error('[Middleware] Auth parsing failed (possible malformed cookie):', e)
+        console.error('[Middleware] Auth check failed (possible malformed cookie):', e)
     }
 
     // Protected Routes Logic
-    if (request.nextUrl.pathname.startsWith('/dashboard')) {
+    if (pathname.startsWith('/dashboard')) {
         if (!user) {
             return NextResponse.redirect(new URL('/login', request.url))
         }
     }
 
-    // Auth Routes Logic (Don't let logged in users see login page)
-    // EXCEPT for the pending page which should be accessible after successful OAuth
-    if (['/login', '/request-access'].includes(request.nextUrl.pathname)) {
+    // Auth Routes Logic (Don't let logged-in users see login page)
+    if (['/login', '/request-access'].includes(pathname)) {
         if (user) {
             return NextResponse.redirect(new URL('/dashboard', request.url))
         }
@@ -175,7 +199,6 @@ export const config = {
          * - _next/static (static files)
          * - _next/image (image optimization files)
          * - favicon.ico (favicon file)
-         * Feel free to modify this pattern to include more paths.
          */
         '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
     ],

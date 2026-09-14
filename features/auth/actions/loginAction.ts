@@ -4,7 +4,25 @@ import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 
-export async function loginAction(email: string, password: string) {
+export async function loginAction(
+    credentials: FormData | string,
+    rawPassword?: string
+) {
+    let email = ''
+    let password = ''
+
+    if (typeof credentials === 'object' && credentials !== null && 'get' in credentials) {
+        email = String(credentials.get('email') || '').trim()
+        password = String(credentials.get('password') || '')
+    } else if (typeof credentials === 'string') {
+        email = credentials.trim()
+        password = rawPassword || ''
+    }
+
+    if (!email || !password) {
+        return { error: 'Email and password are required' }
+    }
+
     const cookieStore = await cookies()
 
     const supabase = createServerClient(

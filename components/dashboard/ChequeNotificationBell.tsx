@@ -14,7 +14,10 @@ export default function ChequeNotificationBell() {
     const { data: notifications = [], refetch, isFetching } = useQuery<ChequeNotification[]>({
         queryKey: ['cheque-notifications'],
         queryFn: () => getChequeNotifications(),
-        refetchInterval: 30000, // Auto-refresh every 30 seconds
+        // Removed refetchInterval: 30000 which was firing 1 server action/user/30s.
+        // The bell calls refetch() manually on click — that's sufficient for a notification indicator.
+        staleTime: 5 * 60 * 1000, // Consider fresh for 5 minutes
+        refetchOnWindowFocus: true,  // Re-fetch when user returns to tab
     })
 
     // Close dropdown on outside click

@@ -18,16 +18,20 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const [theme, setTheme] = useState<Theme>("light")
     const [mounted, setMounted] = useState(false)
 
-    // Initialize theme from localStorage or system preference
+    // Initialize theme from localStorage or system preference.
+    // This runs client-side only — the server always renders with "light" class.
+    // suppressHydrationWarning on <html> in layout.tsx handles the mismatch.
     useEffect(() => {
         const savedTheme = localStorage.getItem("theme") as Theme | null
-        if (savedTheme) {
-            setTheme(savedTheme)
-            document.documentElement.classList.toggle("dark", savedTheme === "dark")
+        const resolved = savedTheme
+            ?? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+
+        setTheme(resolved)
+        // Apply immediately — this runs before paint in most browsers
+        if (resolved === "dark") {
+            document.documentElement.classList.add("dark")
         } else {
-            const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-            setTheme(systemTheme)
-            document.documentElement.classList.toggle("dark", systemTheme === "dark")
+            document.documentElement.classList.remove("dark")
         }
         setMounted(true)
     }, [])
@@ -39,14 +43,17 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         document.documentElement.classList.toggle("dark", newTheme === "dark")
     }
 
+    // While not yet mounted (SSR / first paint), we still render children
+    // but provide a stable "light" context so no hydration mismatch on text/structure.
+    // suppressHydrationWarning on <html> and <body> handles the class attribute difference.
     return (
-        <ThemeContext.Provider value={{ theme, toggleTheme }}>
+        <ThemeContext.Provider value={{ theme: mounted ? theme : "light", toggleTheme }}>
             {children}
         </ThemeContext.Provider>
     )
 }
 
 export function useTheme() {
-    const context = useContext(ThemeContext)
-    return context
+    return useContext(ThemeContext)
 }
+

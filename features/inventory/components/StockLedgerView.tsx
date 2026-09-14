@@ -22,7 +22,17 @@ export default function StockLedgerView({ initialData, initialTotal, initialPage
         canViewLedger ? 'ledger' : 'valuation'
     )
 
-    if (isLoading) return null
+    if (isLoading) {
+        return (
+            <div className="space-y-6 animate-pulse">
+                <div className="flex gap-4 border-b dark:border-zinc-800 pb-2">
+                    <div className="h-5 w-28 bg-slate-200 dark:bg-zinc-800 rounded" />
+                    <div className="h-5 w-28 bg-slate-100 dark:bg-zinc-800/60 rounded" />
+                </div>
+                <div className="h-64 bg-slate-100 dark:bg-zinc-900 rounded-lg border border-slate-200 dark:border-zinc-800" />
+            </div>
+        )
+    }
 
     return (
         <div className="space-y-6">

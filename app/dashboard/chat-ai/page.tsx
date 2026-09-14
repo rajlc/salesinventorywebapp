@@ -40,7 +40,9 @@ import {
     ExternalLink,
     Plus,
     Maximize2,
-    Minimize2
+    Minimize2,
+    Loader2,
+    Check
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui-shim'
@@ -77,6 +79,18 @@ interface ChatMessage {
     send_time: string
     auto_reply: boolean
     tags: string[]
+    status?: 'sending' | 'sent' | 'failed'
+}
+
+// Parse message JSON content or fallback to string
+function parseMsgContent(content: string) {
+    if (!content) return { txt: '' }
+    try {
+        const parsed = JSON.parse(content)
+        return typeof parsed === 'object' && parsed !== null ? parsed : { txt: content }
+    } catch {
+        return { txt: content }
+    }
 }
 
 // Parse raw Daraz message content to a human-readable summary for the sidebar
@@ -139,10 +153,9 @@ interface ChatInputBarHandle {
     focus: () => void
 }
 
-const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: string) => Promise<boolean> }>(
+const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: string) => Promise<boolean> | boolean | void }>(
     ({ onSendMessage }, ref) => {
         const [text, setText] = useState('')
-        const [sending, setSending] = useState(false)
         const inputRef = useRef<HTMLInputElement>(null)
 
         // Expose focus() so parent components can refocus the input
@@ -150,19 +163,17 @@ const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: stri
             focus: () => setTimeout(() => inputRef.current?.focus(), 0)
         }))
 
-        const handleSubmit = async (e: React.FormEvent) => {
+        const handleSubmit = (e: React.FormEvent) => {
             e.preventDefault()
-            if (!text.trim() || sending) return
+            const textToSend = text.trim()
+            if (!textToSend) return
 
-            const textToSend = text
-            setSending(true)
-            const success = await onSendMessage(textToSend)
-            setSending(false)
-            if (success) {
-                setText('')
-            }
-            // Defer focus so it fires AFTER React re-enables the input in the DOM
-            setTimeout(() => inputRef.current?.focus(), 0)
+            // Immediately clear input and retain focus so the user can type next message without waiting
+            setText('')
+            inputRef.current?.focus()
+
+            // Run message sending in background with optimistic UI updates
+            onSendMessage(textToSend)
         }
 
         return (
@@ -190,15 +201,14 @@ const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: stri
                         ref={inputRef}
                         type="text"
                         value={text}
-                        disabled={sending}
                         onChange={(e) => setText(e.target.value)}
-                        placeholder={sending ? "Sending..." : "Write your response..."}
-                        className="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100 disabled:opacity-50"
+                        placeholder="Write your response..."
+                        className="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
                     />
                     <button
                         type="submit"
-                        disabled={sending}
-                        className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 active:scale-95 text-white shadow px-5 rounded-xl flex items-center justify-center transition-all disabled:opacity-50"
+                        disabled={!text.trim()}
+                        className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 active:scale-95 text-white shadow px-5 rounded-xl flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                         <Send size={16} />
                     </button>
@@ -493,7 +503,22 @@ function ChatAiDashboardContent() {
                 if (payload.eventType === 'INSERT') {
                     setMessages(prev => {
                         if (prev.some(m => m.message_id === payload.new.message_id)) return prev
-                        return [...prev, payload.new as ChatMessage]
+                        const newMsg = payload.new as ChatMessage
+
+                        // Reconcile with any matching optimistic temporary message
+                        const optIndex = prev.findIndex(m =>
+                            (m.status === 'sending' || m.message_id.startsWith('temp_')) &&
+                            m.session_id === newMsg.session_id &&
+                            (m.content === newMsg.content || parseMsgContent(m.content).txt === parseMsgContent(newMsg.content).txt)
+                        )
+
+                        if (optIndex !== -1) {
+                            const updated = [...prev]
+                            updated[optIndex] = { ...newMsg, status: 'sent' }
+                            return updated
+                        }
+
+                        return [...prev, newMsg]
                     })
                     setTimeout(() => scrollToBottom('smooth'), 50)
                     // Real-time follower detection: update session badge instantly
@@ -569,38 +594,89 @@ function ChatAiDashboardContent() {
         }
     }
 
-    // Send chat message
-    const handleSendMessage = async (textToSend: string) => {
+    // Send chat message with optimistic UI & background dispatch
+    const handleSendMessage = (textToSend: string) => {
         if (!textToSend.trim() || !activeSessionId || !activeStoreId) return false
 
         const sessionSentTo = activeSessionId
+        const storeSentFrom = activeStoreId
+        const targetBuyerId = activeSession?.buyer_id || 'buyer'
+        const tempMsgId = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
 
-        try {
-            const result = await sendChatMessage(activeStoreId, sessionSentTo, '1', textToSend)
-            if (result.success) {
-                // Only load and update messages if the user is still looking at this session
-                if (activeSessionRef.current !== sessionSentTo) return true
-
-                // Refresh messages locally
-                const { data } = await supabase
-                    .from('daraz_chat_messages')
-                    .select('*')
-                    .eq('session_id', sessionSentTo)
-                    .order('send_time', { ascending: true })
-                if (data && activeSessionRef.current === sessionSentTo) {
-                    setMessages(data)
-                    setTimeout(() => scrollToBottom('smooth'), 50)
-                }
-                return true
-            } else {
-                toast.error(result.error || 'Failed to send message')
-                return false
-            }
-        } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : 'Failed to send message'
-            toast.error(errorMsg)
-            return false
+        const optimisticMsg: ChatMessage = {
+            message_id: tempMsgId,
+            session_id: sessionSentTo,
+            from_account_id: 'seller',
+            from_account_type: '2',
+            to_account_id: targetBuyerId,
+            to_account_type: '1',
+            content: JSON.stringify({ txt: textToSend }),
+            template_id: '1',
+            send_time: new Date().toISOString(),
+            auto_reply: false,
+            tags: [],
+            status: 'sending'
         }
+
+        // 1. Instantly append optimistic message to conversation list
+        setMessages(prev => [...prev, optimisticMsg])
+        setTimeout(() => scrollToBottom('smooth'), 30)
+
+        // 2. Instantly update sidebar session preview and bump conversation to top
+        setSessions(prev => {
+            const existing = prev.find(s => s.session_id === sessionSentTo)
+            if (!existing) return prev
+            const updated: ChatSession = {
+                ...existing,
+                last_message_time: new Date().toISOString(),
+                last_message_summary: textToSend
+            }
+            return [updated, ...prev.filter(s => s.session_id !== sessionSentTo)]
+        })
+
+        // 3. Dispatch to Daraz API in background without blocking user typing
+        sendChatMessage(storeSentFrom, sessionSentTo, '1', textToSend)
+            .then((result) => {
+                if (result.success && result.messageId) {
+                    setMessages(prev => {
+                        // If realtime already replaced it, remove temp message
+                        if (prev.some(m => m.message_id === result.messageId)) {
+                            return prev.filter(m => m.message_id !== tempMsgId)
+                        }
+                        // Otherwise update status and message_id
+                        return prev.map(m => m.message_id === tempMsgId ? {
+                            ...m,
+                            message_id: result.messageId!,
+                            status: 'sent'
+                        } : m)
+                    })
+                } else {
+                    // Mark optimistic message as failed
+                    setMessages(prev => prev.map(m => m.message_id === tempMsgId ? {
+                        ...m,
+                        status: 'failed'
+                    } : m))
+                    toast.error(result.error || 'Failed to deliver message to Daraz')
+                }
+            })
+            .catch((err) => {
+                const errorMsg = err instanceof Error ? err.message : 'Failed to send message'
+                setMessages(prev => prev.map(m => m.message_id === tempMsgId ? {
+                    ...m,
+                    status: 'failed'
+                } : m))
+                toast.error(errorMsg)
+            })
+
+        return true
+    }
+
+    // Retry sending a previously failed message
+    const handleRetryMessage = (failedMsg: ChatMessage) => {
+        const parsed = parseMsgContent(failedMsg.content)
+        const textToRetry = parsed.txt || parsed.content || failedMsg.content
+        setMessages(prev => prev.filter(m => m.message_id !== failedMsg.message_id))
+        handleSendMessage(textToRetry)
     }
 
     // Toggle Tag on Message
@@ -969,16 +1045,6 @@ function ChatAiDashboardContent() {
         toast.success('Copied to clipboard!')
     }
 
-    // Helper: Parse content string to JSON or keep text
-    const parseMsgContent = (content: string) => {
-        try {
-            const parsed = JSON.parse(content)
-            return parsed
-        } catch {
-            return { txt: content }
-        }
-    }
-
     return (
         <div className={`flex flex-col bg-zinc-50 dark:bg-zinc-950 overflow-hidden border border-zinc-200 dark:border-zinc-800 transition-all ${
             isZoomed 
@@ -1247,9 +1313,13 @@ function ChatAiDashboardContent() {
                                                     className={`flex flex-col ${isSelf ? 'items-end' : 'items-start'}`}
                                                 >
                                                     {/* Message bubble */}
-                                                    <div className={`max-w-[70%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative group ${
+                                                    <div className={`max-w-[70%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative group transition-all ${
                                                         isSelf 
-                                                            ? 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-tr-none' 
+                                                            ? message.status === 'failed'
+                                                                ? 'bg-red-600 text-white rounded-tr-none border border-red-500 shadow-md'
+                                                                : message.status === 'sending'
+                                                                    ? 'bg-gradient-to-br from-blue-600/90 to-indigo-600/90 text-white rounded-tr-none'
+                                                                    : 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-tr-none'
                                                             : 'bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-tl-none'
                                                     }`}>
                                                         {/* Render based on card type */}
@@ -1342,9 +1412,30 @@ function ChatAiDashboardContent() {
                                                             <p className="whitespace-pre-wrap">{parsed.txt || parsed.content || message.content}</p>
                                                         )}
 
-                                                        {/* Timestamp and AutoReply Tag */}
+                                                        {/* Timestamp, Delivery Status and AutoReply Tag */}
                                                         <div className={`flex items-center gap-1.5 mt-1.5 text-[9px] ${isSelf ? 'text-blue-200 justify-end' : 'text-zinc-400'}`}>
                                                             <span>{formattedTime}</span>
+                                                            {isSelf && message.status === 'sending' && (
+                                                                <span className="flex items-center gap-1 text-[9px] text-blue-200 font-medium ml-1">
+                                                                    <Loader2 size={10} className="animate-spin" />
+                                                                    <span>Sending...</span>
+                                                                </span>
+                                                            )}
+                                                            {isSelf && message.status === 'failed' && (
+                                                                <span className="flex items-center gap-1 text-[9px] text-red-100 font-bold bg-black/20 px-1.5 py-0.5 rounded ml-1">
+                                                                    <span>Failed</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRetryMessage(message)}
+                                                                        className="underline hover:text-white ml-0.5 cursor-pointer"
+                                                                    >
+                                                                        Retry
+                                                                    </button>
+                                                                </span>
+                                                            )}
+                                                            {isSelf && (message.status === 'sent' || (!message.status && !message.message_id.startsWith('temp_'))) && (
+                                                                <Check size={11} className="text-blue-200 ml-0.5" />
+                                                            )}
                                                             {message.auto_reply && (
                                                                 <span className="bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200 px-1 rounded font-semibold text-[8px] uppercase">
                                                                     AI Auto-Reply
@@ -1353,28 +1444,30 @@ function ChatAiDashboardContent() {
                                                         </div>
 
                                                         {/* Preset Tag Actions Popover (Hover list for admin) */}
-                                                        <div className={`absolute top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center gap-1 bg-white dark:bg-zinc-900 shadow-md border border-zinc-200 dark:border-zinc-800 rounded-full px-2 py-1 z-10 ${
-                                                            isSelf ? 'right-full mr-2' : 'left-full ml-2'
-                                                        }`}>
-                                                            <span className="text-[10px] font-bold text-zinc-400 mr-1 flex items-center gap-0.5"><Tag size={10} /> Tag:</span>
-                                                            {PRESET_TAGS.map(tag => {
-                                                                const isTagged = message.tags?.includes(tag)
-                                                                return (
-                                                                    <button
-                                                                        key={tag}
-                                                                        onClick={() => handleToggleTag(message.message_id, tag)}
-                                                                        title={tag}
-                                                                        className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold border transition-colors ${
-                                                                            isTagged 
-                                                                                ? 'bg-orange-500 border-orange-500 text-white' 
-                                                                                : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200'
-                                                                        }`}
-                                                                    >
-                                                                        {tag.charAt(0)}
-                                                                    </button>
-                                                                )
-                                                            })}
-                                                        </div>
+                                                        {!message.message_id.startsWith('temp_') && message.status !== 'sending' && (
+                                                            <div className={`absolute top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center gap-1 bg-white dark:bg-zinc-900 shadow-md border border-zinc-200 dark:border-zinc-800 rounded-full px-2 py-1 z-10 ${
+                                                                isSelf ? 'right-full mr-2' : 'left-full ml-2'
+                                                            }`}>
+                                                                <span className="text-[10px] font-bold text-zinc-400 mr-1 flex items-center gap-0.5"><Tag size={10} /> Tag:</span>
+                                                                {PRESET_TAGS.map(tag => {
+                                                                    const isTagged = message.tags?.includes(tag)
+                                                                    return (
+                                                                        <button
+                                                                            key={tag}
+                                                                            onClick={() => handleToggleTag(message.message_id, tag)}
+                                                                            title={tag}
+                                                                            className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold border transition-colors ${
+                                                                                isTagged 
+                                                                                    ? 'bg-orange-500 border-orange-500 text-white' 
+                                                                                    : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200'
+                                                                            }`}
+                                                                        >
+                                                                            {tag.charAt(0)}
+                                                                        </button>
+                                                                    )
+                                                                })}
+                                                            </div>
+                                                        )}
                                                     </div>
 
                                                     {/* Active tag pills displayed below message */}

@@ -15,10 +15,10 @@ import { useQueryClient } from '@tanstack/react-query'
 import { MobileModeProvider, useMobileMode } from "@/context/MobileModeContext"
 import MobileHeader from "@/components/dashboard/MobileHeader"
 
+import { NavItem } from './NavItem'
 const AddProductModal = dynamic(() => import('@/features/inventory/components/AddProductModal').then(mod => mod.AddProductModal), { ssr: false })
 const MobileDashboard = dynamic(() => import('@/components/dashboard/MobileDashboard').then(mod => mod.MobileDashboard), { ssr: false })
 const MobileFooter = dynamic(() => import('@/components/dashboard/MobileFooter').then(mod => mod.MobileFooter), { ssr: false })
-const NavItem = dynamic(() => import('./NavItem').then(mod => mod.NavItem), { ssr: false })
 
 import { DashboardContext } from "./context"
 

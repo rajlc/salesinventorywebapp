@@ -67,7 +67,10 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
             return data
         },
         enabled: !!userId,
-        refetchInterval: 60000 // Poll every 60 seconds for instant updates
+        // Roles change infrequently — do NOT poll every 60s.
+        // Removed refetchInterval: 60000 which was firing 1 query/user/minute.
+        staleTime: 5 * 60 * 1000, // Consider fresh for 5 minutes
+        refetchOnWindowFocus: true, // Re-check when user returns to the tab
     })
 
     const role = (userProfile?.role as UserRole) || null
@@ -86,7 +89,10 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
             return data
         },
         enabled: !!userId && (role === 'user' || role === 'new_user' || role === 'editor'),
-        refetchInterval: 60000 // Poll every 60 seconds
+        // Permissions change infrequently — do NOT poll every 60s.
+        // Removed refetchInterval: 60000 which was firing 1 query/user/minute.
+        staleTime: 5 * 60 * 1000, // Consider fresh for 5 minutes
+        refetchOnWindowFocus: true, // Re-check when user returns to the tab
     })
 
     const permissions: UserPermission[] = (rawPermissions || []) as UserPermission[]

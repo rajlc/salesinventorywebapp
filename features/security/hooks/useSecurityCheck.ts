@@ -1,37 +1,46 @@
 "use client"
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
 export function useSecurityCheck() {
     const router = useRouter()
+    // Store router in a ref so it never appears in the dependency array.
+    // This prevents the interval from being torn down/re-created on every navigation.
+    const routerRef = useRef(router)
+    useEffect(() => {
+        routerRef.current = router
+    }, [router])
 
     useEffect(() => {
         const checkSecurity = async () => {
-            const { data: { session } } = await supabase.auth.getSession()
+            try {
+                // Use getUser() — validates session against Supabase server.
+                // getSession() only reads from local storage and can return stale/invalid data.
+                const { data: { user }, error } = await supabase.auth.getUser()
 
-            if (!session) return
+                if (error || !user) return
 
-            // 1. Check Session Age (12 hours)
-            // Supabase tokens usually have their own expiry, but we enforce a hard UX logout here too
-            const lastLogin = new Date(session.user.last_sign_in_at || '').getTime()
-            const now = new Date().getTime()
-            const hoursDiff = (now - lastLogin) / (1000 * 60 * 60)
+                // Check Session Age (12 hours)
+                const lastLogin = new Date(user.last_sign_in_at || '').getTime()
+                const now = Date.now()
+                const hoursDiff = (now - lastLogin) / (1000 * 60 * 60)
 
-            if (hoursDiff > 12) {
-                await supabase.auth.signOut()
-                router.push('/login?reason=session_expired')
+                if (hoursDiff > 12) {
+                    await supabase.auth.signOut()
+                    routerRef.current.push('/login?reason=session_expired')
+                }
+            } catch {
+                // Network error — do not force logout, just skip this check
             }
-
-            // 2. Log Activity (Optional - Fire and forget)
-            // logActivity(session.user.id, 'active_ping')
         }
 
-        // Run on mount and every 5 minutes
+        // Run on mount and every 10 minutes (halved from 5 to reduce DB load)
         checkSecurity()
-        const interval = setInterval(checkSecurity, 5 * 60 * 1000)
+        const interval = setInterval(checkSecurity, 10 * 60 * 1000)
 
         return () => clearInterval(interval)
-    }, [router])
+    // Empty deps: runs once on mount. routerRef is stable via useRef above.
+    }, []) // eslint-disable-line react-hooks/exhaustive-deps
 }
