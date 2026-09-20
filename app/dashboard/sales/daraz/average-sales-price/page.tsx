@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Card, Button } from '@/components/ui-shim'
 import * as XLSX from 'xlsx'
-import { Search, ChevronLeft, ChevronRight, Edit2, Check, X, Loader2, RefreshCw, AlertTriangle, ArrowLeft, UploadCloud, ArrowDown, Lock, Unlock, FileSpreadsheet, Eye, ExternalLink, Plus, TrendingUp } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, Edit2, Check, X, Loader2, RefreshCw, AlertTriangle, ArrowLeft, UploadCloud, ArrowDown, Lock, Unlock, FileSpreadsheet, Eye, ExternalLink, Plus, TrendingUp, CheckCircle2 } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { getDarazAvgPrices, updateDarazAvgPrice, bulkUpdateDarazAvgPrice, syncDarazAvgPricesGoogleSheets, pullDarazAvgPricesFromGoogleSheets, syncLiveSellerPrices, pushPriceToDaraz, DarazAvgPriceItem, updateWebsitePricesBulk, syncLiveSellerPricesForProduct, toggleProductPriceLock, autoUpdateWebsitePrices } from '@/features/sales/actions/avg-price-actions'
@@ -136,11 +136,23 @@ export default function DarazAverageSalesPricePage() {
     // Regular price profit-percent dropdown (15 / 20 / 25)
     const [regularPct, setRegularPct] = useState<15 | 20 | 25>(15)
 
-    // Editing State (we can edit market_price and campaign_price)
+    // Editing State (we can edit market_price, campaign_price, and mega_campaign_price)
     const [editingId, setEditingId] = useState<string | null>(null)
     const [editMarketPrice, setEditMarketPrice] = useState<string>('')
     const [editCampaignPrice, setEditCampaignPrice] = useState<string>('')
+    const [editMegaCampaignPrice, setEditMegaCampaignPrice] = useState<string>('')
     const [isSaving, setIsSaving] = useState(false)
+
+    // Edit Marketplace Prices Popup Modal State (Daraz, Campaign, M. Campaign)
+    const [editPriceModalProduct, setEditPriceModalProduct] = useState<DarazAvgPriceItem | null>(null)
+    const [modalMarketPrice, setModalMarketPrice] = useState<string>('')
+    const [modalCampaignPrice, setModalCampaignPrice] = useState<string>('')
+    const [modalMegaCampaignPrice, setModalMegaCampaignPrice] = useState<string>('')
+    const [isSavingModalPrice, setIsSavingModalPrice] = useState(false)
+
+    // Top Save Notification State (Processing and Saved status)
+    const [saveToast, setSaveToast] = useState<{ id: string; productName: string; status: 'saving' | 'saved' | 'error'; message?: string } | null>(null)
+    const saveToastTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
     // Helper to get stores with live price for a single product
     const getStoresWithLivePrice = (item: DarazAvgPriceItem) => {
@@ -765,8 +777,10 @@ export default function DarazAverageSalesPricePage() {
 
     const handlePushToWebsiteSingle = async (item: DarazAvgPriceItem) => {
         if (item.is_price_locked) {
-            alert(`✗ Push to website is not allowed for this product because its price is locked.`)
-            return
+            if (!confirm(`This product's website price is locked. Do you want to unlock it and update price?`)) {
+                return
+            }
+            await handleToggleLock(item.product_id, true)
         }
         let activeDarazPrice = item.market_price || 0
         if (activeDarazPrice === 0) {
@@ -800,7 +814,16 @@ export default function DarazAverageSalesPricePage() {
             const res = await updateWebsitePricesBulk(updates)
             if (res.success) {
                 alert(`✓ ${res.message}`)
-                loadData()
+                setData(prev => prev.map(p => {
+                    if (p.product_id === item.product_id) {
+                        return {
+                            ...p,
+                            website_regular_price: activeDarazPrice,
+                            website_special_price: Math.round(val)
+                        }
+                    }
+                    return p
+                }))
             } else {
                 alert(`✗ Website Push Failed: ${res.message}`)
             }
@@ -942,6 +965,7 @@ export default function DarazAverageSalesPricePage() {
         setEditingId(item.product_id)
         setEditMarketPrice(item.market_price ? item.market_price.toString() : '')
         setEditCampaignPrice(item.campaign_price ? item.campaign_price.toString() : '')
+        setEditMegaCampaignPrice(item.mega_campaign_price ? item.mega_campaign_price.toString() : '')
     }
 
     const cancelEditing = () => {
@@ -953,13 +977,20 @@ export default function DarazAverageSalesPricePage() {
         try {
             const mPrice = editMarketPrice.trim() !== '' ? parseFloat(editMarketPrice) : null
             const cPrice = editCampaignPrice.trim() !== '' ? parseFloat(editCampaignPrice) : null
+            const mcPrice = editMegaCampaignPrice.trim() !== '' ? parseFloat(editMegaCampaignPrice) : null
 
-            if ((editMarketPrice !== '' && isNaN(mPrice as number)) || (editCampaignPrice !== '' && isNaN(cPrice as number))) {
+            if ((editMarketPrice !== '' && isNaN(mPrice as number)) || 
+                (editCampaignPrice !== '' && isNaN(cPrice as number)) ||
+                (editMegaCampaignPrice !== '' && isNaN(mcPrice as number))) {
                 alert('Please enter valid numbers')
                 return
             }
 
-            await updateDarazAvgPrice(productId, { market_price: mPrice, campaign_price: cPrice })
+            await updateDarazAvgPrice(productId, { 
+                market_price: mPrice, 
+                campaign_price: cPrice,
+                mega_campaign_price: mcPrice
+            })
 
             // Optimistic update
             setData(prev => prev.map(item => {
@@ -970,7 +1001,9 @@ export default function DarazAverageSalesPricePage() {
                         market_price: mPrice,
                         market_price_profit: mPrice ? (mPrice - (mPrice * commissionFactor) - item.purchasing_price) : null,
                         campaign_price: cPrice,
-                        campaign_price_profit: cPrice ? (cPrice - (cPrice * commissionFactor) - item.purchasing_price) : null
+                        campaign_price_profit: cPrice ? (cPrice - (cPrice * commissionFactor) - item.purchasing_price) : null,
+                        mega_campaign_price: mcPrice,
+                        mega_campaign_price_profit: mcPrice ? (mcPrice - (mcPrice * commissionFactor) - item.purchasing_price) : null
                     }
                 }
                 return item
@@ -983,6 +1016,87 @@ export default function DarazAverageSalesPricePage() {
         } finally {
             setIsSaving(false)
         }
+    }
+
+    const openEditPriceModal = (item: DarazAvgPriceItem) => {
+        setEditPriceModalProduct(item)
+        setModalMarketPrice(item.market_price != null ? item.market_price.toString() : '')
+        setModalCampaignPrice(item.campaign_price != null ? item.campaign_price.toString() : '')
+        setModalMegaCampaignPrice(item.mega_campaign_price != null ? item.mega_campaign_price.toString() : '')
+    }
+
+    const handleSaveModalPrices = () => {
+        if (!editPriceModalProduct) return
+
+        const mPrice = modalMarketPrice.trim() !== '' ? parseFloat(modalMarketPrice) : null
+        const cPrice = modalCampaignPrice.trim() !== '' ? parseFloat(modalCampaignPrice) : null
+        const mcPrice = modalMegaCampaignPrice.trim() !== '' ? parseFloat(modalMegaCampaignPrice) : null
+
+        if ((modalMarketPrice.trim() !== '' && isNaN(mPrice as number)) || 
+            (modalCampaignPrice.trim() !== '' && isNaN(cPrice as number)) ||
+            (modalMegaCampaignPrice.trim() !== '' && isNaN(mcPrice as number))) {
+            alert('Please enter valid numeric prices')
+            return
+        }
+
+        const targetId = editPriceModalProduct.product_id
+        const productName = editPriceModalProduct.product_name
+
+        // 1. Close modal popup IMMEDIATELY so user is never blocked and can edit other products right away!
+        setEditPriceModalProduct(null)
+
+        // 2. Optimistic UI update in the table immediately
+        setData(prev => prev.map(item => {
+            if (item.product_id === targetId) {
+                const commissionFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                return {
+                    ...item,
+                    market_price: mPrice,
+                    market_price_profit: mPrice ? (mPrice - (mPrice * commissionFactor) - item.purchasing_price) : null,
+                    campaign_price: cPrice,
+                    campaign_price_profit: cPrice ? (cPrice - (cPrice * commissionFactor) - item.purchasing_price) : null,
+                    mega_campaign_price: mcPrice,
+                    mega_campaign_price_profit: mcPrice ? (mcPrice - (mcPrice * commissionFactor) - item.purchasing_price) : null
+                }
+            }
+            return item
+        }))
+
+        // 3. Show top processing notification
+        if (saveToastTimeoutRef.current) clearTimeout(saveToastTimeoutRef.current)
+        setSaveToast({
+            id: targetId,
+            productName,
+            status: 'saving'
+        })
+
+        // 4. Save to database asynchronously in the background
+        updateDarazAvgPrice(targetId, { 
+            market_price: mPrice, 
+            campaign_price: cPrice,
+            mega_campaign_price: mcPrice
+        }).then(() => {
+            setSaveToast({
+                id: targetId,
+                productName,
+                status: 'saved',
+                message: 'Prices saved successfully'
+            })
+            saveToastTimeoutRef.current = setTimeout(() => {
+                setSaveToast(null)
+            }, 2500)
+        }).catch((error: any) => {
+            console.error('Failed to save prices:', error)
+            setSaveToast({
+                id: targetId,
+                productName,
+                status: 'error',
+                message: error?.message || 'Failed to save prices'
+            })
+            saveToastTimeoutRef.current = setTimeout(() => {
+                setSaveToast(null)
+            }, 4000)
+        })
     }
 
     const allSellerAccounts = Array.from(new Set(data.flatMap(d => d.seller_accounts || []))).filter(Boolean).sort()
@@ -1559,6 +1673,7 @@ export default function DarazAverageSalesPricePage() {
                                 if (mrpVal != null) {
                                     if (item.market_price != null && item.market_price > mrpVal) mrpViolations.push('Daraz')
                                     if (item.campaign_price != null && item.campaign_price > mrpVal) mrpViolations.push('Campaign')
+                                    if (item.mega_campaign_price != null && item.mega_campaign_price > mrpVal) mrpViolations.push('M Campaign')
                                 }
                                 const hasMrpViolation = mrpViolations.length > 0
 
@@ -1614,6 +1729,10 @@ export default function DarazAverageSalesPricePage() {
                                 const campaignProfit = item.campaign_price_profit !== null && item.campaign_price_profit !== undefined
                                     ? item.campaign_price_profit
                                     : calcPriceProfit(item.campaign_price)
+
+                                const megaCampaignProfit = item.mega_campaign_price_profit !== null && item.mega_campaign_price_profit !== undefined
+                                    ? item.mega_campaign_price_profit
+                                    : calcPriceProfit(item.mega_campaign_price)
 
                                 return (
                                     <div
@@ -1824,105 +1943,111 @@ export default function DarazAverageSalesPricePage() {
                                             })}
                                         </div>
 
-                                        {/* ─── 4. Regular Price ─── */}
-                                        <div className="flex flex-col items-center justify-center gap-1.5 w-[115px] shrink-0 border-l border-[#ECEEF3] pl-5 text-center">
-                                            <span className="text-[11px] font-semibold uppercase tracking-[0.8px] text-[#9CA3AF]">REGULAR</span>
-                                            <span className="inline-flex items-center bg-[#DBEAFE] text-[#2563EB] text-[11px] font-bold px-[8px] py-[2px] rounded-full">
-                                                {regularPct}%
-                                            </span>
-                                            <span className="text-[20px] font-bold text-[#2563EB] leading-tight">
-                                                Rs.{regPrice.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                            </span>
-                                            {item.purchasing_price > 0 && regPrice > 0 && (() => {
-                                                const marginVal = ((regPrice - item.purchasing_price) / regPrice) * 100
-                                                const meterColor = marginVal > 25 ? '#16A34A' : marginVal > 15 ? '#EA580C' : '#DC2626'
-                                                const meterWidth = Math.min(100, Math.max(4, marginVal * 2))
-                                                return (
-                                                    <div className="w-full space-y-0.5 mt-0.5">
-                                                        <div className="h-1.5 bg-[#E5E7EB] rounded-full overflow-hidden">
-                                                            <div className="h-full rounded-full transition-all duration-500" style={{ width: `${meterWidth}%`, backgroundColor: meterColor }} />
-                                                        </div>
-                                                        <span className="text-[11px] font-medium text-[#9CA3AF] block">Margin {marginVal.toFixed(0)}%</span>
-                                                    </div>
-                                                )
-                                            })()}
-                                        </div>
-
-                                        {/* ─── 5. Marketplace Prices ─── */}
-                                        <div className="flex flex-col justify-center gap-2 w-[245px] shrink-0 border-l border-[#ECEEF3] pl-5">
-                                            {/* Website */}
-                                            <div className="flex items-center justify-between gap-1">
-                                                <div className="flex items-center gap-1">
-                                                    <button
-                                                        onClick={() => handleToggleLock(item.product_id, !!item.is_price_locked)}
-                                                        disabled={togglingLockId === item.product_id}
-                                                        className="shrink-0 focus:outline-none"
-                                                        title={item.is_price_locked ? 'Unlock Website Price' : 'Lock Website Price'}
-                                                    >
-                                                        {togglingLockId === item.product_id ? (
-                                                            <Loader2 size={11} className="animate-spin text-[#2563EB]" />
-                                                        ) : item.is_price_locked ? (
-                                                            <Lock size={11} className="text-[#DC2626]" />
-                                                        ) : (
-                                                            <Unlock size={11} className="text-[#9CA3AF] hover:text-[#111827] transition-colors" />
-                                                        )}
-                                                    </button>
-                                                    <span className="text-[11px] font-semibold text-[#6B7280]">🌐 Website</span>
+                                        {/* ─── 4. Regular Price & Website Price ─── */}
+                                        <div className="flex flex-col justify-center gap-1.5 w-[140px] shrink-0 border-l border-[#ECEEF3] pl-4 pr-1">
+                                            {/* Regular Price */}
+                                            <div className="flex flex-col gap-0.5">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[10.5px] font-bold uppercase tracking-[0.8px] text-[#9CA3AF]">REGULAR</span>
+                                                    <span className="inline-flex items-center bg-[#DBEAFE] text-[#2563EB] text-[10px] font-bold px-[6px] py-[1px] rounded-full">
+                                                        {regularPct}%
+                                                    </span>
                                                 </div>
-                                                <span className="text-[14.5px] font-semibold text-[#111827]">
-                                                    {item.website_special_price || item.website_regular_price ? `Rs.${(item.website_special_price || item.website_regular_price)!.toLocaleString()}` : '—'}
+                                                <span className="text-[16px] font-bold text-[#2563EB] leading-tight">
+                                                    Rs.{regPrice.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                                 </span>
                                             </div>
 
-                                            {/* Daraz */}
+                                            <div className="border-t border-[#F3F4F6] w-full" />
+
+                                            {/* Website Price */}
+                                            <div className="flex flex-col gap-0.5">
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-1">
+                                                        <button
+                                                            onClick={() => handleToggleLock(item.product_id, !!item.is_price_locked)}
+                                                            disabled={togglingLockId === item.product_id}
+                                                            className="shrink-0 focus:outline-none cursor-pointer"
+                                                            title={item.is_price_locked ? 'Unlock Website Price' : 'Lock Website Price'}
+                                                        >
+                                                            {togglingLockId === item.product_id ? (
+                                                                <Loader2 size={11} className="animate-spin text-[#2563EB]" />
+                                                            ) : item.is_price_locked ? (
+                                                                <Lock size={11} className="text-[#DC2626]" />
+                                                            ) : (
+                                                                <Unlock size={11} className="text-[#9CA3AF] hover:text-[#111827] transition-colors" />
+                                                            )}
+                                                        </button>
+                                                        <span className="text-[10.5px] font-semibold text-[#6B7280]">🌐 Website</span>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => handlePushToWebsiteSingle(item)}
+                                                        className="p-1 hover:bg-teal-50 rounded text-gray-400 hover:text-teal-600 transition-colors cursor-pointer"
+                                                        title="Edit Website Price"
+                                                    >
+                                                        <Edit2 size={12} className="text-teal-600" />
+                                                    </button>
+                                                </div>
+                                                <span className="text-[14px] font-semibold text-[#111827]">
+                                                    {item.website_special_price || item.website_regular_price ? `Rs.${(item.website_special_price || item.website_regular_price)!.toLocaleString()}` : '—'}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* ─── 5. Marketplace Prices (Daraz, Campaign, M Campaign) ─── */}
+                                        <div className="flex flex-col justify-center gap-1.5 w-[240px] shrink-0 border-l border-[#ECEEF3] pl-4 pr-1">
+                                            {/* Daraz (Top) */}
                                             <div className="flex items-center justify-between gap-1">
                                                 <span className="text-[11px] font-semibold text-[#6B7280]">🛒 Daraz</span>
-                                                <div className="flex items-center gap-2">
-                                                    {editingId === item.product_id ? (
-                                                        <input
-                                                            type="number"
-                                                            value={editMarketPrice}
-                                                            onChange={(e) => setEditMarketPrice(e.target.value)}
-                                                            className="w-[75px] px-1.5 py-0.5 text-right text-xs border border-[#2563EB] rounded-lg focus:outline-none focus:ring-1 focus:ring-[#2563EB]"
-                                                            autoFocus
-                                                        />
-                                                    ) : item.market_price != null ? (
-                                                        <span className={`text-[14.5px] font-semibold ${(mrpVal != null && item.market_price > mrpVal) ? 'text-[#DC2626]' : 'text-[#111827]'}`}>
+                                                <div className="flex items-center gap-1.5">
+                                                    {item.market_price != null ? (
+                                                        <span className={`text-[14px] font-semibold ${(mrpVal != null && item.market_price > mrpVal) ? 'text-[#DC2626]' : 'text-[#111827]'}`}>
                                                             Rs.{item.market_price.toLocaleString()}
                                                         </span>
                                                     ) : (
-                                                        <span className="text-[14.5px] font-semibold text-[#9CA3AF]">—</span>
+                                                        <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
                                                     )}
                                                     {darazProfit !== null && (
-                                                        <span className={`text-[11.5px] font-bold ${darazProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
-                                                            {darazProfit >= 0 ? '+' : ''}Rs.{darazProfit.toFixed(2)}
+                                                        <span className={`text-[11px] font-bold ${darazProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                            {darazProfit >= 0 ? '+' : ''}Rs.{darazProfit.toFixed(1)}
                                                         </span>
                                                     )}
                                                 </div>
                                             </div>
 
-                                            {/* Campaign */}
+                                            {/* Campaign (Middle) */}
                                             <div className="flex items-center justify-between gap-1">
                                                 <span className="text-[11px] font-semibold text-[#6B7280]">🏷 Campaign</span>
-                                                <div className="flex items-center gap-2">
-                                                    {editingId === item.product_id ? (
-                                                        <input
-                                                            type="number"
-                                                            value={editCampaignPrice}
-                                                            onChange={(e) => setEditCampaignPrice(e.target.value)}
-                                                            onKeyDown={(e) => { if (e.key === 'Enter') savePrices(item.product_id) }}
-                                                            className="w-[75px] px-1.5 py-0.5 text-right text-xs border border-[#6C4CF1] rounded-lg focus:outline-none focus:ring-1 focus:ring-[#6C4CF1]"
-                                                        />
-                                                    ) : item.campaign_price != null ? (
-                                                        <span className={`text-[14.5px] font-semibold ${(mrpVal != null && item.campaign_price > mrpVal) ? 'text-[#DC2626]' : 'text-[#111827]'}`}>
+                                                <div className="flex items-center gap-1.5">
+                                                    {item.campaign_price != null ? (
+                                                        <span className={`text-[14px] font-semibold ${(mrpVal != null && item.campaign_price > mrpVal) ? 'text-[#DC2626]' : 'text-[#111827]'}`}>
                                                             Rs.{item.campaign_price.toLocaleString()}
                                                         </span>
                                                     ) : (
-                                                        <span className="text-[14.5px] font-semibold text-[#9CA3AF]">—</span>
+                                                        <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
                                                     )}
                                                     {campaignProfit !== null && (
-                                                        <span className={`text-[11.5px] font-bold ${campaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
-                                                            {campaignProfit >= 0 ? '+' : ''}Rs.{campaignProfit.toFixed(2)}
+                                                        <span className={`text-[11px] font-bold ${campaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                            {campaignProfit >= 0 ? '+' : ''}Rs.{campaignProfit.toFixed(1)}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* M Campaign (Mega Campaign - Bottom) */}
+                                            <div className="flex items-center justify-between gap-1">
+                                                <span className="text-[11px] font-semibold text-[#E11D48]" title="Mega Campaign">⚡ M Campaign</span>
+                                                <div className="flex items-center gap-1.5">
+                                                    {item.mega_campaign_price != null ? (
+                                                        <span className={`text-[14px] font-semibold ${(mrpVal != null && item.mega_campaign_price > mrpVal) ? 'text-[#DC2626]' : 'text-[#111827]'}`}>
+                                                            Rs.{item.mega_campaign_price.toLocaleString()}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
+                                                    )}
+                                                    {megaCampaignProfit !== null && (
+                                                        <span className={`text-[11px] font-bold ${megaCampaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                            {megaCampaignProfit >= 0 ? '+' : ''}Rs.{megaCampaignProfit.toFixed(1)}
                                                         </span>
                                                     )}
                                                 </div>
@@ -1931,35 +2056,14 @@ export default function DarazAverageSalesPricePage() {
 
                                         {/* ─── 6. Action Buttons ─── */}
                                         <div className="flex flex-col items-center justify-center gap-2 w-[50px] shrink-0 border-l border-[#ECEEF3] pl-5">
-                                            {editingId === item.product_id ? (
-                                                <>
-                                                    <button
-                                                        onClick={() => savePrices(item.product_id)}
-                                                        disabled={isSaving}
-                                                        className="w-[36px] h-[36px] flex items-center justify-center rounded-[10px] bg-[#DCFCE7] text-[#16A34A] shadow-sm"
-                                                        title="Save Prices"
-                                                    >
-                                                        {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                                                    </button>
-                                                    <button
-                                                        onClick={cancelEditing}
-                                                        disabled={isSaving}
-                                                        className="w-[36px] h-[36px] flex items-center justify-center rounded-[10px] bg-[#FEE2E2] text-[#DC2626] shadow-sm"
-                                                        title="Cancel"
-                                                    >
-                                                        <X size={16} />
-                                                    </button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <button
-                                                        onClick={() => startEditing(item)}
-                                                        className="w-[36px] h-[36px] flex items-center justify-center rounded-[10px] text-[#6B7280] hover:text-[#111827] hover:bg-[#F3F4F6] transition-colors"
-                                                        title="Edit Prices"
-                                                    >
-                                                        <Edit2 size={16} />
-                                                    </button>
-                                                    <div className="relative inline-block">
+                                            <button
+                                                onClick={() => openEditPriceModal(item)}
+                                                className="w-[36px] h-[36px] flex items-center justify-center rounded-[10px] text-[#6B7280] hover:text-[#111827] hover:bg-[#F3F4F6] transition-colors cursor-pointer"
+                                                title="Edit Daraz, Campaign & M Campaign Prices"
+                                            >
+                                                <Edit2 size={16} />
+                                            </button>
+                                            <div className="relative inline-block">
                                                         <button
                                                             onClick={() => setActiveSyncMenuProductId(activeSyncMenuProductId === item.product_id ? null : item.product_id)}
                                                             disabled={pushingId === item.product_id || syncingLiveProductId === item.product_id}
@@ -2008,8 +2112,6 @@ export default function DarazAverageSalesPricePage() {
                                                     >
                                                         <AlertTriangle size={16} />
                                                     </button>
-                                                </>
-                                            )}
                                         </div>
 
                                         {/* ─── 7. Competitor Compartment ─── */}
@@ -2162,6 +2264,27 @@ export default function DarazAverageSalesPricePage() {
                             {selectedProductIds.size}
                         </span>
                         <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 whitespace-nowrap">Selected</span>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const allPageSelected = paginatedData.length > 0 && paginatedData.every(d => selectedProductIds.has(d.product_id))
+                                setSelectedProductIds(prev => {
+                                    const next = new Set(prev)
+                                    if (allPageSelected) {
+                                        paginatedData.forEach(d => next.delete(d.product_id))
+                                    } else {
+                                        paginatedData.forEach(d => next.add(d.product_id))
+                                    }
+                                    return next
+                                })
+                            }}
+                            className="ml-1 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-lg border border-indigo-200 dark:border-indigo-800 transition-colors whitespace-nowrap cursor-pointer shadow-sm"
+                            title="Select all products on this page"
+                        >
+                            {paginatedData.length > 0 && paginatedData.every(d => selectedProductIds.has(d.product_id))
+                                ? 'Deselect Page'
+                                : `Select All on Page (${paginatedData.length})`}
+                        </button>
                     </div>
 
                     <div className="flex items-center gap-3 border-r border-gray-200 dark:border-zinc-800 pr-3 pl-1">
@@ -2474,6 +2597,285 @@ export default function DarazAverageSalesPricePage() {
                     </Card>
                 </div>
             )}
+
+            {/* Top Floating Save Status Indicator (Shows saving spinner and saved confirmation) */}
+            {saveToast && (
+                <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[300] pointer-events-none transition-all duration-150 animate-in slide-in-from-top-3">
+                    {saveToast.status === 'saving' && (
+                        <div className="flex items-center gap-2.5 px-4 py-2 bg-slate-900/90 text-white rounded-full shadow-2xl backdrop-blur-md border border-slate-700/60 text-xs font-semibold">
+                            <Loader2 size={15} className="animate-spin text-blue-400 shrink-0" />
+                            <span>
+                                Saving prices for <span className="text-blue-300 font-bold max-w-[200px] inline-block truncate align-bottom">{saveToast.productName}</span>...
+                            </span>
+                        </div>
+                    )}
+                    {saveToast.status === 'saved' && (
+                        <div className="flex items-center gap-2 px-4 py-2 bg-emerald-600/95 text-white rounded-full shadow-2xl backdrop-blur-md border border-emerald-500/60 text-xs font-semibold">
+                            <CheckCircle2 size={16} className="text-white shrink-0" />
+                            <span>
+                                Prices saved for <span className="font-bold max-w-[200px] inline-block truncate align-bottom">{saveToast.productName}</span>
+                            </span>
+                        </div>
+                    )}
+                    {saveToast.status === 'error' && (
+                        <div className="flex items-center gap-2 px-4 py-2 bg-rose-600/95 text-white rounded-full shadow-2xl backdrop-blur-md border border-rose-500/60 text-xs font-semibold">
+                            <AlertTriangle size={16} className="text-white shrink-0" />
+                            <span>{saveToast.message || 'Failed to save prices'}</span>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Edit Marketplace Prices Modal (Daraz, Campaign, M. Campaign) */}
+            {editPriceModalProduct && (() => {
+                const item = editPriceModalProduct
+                const pDaraz = modalMarketPrice.trim() !== '' ? parseFloat(modalMarketPrice) : NaN
+                const pCamp = modalCampaignPrice.trim() !== '' ? parseFloat(modalCampaignPrice) : NaN
+                const pMega = modalMegaCampaignPrice.trim() !== '' ? parseFloat(modalMegaCampaignPrice) : NaN
+
+                const commFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                const purchasing = item.purchasing_price || 0
+
+                // Profit calculations
+                const darazProfit = (!isNaN(pDaraz) && pDaraz > 0) ? (pDaraz - (pDaraz * commFactor) - purchasing) : null
+                const campProfit = (!isNaN(pCamp) && pCamp > 0) ? (pCamp - (pCamp * commFactor) - purchasing) : null
+                const megaProfit = (!isNaN(pMega) && pMega > 0) ? (pMega - (pMega * commFactor) - purchasing) : null
+
+                // Campaign vs Daraz Difference
+                const hasCampVsDaraz = !isNaN(pDaraz) && pDaraz > 0 && !isNaN(pCamp) && pCamp > 0
+                const campVsDarazDiff = hasCampVsDaraz ? (pCamp - pDaraz) : null
+                const campVsDarazPct = hasCampVsDaraz ? ((pCamp - pDaraz) / pDaraz) * 100 : null
+
+                // M. Campaign vs Daraz Difference
+                const hasMegaVsDaraz = !isNaN(pDaraz) && pDaraz > 0 && !isNaN(pMega) && pMega > 0
+                const megaVsDarazDiff = hasMegaVsDaraz ? (pMega - pDaraz) : null
+                const megaVsDarazPct = hasMegaVsDaraz ? ((pMega - pDaraz) / pDaraz) * 100 : null
+
+                // M. Campaign vs Campaign Difference
+                const hasMegaVsCamp = !isNaN(pCamp) && pCamp > 0 && !isNaN(pMega) && pMega > 0
+                const megaVsCampDiff = hasMegaVsCamp ? (pMega - pCamp) : null
+                const megaVsCampPct = hasMegaVsCamp ? ((pMega - pCamp) / pCamp) * 100 : null
+
+                return (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4 animate-in fade-in duration-75">
+                        <Card className="w-full max-w-lg bg-white dark:bg-zinc-900 shadow-2xl border border-gray-100 dark:border-zinc-800 rounded-2xl overflow-hidden animate-in zoom-in-98 duration-75">
+                            {/* Header */}
+                            <div className="px-6 py-4 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between bg-gradient-to-r from-blue-50/60 via-purple-50/40 to-pink-50/40 dark:from-zinc-800/60 dark:to-zinc-800/30">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/20">
+                                        <Edit2 size={18} />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                                            Edit Marketplace Prices
+                                        </h2>
+                                        <p className="text-xs text-gray-500 truncate max-w-sm mt-0.5" title={item.product_name}>
+                                            {item.product_name}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setEditPriceModalProduct(null)}
+                                    className="p-1.5 hover:bg-gray-200/80 dark:hover:bg-zinc-800 rounded-full transition-colors text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            {/* Reference Stats Bar */}
+                            <div className="px-6 py-3 bg-gray-50/70 dark:bg-zinc-800/40 border-b border-gray-100 dark:border-zinc-800 grid grid-cols-3 gap-2 text-center text-xs">
+                                <div className="bg-white dark:bg-zinc-900 p-2 rounded-lg border border-gray-100 dark:border-zinc-800">
+                                    <span className="text-[10px] uppercase font-bold text-gray-400 block">Purchasing</span>
+                                    <span className="font-bold text-gray-800 dark:text-gray-200">
+                                        Rs.{item.purchasing_price?.toLocaleString() || '—'}
+                                    </span>
+                                </div>
+                                <div className="bg-white dark:bg-zinc-900 p-2 rounded-lg border border-gray-100 dark:border-zinc-800">
+                                    <span className="text-[10px] uppercase font-bold text-gray-400 block">Commission</span>
+                                    <span className="font-bold text-gray-800 dark:text-gray-200">
+                                        {item.commission_percent != null ? `${item.commission_percent}%` : '25%'}
+                                    </span>
+                                </div>
+                                <div className="bg-white dark:bg-zinc-900 p-2 rounded-lg border border-gray-100 dark:border-zinc-800">
+                                    <span className="text-[10px] uppercase font-bold text-gray-400 block">Breakeven</span>
+                                    <span className="font-bold text-gray-800 dark:text-gray-200">
+                                        Rs.{item.breakeven_price ? item.breakeven_price.toFixed(1) : '—'}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Body Form */}
+                            <div className="p-6 space-y-4">
+                                {/* 1. Daraz Regular Price */}
+                                <div className="p-3.5 bg-blue-50/40 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/40 rounded-xl space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-bold text-blue-950 dark:text-blue-200 flex items-center gap-1.5">
+                                            <span>🛒 Daraz Price</span>
+                                            <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 px-1.5 py-0.2 rounded">Regular</span>
+                                        </label>
+                                        {darazProfit !== null && (
+                                            <span className={`text-xs font-bold ${darazProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                                Profit: {darazProfit >= 0 ? '+' : ''}Rs.{darazProfit.toFixed(1)}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-semibold">Rs.</span>
+                                        <input
+                                            type="number"
+                                            autoFocus
+                                            value={modalMarketPrice}
+                                            onChange={(e) => setModalMarketPrice(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleSaveModalPrices() }}
+                                            placeholder="Enter regular Daraz price"
+                                            className="w-full pl-9 pr-3 py-2 text-sm font-semibold text-gray-900 dark:text-gray-100 bg-white dark:bg-zinc-900 border border-blue-200 dark:border-blue-800 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* 2. Campaign Price */}
+                                <div className="p-3.5 bg-purple-50/40 dark:bg-purple-950/20 border border-purple-100 dark:border-purple-900/40 rounded-xl space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-bold text-purple-950 dark:text-purple-200 flex items-center gap-1.5">
+                                            <span>🏷 Campaign Price</span>
+                                            <span className="text-[10px] font-semibold text-purple-600 dark:text-purple-400 bg-purple-100 dark:bg-purple-900/50 px-1.5 py-0.2 rounded">Campaign</span>
+                                        </label>
+                                        {campProfit !== null && (
+                                            <span className={`text-xs font-bold ${campProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                                Profit: {campProfit >= 0 ? '+' : ''}Rs.{campProfit.toFixed(1)}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-semibold">Rs.</span>
+                                        <input
+                                            type="number"
+                                            value={modalCampaignPrice}
+                                            onChange={(e) => setModalCampaignPrice(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleSaveModalPrices() }}
+                                            placeholder="Enter campaign price"
+                                            className="w-full pl-9 pr-3 py-2 text-sm font-semibold text-gray-900 dark:text-gray-100 bg-white dark:bg-zinc-900 border border-purple-200 dark:border-purple-800 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all shadow-sm"
+                                        />
+                                    </div>
+
+                                    {/* Campaign Difference vs Daraz */}
+                                    {hasCampVsDaraz && campVsDarazDiff !== null && campVsDarazPct !== null && (
+                                        <div className="flex items-center justify-between text-[11px] pt-1 border-t border-purple-100/70 dark:border-purple-900/30">
+                                            <span className="text-gray-500 dark:text-gray-400 font-medium">Difference vs Daraz:</span>
+                                            <span className={`font-bold px-2.5 py-0.5 rounded-full ${
+                                                campVsDarazDiff < 0 
+                                                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                                    : campVsDarazDiff > 0
+                                                        ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+                                                        : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-gray-400'
+                                            }`}>
+                                                {campVsDarazDiff < 0 ? '↓ ' : campVsDarazDiff > 0 ? '↑ +' : ''}
+                                                {Math.abs(campVsDarazPct).toFixed(1)}% vs Daraz ({campVsDarazDiff > 0 ? '+' : ''}Rs.{campVsDarazDiff.toLocaleString()})
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 3. M Campaign (Mega Campaign) Price */}
+                                <div className="p-3.5 bg-rose-50/40 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/40 rounded-xl space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-bold text-rose-950 dark:text-rose-200 flex items-center gap-1.5">
+                                            <span>⚡ M. Campaign Price</span>
+                                            <span className="text-[10px] font-semibold text-rose-600 dark:text-rose-400 bg-rose-100 dark:bg-rose-900/50 px-1.5 py-0.2 rounded">Mega Campaign</span>
+                                        </label>
+                                        {megaProfit !== null && (
+                                            <span className={`text-xs font-bold ${megaProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                                Profit: {megaProfit >= 0 ? '+' : ''}Rs.{megaProfit.toFixed(1)}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs font-semibold">Rs.</span>
+                                        <input
+                                            type="number"
+                                            value={modalMegaCampaignPrice}
+                                            onChange={(e) => setModalMegaCampaignPrice(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleSaveModalPrices() }}
+                                            placeholder="Enter mega campaign price"
+                                            className="w-full pl-9 pr-3 py-2 text-sm font-semibold text-gray-900 dark:text-gray-100 bg-white dark:bg-zinc-900 border border-rose-200 dark:border-rose-800 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition-all shadow-sm"
+                                        />
+                                    </div>
+
+                                    {/* M Campaign Differences: vs Daraz and vs Campaign */}
+                                    {(hasMegaVsDaraz || hasMegaVsCamp) && (
+                                        <div className="space-y-1.5 pt-1.5 border-t border-rose-100/70 dark:border-rose-900/30 text-[11px]">
+                                            {hasMegaVsDaraz && megaVsDarazDiff !== null && megaVsDarazPct !== null && (
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-gray-500 dark:text-gray-400 font-medium">Difference vs Daraz:</span>
+                                                    <span className={`font-bold px-2.5 py-0.5 rounded-full ${
+                                                        megaVsDarazDiff < 0 
+                                                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                                            : megaVsDarazDiff > 0
+                                                                ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+                                                                : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-gray-400'
+                                                    }`}>
+                                                        {megaVsDarazDiff < 0 ? '↓ ' : megaVsDarazDiff > 0 ? '↑ +' : ''}
+                                                        {Math.abs(megaVsDarazPct).toFixed(1)}% vs Daraz ({megaVsDarazDiff > 0 ? '+' : ''}Rs.{megaVsDarazDiff.toLocaleString()})
+                                                    </span>
+                                                </div>
+                                            )}
+                                            {hasMegaVsCamp && megaVsCampDiff !== null && megaVsCampPct !== null && (
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-gray-500 dark:text-gray-400 font-medium">Difference vs Campaign:</span>
+                                                    <span className={`font-bold px-2.5 py-0.5 rounded-full ${
+                                                        megaVsCampDiff < 0 
+                                                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300'
+                                                            : megaVsCampDiff > 0
+                                                                ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+                                                                : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-gray-400'
+                                                    }`}>
+                                                        {megaVsCampDiff < 0 ? '↓ ' : megaVsCampDiff > 0 ? '↑ +' : ''}
+                                                        {Math.abs(megaVsCampPct).toFixed(1)}% vs Campaign ({megaVsCampDiff > 0 ? '+' : ''}Rs.{megaVsCampDiff.toLocaleString()})
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Modal Footer */}
+                            <div className="px-6 py-4 bg-gray-50 dark:bg-zinc-800/50 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between">
+                                <span className="text-[11px] text-gray-400 hidden sm:inline-flex items-center gap-1">
+                                    Press <kbd className="px-1.5 py-0.5 bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded text-gray-700 dark:text-gray-300 font-mono text-[10px] shadow-2xs">Enter ↵</kbd> to save & close
+                                </span>
+                                <div className="flex items-center gap-2 ml-auto">
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setEditPriceModalProduct(null)}
+                                        disabled={isSavingModalPrice}
+                                        className="border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800 text-xs h-9"
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        onClick={handleSaveModalPrices}
+                                        disabled={isSavingModalPrice}
+                                        className="bg-[#16A34A] hover:bg-[#15803D] text-white font-semibold text-xs h-9 px-4 shadow-sm flex items-center gap-1.5 cursor-pointer"
+                                    >
+                                        {isSavingModalPrice ? (
+                                            <>
+                                                <Loader2 size={14} className="animate-spin" />
+                                                Saving...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Check size={14} />
+                                                Save Prices
+                                            </>
+                                        )}
+                                    </Button>
+                                </div>
+                            </div>
+                        </Card>
+                    </div>
+                )
+            })()}
 
             {/* Push single product selection modal */}
             {pushSelectProduct && (

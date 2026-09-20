@@ -45,6 +45,8 @@ export interface DarazAvgPriceItem {
     market_price_profit: number | null // market_price - (market_price * commission) - purchasing_price
     campaign_price: number | null
     campaign_price_profit: number | null
+    mega_campaign_price?: number | null
+    mega_campaign_price_profit?: number | null
     updated_at: string | null
     live_prices?: Record<string, LivePriceDetail>
     website_regular_price?: number | null
@@ -466,9 +468,11 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         const editableStats = pricesMap.get(p.product_id)
         const marketPrice = editableStats?.market_price || null
         const campaignPrice = editableStats?.campaign_price || null
+        const megaCampaignPrice = editableStats?.mega_campaign_price || null
 
         const marketPriceProfit = marketPrice ? (marketPrice - (marketPrice * commissionPercent) - purchasingPrice) : null
         const campaignPriceProfit = campaignPrice ? (campaignPrice - (campaignPrice * commissionPercent) - purchasingPrice) : null
+        const megaCampaignPriceProfit = megaCampaignPrice ? (megaCampaignPrice - (megaCampaignPrice * commissionPercent) - purchasingPrice) : null
 
         // Live Prices Mapping across 4 slots
         const productLivePrices: Record<string, LivePriceDetail> = {}
@@ -549,6 +553,8 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
             market_price_profit: marketPriceProfit,
             campaign_price: campaignPrice,
             campaign_price_profit: campaignPriceProfit,
+            mega_campaign_price: megaCampaignPrice,
+            mega_campaign_price_profit: megaCampaignPriceProfit,
             updated_at: editableStats?.updated_at || null,
             live_prices: productLivePrices,
             website_regular_price: websitePrices.regular_price,
@@ -586,7 +592,7 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
     return result
 }
 
-export async function updateDarazAvgPrice(productId: string, data: { market_price?: number | null, campaign_price?: number | null }) {
+export async function updateDarazAvgPrice(productId: string, data: { market_price?: number | null, campaign_price?: number | null, mega_campaign_price?: number | null }) {
     const supabase = await createClient()
 
     // Assuming daraz_avg_prices exists. If not, this triggers an error you'll know to run the SQL migration.
@@ -618,7 +624,7 @@ export async function updateDarazAvgPrice(productId: string, data: { market_pric
     return { success: true }
 }
 
-export async function bulkUpdateDarazAvgPrice(updates: { product_id: string, market_price?: number | null, campaign_price?: number | null }[]) {
+export async function bulkUpdateDarazAvgPrice(updates: { product_id: string, market_price?: number | null, campaign_price?: number | null, mega_campaign_price?: number | null }[]) {
     const supabase = await createClient()
 
     if (!updates || updates.length === 0) return { success: true }
@@ -629,6 +635,7 @@ export async function bulkUpdateDarazAvgPrice(updates: { product_id: string, mar
         const row: any = { product_id: update.product_id }
         if (update.market_price !== undefined) row.market_price = update.market_price
         if (update.campaign_price !== undefined) row.campaign_price = update.campaign_price
+        if (update.mega_campaign_price !== undefined) row.mega_campaign_price = update.mega_campaign_price
         return row
     })
 
