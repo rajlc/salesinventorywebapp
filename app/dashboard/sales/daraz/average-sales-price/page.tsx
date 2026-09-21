@@ -1168,7 +1168,7 @@ export default function DarazAverageSalesPricePage() {
                     id: targetId,
                     productName,
                     status: 'error',
-                    message: res.message || 'Failed to lock final stock'
+                    message: (res as any)?.message || 'Failed to lock final stock'
                 })
                 saveToastTimeoutRef.current = setTimeout(() => {
                     setSaveToast(null)
@@ -1235,7 +1235,7 @@ export default function DarazAverageSalesPricePage() {
                     id: targetId,
                     productName,
                     status: 'error',
-                    message: res.message || 'Failed to release final stock'
+                    message: (res as any)?.message || 'Failed to release final stock'
                 })
                 saveToastTimeoutRef.current = setTimeout(() => {
                     setSaveToast(null)

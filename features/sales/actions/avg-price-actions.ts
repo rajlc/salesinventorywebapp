@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath, revalidateTag, unstable_cache } from 'next/cache'
+import { revalidatePath, unstable_cache } from 'next/cache'
 import { getGoogleSheetsClient } from '@/lib/google-sheets'
 import axios from 'axios'
 import crypto from 'crypto'
@@ -240,7 +240,6 @@ export async function getDarazAvgPrices(days: number | string = 60, forceFresh: 
 
 export async function revalidateDarazAvgPricesCache() {
     try {
-        revalidateTag('daraz-avg-prices')
         revalidatePath('/dashboard/sales/daraz/average-sales-price')
     } catch (e) {
         // ignore
@@ -654,7 +653,6 @@ export async function updateDarazAvgPrice(productId: string, data: { market_pric
         if (error) throw new Error(error.message)
     }
 
-    try { revalidateTag('daraz-avg-prices') } catch (_) {}
     revalidatePath('/dashboard/sales/daraz/average-sales-price')
     return { success: true }
 }
@@ -1826,15 +1824,14 @@ export async function setProductFinalStock(productId: string, qty: number) {
 
     if (error) throw new Error(error.message)
 
-    try { revalidateTag('daraz-avg-prices') } catch (_) {}
     revalidatePath('/dashboard/sales/daraz/average-sales-price')
-    return { success: true, final_stock_qty: safeQty }
+    return { success: true, final_stock_qty: safeQty, message: 'Final stock locked' }
 }
 
 /**
  * Release / Unlock Final Stock for a product
  */
-export async function releaseProductFinalStock(productId: string) {
+export async function releaseProductFinalStock(productId: string): Promise<{ success: boolean; message?: string }> {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) throw new Error('Not authenticated')
@@ -1851,9 +1848,8 @@ export async function releaseProductFinalStock(productId: string) {
 
     if (error) throw new Error(error.message)
 
-    try { revalidateTag('daraz-avg-prices') } catch (_) {}
     revalidatePath('/dashboard/sales/daraz/average-sales-price')
-    return { success: true }
+    return { success: true, message: 'Final stock released' }
 }
 
 /**
