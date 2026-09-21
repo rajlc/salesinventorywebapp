@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { revalidatePath, revalidateTag } from 'next/cache'
+import { revalidatePath } from 'next/cache'
 
 export async function POST(req: Request) {
     try {
@@ -86,7 +86,6 @@ export async function POST(req: Request) {
             }
         }
 
-        try { revalidateTag('daraz-avg-prices') } catch (_) {}
         revalidatePath('/dashboard/sales/daraz/average-sales-price')
 
         return NextResponse.json({
