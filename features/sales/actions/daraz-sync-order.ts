@@ -315,6 +315,14 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
             } catch (autoPlanError: any) {
                 console.error(`[DarazSync] Auto-purchase-plan FAILED for order ${savedOrder.id}:`, autoPlanError.message)
             }
+
+            // Trigger Final Stock Check & Decrement (Auto Multi-Account Stock Out)
+            try {
+                const { checkAndProcessFinalStockDecrement } = await import('./avg-price-actions')
+                await checkAndProcessFinalStockDecrement(String(order.order_number), items, supabase)
+            } catch (fsErr: any) {
+                console.error(`[DarazSync] Final stock decrement FAILED for order ${order.order_number}:`, fsErr.message)
+            }
         }
 
         // 6. AUTO-SYNC PROFIT: If delivered, trigger financial sync (fees + costs) after 3 min delay

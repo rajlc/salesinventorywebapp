@@ -39,13 +39,16 @@ export async function getGoogleSheetsClient() {
             credPath = credPath.slice(1, -1);
         }
 
-        if (!credPath) {
-            throw new Error('Missing Google Service Account credentials. Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY (for Vercel), or GOOGLE_APPLICATION_CREDENTIALS (for local).')
+        const candidatePaths: string[] = []
+        if (credPath) {
+            candidatePaths.push(path.resolve(credPath))
+            candidatePaths.push(path.resolve(process.cwd(), credPath))
         }
+        candidatePaths.push(path.join(process.cwd(), 'pro-bliss-430010-m9-c238238bcff4.json'))
 
-        const resolvedPath = path.resolve(credPath)
-        if (!fs.existsSync(resolvedPath)) {
-            throw new Error(`Google credentials file not found at: ${resolvedPath}`)
+        const resolvedPath = candidatePaths.find(p => fs.existsSync(p))
+        if (!resolvedPath) {
+            throw new Error(`Google credentials file not found at: ${candidatePaths[0] || 'pro-bliss-430010-m9-c238238bcff4.json'}`)
         }
 
         const keyFile = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'))

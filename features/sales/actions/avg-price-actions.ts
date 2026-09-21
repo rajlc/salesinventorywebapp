@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath, unstable_cache } from 'next/cache'
+import { revalidatePath, revalidateTag, unstable_cache } from 'next/cache'
 import { getGoogleSheetsClient } from '@/lib/google-sheets'
 import axios from 'axios'
 import crypto from 'crypto'
@@ -63,6 +63,10 @@ export interface DarazAvgPriceItem {
     is_price_locked?: boolean
     is_new_pushed?: boolean
     pushed_at?: string | null
+    is_final_stock_locked?: boolean
+    final_stock_qty?: number | null
+    final_stock_error?: string | null
+    final_stock_locked_at?: string | null
     competitors?: CompetitorItem[]
     weekly_competitor_sold?: number
     has_price_alert?: boolean
@@ -219,11 +223,29 @@ async function fetchAllRows(
 const _getDarazAvgPricesCached = unstable_cache(
     async (days: number | string) => _getDarazAvgPricesInner(days),
     ['daraz-avg-prices'],
-    { revalidate: 90 }
+    { revalidate: 90, tags: ['daraz-avg-prices'] }
 )
 
-export async function getDarazAvgPrices(days: number | string = 60) {
-    return _getDarazAvgPricesCached(days)
+export async function getDarazAvgPrices(days: number | string = 60, forceFresh: boolean = false) {
+    if (forceFresh) {
+        return _getDarazAvgPricesInner(days)
+    }
+    const cached = await _getDarazAvgPricesCached(days)
+    // Safety check: if cached data has items but all have 0 SKUs (e.g. from an earlier migration delay), bypass cache
+    if (cached && cached.length > 0 && !cached.some(item => (item.seller_skus && item.seller_skus.length > 0))) {
+        return _getDarazAvgPricesInner(days)
+    }
+    return cached
+}
+
+export async function revalidateDarazAvgPricesCache() {
+    try {
+        revalidateTag('daraz-avg-prices')
+        revalidatePath('/dashboard/sales/daraz/average-sales-price')
+    } catch (e) {
+        // ignore
+    }
+    return { success: true }
 }
 
 async function _getDarazAvgPricesInner(days: number | string = 60) {
@@ -242,8 +264,16 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         { column: 'created_at', ascending: false }
     ])
 
-    // 4. Fetch products SKUs, priorities, lock flags, push flags concurrently (PAGINATED)
-    const skusPromise = fetchAllRows(supabase, 'products', 'id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at')
+    // 4. Fetch products SKUs, priorities, lock flags, push flags concurrently (PAGINATED with safe fallback)
+    const skusPromise = (async () => {
+        try {
+            const res = await fetchAllRows(supabase, 'products', 'id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at, is_final_stock_locked, final_stock_qty, final_stock_error, final_stock_locked_at')
+            if (res && res.length > 0) return res
+        } catch (err) {
+            console.warn('fetchAllRows with final stock columns failed, falling back to base columns:', err)
+        }
+        return fetchAllRows(supabase, 'products', 'id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at')
+    })()
 
     // 5. Fetch combos concurrently (PAGINATED)
     const combosPromise = fetchAllRows(supabase, 'product_combos', 'parent_product_id, child_product_id, quantity')
@@ -567,6 +597,10 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
             is_price_locked: prodSkus?.is_price_locked || false,
             is_new_pushed: prodSkus?.is_new_pushed || false,
             pushed_at: prodSkus?.pushed_at || null,
+            is_final_stock_locked: prodSkus?.is_final_stock_locked || false,
+            final_stock_qty: prodSkus?.final_stock_qty != null ? prodSkus.final_stock_qty : null,
+            final_stock_error: prodSkus?.final_stock_error || null,
+            final_stock_locked_at: prodSkus?.final_stock_locked_at || null,
             competitors: productCompetitors,
             weekly_competitor_sold: weeklyCompetitorSold,
             has_price_alert: hasPriceAlert
@@ -620,6 +654,7 @@ export async function updateDarazAvgPrice(productId: string, data: { market_pric
         if (error) throw new Error(error.message)
     }
 
+    try { revalidateTag('daraz-avg-prices') } catch (_) {}
     revalidatePath('/dashboard/sales/daraz/average-sales-price')
     return { success: true }
 }
@@ -657,7 +692,7 @@ export async function bulkUpdateDarazAvgPrice(updates: { product_id: string, mar
 }
 
 const SHEET_ID = '1ztKJH0rrE1Od2lXJA2f8AoQ_FQ3fmnpqQietx2ZulZE'
-const RANGE = 'Daraz Avg Price!A:N'
+const RANGE = 'Daraz Avg Price!A:O'
 
 export async function syncDarazAvgPricesGoogleSheets() {
     try {
@@ -677,80 +712,16 @@ export async function syncDarazAvgPricesGoogleSheets() {
         const headerRow = rows[0] || []
         const sheetDataMap = new Map<string, any>()
 
-        // 2. Parse Sheet Data (we assume S.N, Product Name, SKUs, Purchasing, Commission, Breakeven, Regular, Market, Market Profit, Campaign)
-        // Let's enforce reading by Product ID to safely sync back. We must place Product ID in a hidden or explicit column.
-        // We will store Product ID in Column K or just Column A implicitly if we rewrite entirely.
-        // Since the user wants two-way sync, let's write Product ID to the last column.
-
-        // Actually, simplest way for Two-Way sync on entirely derived data where only Market and Campaign are editable:
-        // - App -> Sheet: Overwrite entirely but keep Market/Campaign.
-        // - Sheet -> App: Read Market/Campaign from Sheet matched by Product ID and update DB, THEN overwrite Sheet again with latest everything.
-        // If Sheet has a different Market Price, we read it before overwriting.
-
-        if (rows.length > 1) {
-            // Find columns
-            const idColIdx = headerRow.findIndex((h: string) => h === 'Product ID (DO NOT EDIT)')
-            const marketColIdx = headerRow.findIndex((h: string) => h === 'Market Price')
-            const campaignColIdx = headerRow.findIndex((h: string) => h === 'Campaign Price')
-
-            if (idColIdx !== -1 && marketColIdx !== -1 && campaignColIdx !== -1) {
-                for (let i = 1; i < rows.length; i++) {
-                    const row = rows[i]
-                    const productId = row[idColIdx]
-                    const marketStr = row[marketColIdx]
-                    const campaignStr = row[campaignColIdx]
-
-                    if (productId) {
-                        const marketVal = marketStr ? parseFloat(marketStr.replace(/[^0-9.]/g, '')) : null
-                        const campaignVal = campaignStr ? parseFloat(campaignStr.replace(/[^0-9.]/g, '')) : null
-
-                        sheetDataMap.set(productId, {
-                            market_price: isNaN(marketVal as any) ? null : marketVal,
-                            campaign_price: isNaN(campaignVal as any) ? null : campaignVal
-                        })
-                    }
-                }
-            }
-        }
-
-        // 3. Update DB with Sheet Data (Sheet -> App)
-        const SYNC_COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes priority for Webapp
-        const now = Date.now()
-
-        for (const item of appData) {
-            const sheetItem = sheetDataMap.get(item.product_id)
-            if (sheetItem) {
-                // Heuristic: If we recently updated in the Webapp (within 5 mins), ignore the Sheet for now.
-                // This ensures Webapp has priority for fresh changes.
-                const lastUpdated = item.updated_at ? new Date(item.updated_at).getTime() : 0
-                const isRecentlyUpdatedInApp = (now - lastUpdated) < SYNC_COOLDOWN_MS
-
-                if (isRecentlyUpdatedInApp) {
-                    // console.log(`[SYNC] Priority: Webapp (recently changed) for ${item.product_name}`)
-                    continue
-                }
-
-                const updatedFields: any = {}
-                if (sheetItem.market_price !== null && sheetItem.market_price !== item.market_price) {
-                    updatedFields.market_price = sheetItem.market_price
-                    item.market_price = sheetItem.market_price
-                }
-                if (sheetItem.campaign_price !== null && sheetItem.campaign_price !== item.campaign_price) {
-                    updatedFields.campaign_price = sheetItem.campaign_price
-                    item.campaign_price = sheetItem.campaign_price
-                }
-
-                if (Object.keys(updatedFields).length > 0) {
-                    await updateDarazAvgPrice(item.product_id, updatedFields)
-                }
-            }
-        }
+        // 2. Prepare latest Webapp data to write to Google Sheets (App -> Sheet)
+        // Note: We do NOT overwrite the database from the sheet during 'Sync with Sheets'
+        // 'Sync with Sheets' pushes current webapp prices to the Google Sheet.
+        // To pull from Sheet to Webapp, use 'Sync by Sheet' (pullDarazAvgPricesFromGoogleSheets).
 
         // 4. Overwrite Sheet with latest combined data (App -> Sheet)
         const headers = [
             'S.N', 'Product Name', 'Seller SKU 1', 'Seller SKU 2', 'Seller SKU 3', 'Seller SKU 4',
             'Purchasing Price', 'Commission (%)', 'Breakeven Price', 'Regular Sales Price',
-            'Market Price', 'Market Price Profit', 'Campaign Price', 'Product ID (DO NOT EDIT)'
+            'Market Price', 'Market Price Profit', 'Campaign Price', 'Mega Price', 'Product ID (DO NOT EDIT)'
         ]
 
         const writeValues = [headers]
@@ -769,13 +740,14 @@ export async function syncDarazAvgPricesGoogleSheets() {
                 item.market_price !== null ? String(item.market_price) : '',
                 item.market_price !== null ? (item.market_price - item.breakeven_price).toFixed(2) : '',
                 item.campaign_price !== null ? String(item.campaign_price) : '',
+                item.mega_campaign_price !== null ? String(item.mega_campaign_price) : '',
                 item.product_id
             ])
         })
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SHEET_ID,
-            range: 'Daraz Avg Price!A1:N' + writeValues.length,
+            range: 'Daraz Avg Price!A1:O' + writeValues.length,
             valueInputOption: 'USER_ENTERED',
             requestBody: {
                 values: writeValues
@@ -785,7 +757,7 @@ export async function syncDarazAvgPricesGoogleSheets() {
         // Clear any leftover rows below
         await sheets.spreadsheets.values.clear({
             spreadsheetId: SHEET_ID,
-            range: `Daraz Avg Price!A${writeValues.length + 1}:N1000` // Clear up to row 1000
+            range: `Daraz Avg Price!A${writeValues.length + 1}:O1000` // Clear up to row 1000
         }).catch(() => { })
 
         revalidatePath('/dashboard/sales/daraz/average-sales-price')
@@ -817,6 +789,7 @@ export async function pullDarazAvgPricesFromGoogleSheets() {
             const idColIdx = headerRow.findIndex((h: string) => h === 'Product ID (DO NOT EDIT)')
             const marketColIdx = headerRow.findIndex((h: string) => h === 'Market Price')
             const campaignColIdx = headerRow.findIndex((h: string) => h === 'Campaign Price')
+            const megaColIdx = headerRow.findIndex((h: string) => h === 'Mega Price' || h === 'Mega Campaign Price' || h === 'M Campaign')
 
             if (idColIdx !== -1 && marketColIdx !== -1 && campaignColIdx !== -1) {
                 for (let i = 1; i < rows.length; i++) {
@@ -824,14 +797,17 @@ export async function pullDarazAvgPricesFromGoogleSheets() {
                     const productId = row[idColIdx]
                     const marketStr = row[marketColIdx]
                     const campaignStr = row[campaignColIdx]
+                    const megaStr = megaColIdx !== -1 ? row[megaColIdx] : null
 
                     if (productId) {
                         const marketVal = marketStr ? parseFloat(marketStr.replace(/[^0-9.]/g, '')) : null
                         const campaignVal = campaignStr ? parseFloat(campaignStr.replace(/[^0-9.]/g, '')) : null
+                        const megaVal = megaStr ? parseFloat(megaStr.replace(/[^0-9.]/g, '')) : null
 
                         sheetDataMap.set(productId, {
                             market_price: isNaN(marketVal as any) ? null : marketVal,
-                            campaign_price: isNaN(campaignVal as any) ? null : campaignVal
+                            campaign_price: isNaN(campaignVal as any) ? null : campaignVal,
+                            mega_campaign_price: isNaN(megaVal as any) ? null : megaVal
                         })
                     }
                 }
@@ -848,6 +824,9 @@ export async function pullDarazAvgPricesFromGoogleSheets() {
                 }
                 if (sheetItem.campaign_price !== null && sheetItem.campaign_price !== item.campaign_price) {
                     updatedFields.campaign_price = sheetItem.campaign_price
+                }
+                if (sheetItem.mega_campaign_price !== null && sheetItem.mega_campaign_price !== item.mega_campaign_price) {
+                    updatedFields.mega_campaign_price = sheetItem.mega_campaign_price
                 }
 
                 if (Object.keys(updatedFields).length > 0) {
@@ -1823,6 +1802,269 @@ export async function toggleProductPriceLock(productId: string, isLocked: boolea
 
     revalidatePath('/dashboard/sales/daraz/average-sales-price')
     return { success: true }
+}
+
+/**
+ * Set Final Stock quantity and lock a product
+ */
+export async function setProductFinalStock(productId: string, qty: number) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error('Not authenticated')
+
+    const safeQty = Math.max(0, Math.floor(qty))
+
+    const { error } = await supabase
+        .from('products')
+        .update({
+            is_final_stock_locked: true,
+            final_stock_qty: safeQty,
+            final_stock_error: null,
+            final_stock_locked_at: new Date().toISOString()
+        })
+        .eq('id', productId)
+
+    if (error) throw new Error(error.message)
+
+    try { revalidateTag('daraz-avg-prices') } catch (_) {}
+    revalidatePath('/dashboard/sales/daraz/average-sales-price')
+    return { success: true, final_stock_qty: safeQty }
+}
+
+/**
+ * Release / Unlock Final Stock for a product
+ */
+export async function releaseProductFinalStock(productId: string) {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error('Not authenticated')
+
+    const { error } = await supabase
+        .from('products')
+        .update({
+            is_final_stock_locked: false,
+            final_stock_qty: null,
+            final_stock_error: null,
+            final_stock_locked_at: null
+        })
+        .eq('id', productId)
+
+    if (error) throw new Error(error.message)
+
+    try { revalidateTag('daraz-avg-prices') } catch (_) {}
+    revalidatePath('/dashboard/sales/daraz/average-sales-price')
+    return { success: true }
+}
+
+/**
+ * Automatically Zero Out / Stock Out a product across all connected Daraz seller accounts
+ */
+export async function triggerMultiAccountStockOut(productId: string, supabaseClient?: any) {
+    const supabase = supabaseClient || await createAdminClient()
+
+    try {
+        // 1. Fetch product SKUs
+        const { data: prod, error: prodErr } = await supabase
+            .from('products')
+            .select('id, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+            .eq('id', productId)
+            .single()
+
+        if (prodErr || !prod) {
+            throw new Error(`Product not found: ${productId}`)
+        }
+
+        const skus = [prod.seller_sku1, prod.seller_sku2, prod.seller_sku3, prod.seller_sku4]
+            .filter((s): s is string => Boolean(s && s.trim()))
+
+        if (skus.length === 0) {
+            const msg = 'No seller SKUs configured for this product'
+            await supabase.from('products').update({ final_stock_error: msg }).eq('id', productId)
+            return { success: false, message: msg }
+        }
+
+        // 2. Fetch live listings across all stores for these SKUs
+        const { data: liveList } = await supabase
+            .from('daraz_live_prices')
+            .select('seller_sku, store_id, store_name')
+            .in('seller_sku', skus)
+
+        const updates: Array<{ sku: string; quantity: number; store_id: string }> = []
+        const seen = new Set<string>()
+
+        if (liveList && liveList.length > 0) {
+            for (const lp of liveList) {
+                const key = `${lp.store_id}:${lp.seller_sku}`
+                if (!seen.has(key)) {
+                    seen.add(key)
+                    updates.push({ sku: lp.seller_sku, quantity: 0, store_id: lp.store_id })
+                }
+            }
+        }
+
+        // If no live prices cached yet, query active store tokens and apply to each store
+        if (updates.length === 0) {
+            const { data: tokens } = await supabase
+                .from('daraz_api_tokens')
+                .select('store_id')
+                .eq('app_type', 'order')
+
+            if (tokens) {
+                for (const t of tokens) {
+                    for (const s of skus) {
+                        updates.push({ sku: s, quantity: 0, store_id: t.store_id })
+                    }
+                }
+            }
+        }
+
+        if (updates.length === 0) {
+            const msg = 'No connected Daraz stores or SKUs found to zero out'
+            await supabase.from('products').update({ final_stock_error: msg }).eq('id', productId)
+            return { success: false, message: msg }
+        }
+
+        // 3. Push Quantity 0 to Daraz API across all seller accounts
+        const pushRes = await pushStockToDaraz(productId, updates, supabase)
+
+        if (pushRes.success) {
+            // Clear any previous error on success
+            await supabase
+                .from('products')
+                .update({ 
+                    final_stock_error: null,
+                    final_stock_qty: 0 
+                })
+                .eq('id', productId)
+            
+            console.log(`[FinalStock] Automated Stock Out SUCCESS for product ${prod.product_name} (${productId}): ${pushRes.message}`)
+            return { success: true, message: pushRes.message }
+        } else {
+            // Save exact API error to product
+            const errorMsg = pushRes.message || 'Daraz API rejected stock zero update'
+            await supabase
+                .from('products')
+                .update({ final_stock_error: errorMsg })
+                .eq('id', productId)
+
+            console.error(`[FinalStock] Automated Stock Out FAILED for product ${prod.product_name} (${productId}): ${errorMsg}`)
+            return { success: false, message: errorMsg }
+        }
+    } catch (err: any) {
+        const errorMsg = err.message || 'Unknown error during automated stock out'
+        console.error(`[FinalStock] Exception during automated stock out for product ${productId}:`, err)
+        try {
+            await supabase.from('products').update({ final_stock_error: errorMsg }).eq('id', productId)
+        } catch (_) {}
+        return { success: false, message: errorMsg }
+    }
+}
+
+/**
+ * Check incoming order items and decrement final_stock_qty if locked.
+ * Triggers multi-account Stock Out when reaching 0!
+ */
+export async function checkAndProcessFinalStockDecrement(
+    orderNumber: string,
+    items: Array<{ seller_sku?: string; quantity: number; product_id?: string; seller_account?: string }>,
+    supabaseClient?: any
+) {
+    if (!items || items.length === 0) return
+
+    const supabase = supabaseClient || await createAdminClient()
+
+    try {
+        // Collect all distinct SKUs
+        const skusToSearch = Array.from(new Set(
+            items
+                .map(i => (i.seller_sku || '').trim())
+                .filter(Boolean)
+        ))
+
+        if (skusToSearch.length === 0) return
+
+        // 1. Fetch locked products that match any of these SKUs
+        const { data: lockedProducts, error } = await supabase
+            .from('products')
+            .select('id, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4, is_final_stock_locked, final_stock_qty, final_stock_error')
+            .eq('is_final_stock_locked', true)
+
+        if (error || !lockedProducts || lockedProducts.length === 0) return
+
+        // Map SKU (lowercase) to product
+        const skuToProdMap = new Map<string, any>()
+        for (const p of lockedProducts) {
+            const pSkus = [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4]
+                .filter(Boolean)
+                .map(s => s.toLowerCase().trim())
+            
+            pSkus.forEach(s => skuToProdMap.set(s, p))
+        }
+
+        // Aggregate ordered qty by product_id
+        const productDeltas = new Map<string, { product: any; delta: number; sku: string; seller_account?: string }>()
+
+        for (const item of items) {
+            const skuLower = (item.seller_sku || '').toLowerCase().trim()
+            const matchingProd = skuToProdMap.get(skuLower)
+            if (matchingProd) {
+                const existing = productDeltas.get(matchingProd.id) || { 
+                    product: matchingProd, 
+                    delta: 0, 
+                    sku: item.seller_sku || '',
+                    seller_account: item.seller_account
+                }
+                existing.delta += (item.quantity || 1)
+                productDeltas.set(matchingProd.id, existing)
+            }
+        }
+
+        // Process decrements
+        for (const [prodId, { product, delta, sku, seller_account }] of productDeltas) {
+            const currentQty = product.final_stock_qty ?? 0
+            const newQty = Math.max(0, currentQty - delta)
+
+            console.log(`[FinalStock] Decrementing final stock for ${product.product_name}: ${currentQty} -> ${newQty} (Order ${orderNumber})`)
+
+            // Update product stock
+            await supabase
+                .from('products')
+                .update({
+                    final_stock_qty: newQty
+                })
+                .eq('id', prodId)
+
+            let apiResult = 'Stock decremented'
+            let zeroedOut = false
+
+            // If stock reached 0, trigger automated multi-store stock out!
+            if (newQty === 0) {
+                zeroedOut = true
+                console.log(`[FinalStock] Stock reached 0 for ${product.product_name}! Triggering Daraz Stock Out across all seller accounts...`)
+                const stockOutRes = await triggerMultiAccountStockOut(prodId, supabase)
+                apiResult = stockOutRes.message
+            }
+
+            // Insert audit log (ignore errors if table not created yet)
+            try {
+                await supabase
+                    .from('final_stock_audit_logs')
+                    .insert({
+                        product_id: prodId,
+                        order_number: orderNumber,
+                        seller_sku: sku,
+                        previous_qty: currentQty,
+                        new_qty: newQty,
+                        zeroed_out: zeroedOut,
+                        daraz_api_result: apiResult
+                    })
+            } catch (auditErr) {
+                console.warn('[FinalStock] Could not write audit log:', auditErr)
+            }
+        }
+    } catch (err: any) {
+        console.error('[FinalStock] Error processing final stock decrement:', err)
+    }
 }
 
 

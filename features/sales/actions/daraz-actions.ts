@@ -115,6 +115,14 @@ export async function createDarazOrder(data: CreateDarazOrderData) {
 
         if (itemsError) throw itemsError
 
+        // Trigger Final Stock Check & Decrement
+        try {
+            const { checkAndProcessFinalStockDecrement } = await import('./avg-price-actions')
+            await checkAndProcessFinalStockDecrement(String(data.order_number), items, supabase)
+        } catch (fsErr: any) {
+            console.error('[FinalStock] Decrement FAILED on createDarazOrder:', fsErr.message)
+        }
+
         revalidatePath('/dashboard/sales/daraz')
         return { success: true, order }
     } catch (error: any) {

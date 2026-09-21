@@ -6,7 +6,7 @@ import * as XLSX from 'xlsx'
 import { Search, ChevronLeft, ChevronRight, Edit2, Check, X, Loader2, RefreshCw, AlertTriangle, ArrowLeft, UploadCloud, ArrowDown, Lock, Unlock, FileSpreadsheet, Eye, ExternalLink, Plus, TrendingUp, CheckCircle2 } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { getDarazAvgPrices, updateDarazAvgPrice, bulkUpdateDarazAvgPrice, syncDarazAvgPricesGoogleSheets, pullDarazAvgPricesFromGoogleSheets, syncLiveSellerPrices, pushPriceToDaraz, DarazAvgPriceItem, updateWebsitePricesBulk, syncLiveSellerPricesForProduct, toggleProductPriceLock, autoUpdateWebsitePrices } from '@/features/sales/actions/avg-price-actions'
+import { getDarazAvgPrices, updateDarazAvgPrice, bulkUpdateDarazAvgPrice, syncDarazAvgPricesGoogleSheets, pullDarazAvgPricesFromGoogleSheets, syncLiveSellerPrices, pushPriceToDaraz, DarazAvgPriceItem, updateWebsitePricesBulk, syncLiveSellerPricesForProduct, toggleProductPriceLock, autoUpdateWebsitePrices, setProductFinalStock, releaseProductFinalStock } from '@/features/sales/actions/avg-price-actions'
 import { saveCompetitorLinks, syncAllCompetitorsCron, CompetitorItem } from '@/features/sales/actions/competitor-actions'
 
 const DEFAULT_STORE_THEME: { bg: string; text: string; border: string } = { bg: 'bg-[#F3F4F6]', text: 'text-[#374151]', border: 'border-[#E5E7EB]' }
@@ -24,6 +24,7 @@ export default function DarazAverageSalesPricePage() {
     const [salesDays, setSalesDays] = useState<number | string>(60)
     const [isSyncing, setIsSyncing] = useState(false)
     const [isPulling, setIsPulling] = useState(false)
+    const [confirmSheetAction, setConfirmSheetAction] = useState<'pull' | 'sync' | null>(null)
     const [isSyncingLive, setIsSyncingLive] = useState(false)
     const [pushingId, setPushingId] = useState<string | null>(null)
     const [togglingLockId, setTogglingLockId] = useState<string | null>(null)
@@ -67,7 +68,7 @@ export default function DarazAverageSalesPricePage() {
     const [syncingLiveProductId, setSyncingLiveProductId] = useState<string | null>(null)
 
     const [isUpdatingStock, setIsUpdatingStock] = useState(false)
-    const [stockFilter, setStockFilter] = useState<'all' | 'stock_out' | 'low_stock'>('all')
+    const [stockFilter, setStockFilter] = useState<'all' | 'stock_out' | 'low_stock' | 'final_stock'>('all')
     const [showPriorityOnly, setShowPriorityOnly] = useState<boolean>(false)
     const [filterAccount, setFilterAccount] = useState<string>('')
     const [livePriceFilter, setLivePriceFilter] = useState<'' | 'daraz' | 'website' | 'mrp'>('')
@@ -150,6 +151,11 @@ export default function DarazAverageSalesPricePage() {
     const [modalMegaCampaignPrice, setModalMegaCampaignPrice] = useState<string>('')
     const [isSavingModalPrice, setIsSavingModalPrice] = useState(false)
 
+    // Final Stock (Stock Lock) Modal State
+    const [finalStockModalProduct, setFinalStockModalProduct] = useState<DarazAvgPriceItem | null>(null)
+    const [finalStockInputQty, setFinalStockInputQty] = useState<string>('')
+    const [isSavingFinalStock, setIsSavingFinalStock] = useState(false)
+
     // Top Save Notification State (Processing and Saved status)
     const [saveToast, setSaveToast] = useState<{ id: string; productName: string; status: 'saving' | 'saved' | 'error'; message?: string } | null>(null)
     const saveToastTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -212,10 +218,10 @@ export default function DarazAverageSalesPricePage() {
         loadData(salesDays)
     }, [salesDays])
 
-    async function loadData(days: number | string = salesDays) {
+    async function loadData(days: number | string = salesDays, forceFresh: boolean = false) {
         setIsLoading(true)
         try {
-            const result = await getDarazAvgPrices(days)
+            const result = await getDarazAvgPrices(days, forceFresh)
             setData(result)
         } catch (error) {
             console.error('Failed to load data:', error)
@@ -228,6 +234,7 @@ export default function DarazAverageSalesPricePage() {
         setIsSyncing(true)
         try {
             const res = await syncDarazAvgPricesGoogleSheets()
+            setIsSyncing(false)
             if (res.success) {
                 alert('Successfully synced with Google Sheets!')
                 loadData()
@@ -235,6 +242,7 @@ export default function DarazAverageSalesPricePage() {
                 alert(`Sync failed: ${res.message}`)
             }
         } catch (err: any) {
+            setIsSyncing(false)
             alert(`Sync error: ${err.message}`)
         } finally {
             setIsSyncing(false)
@@ -245,6 +253,7 @@ export default function DarazAverageSalesPricePage() {
         setIsPulling(true)
         try {
             const res = await pullDarazAvgPricesFromGoogleSheets()
+            setIsPulling(false)
             if (res.success) {
                 alert('Successfully updated data from Google Sheets!')
                 loadData()
@@ -252,6 +261,7 @@ export default function DarazAverageSalesPricePage() {
                 alert(`Pull failed: ${res.message}`)
             }
         } catch (err: any) {
+            setIsPulling(false)
             alert(`Pull error: ${err.message}`)
         } finally {
             setIsPulling(false)
@@ -1099,6 +1109,151 @@ export default function DarazAverageSalesPricePage() {
         })
     }
 
+    const openFinalStockModal = (item: DarazAvgPriceItem) => {
+        setFinalStockModalProduct(item)
+        setFinalStockInputQty(item.final_stock_qty != null ? item.final_stock_qty.toString() : '1')
+    }
+
+    const handleSaveFinalStock = () => {
+        if (!finalStockModalProduct) return
+
+        const qty = parseInt(finalStockInputQty.trim(), 10)
+        if (isNaN(qty) || qty < 0) {
+            alert('Please enter a valid final stock quantity (0 or greater).')
+            return
+        }
+
+        const targetId = finalStockModalProduct.product_id
+        const productName = finalStockModalProduct.product_name
+
+        // 1. Close modal popup immediately to prevent blocking
+        setFinalStockModalProduct(null)
+
+        // 2. Optimistic local state update
+        setData(prev => prev.map(item => {
+            if (item.product_id === targetId) {
+                return {
+                    ...item,
+                    is_final_stock_locked: true,
+                    final_stock_qty: qty,
+                    final_stock_error: null,
+                    final_stock_locked_at: new Date().toISOString()
+                }
+            }
+            return item
+        }))
+
+        // 3. Show top processing notification
+        if (saveToastTimeoutRef.current) clearTimeout(saveToastTimeoutRef.current)
+        setSaveToast({
+            id: targetId,
+            productName,
+            status: 'saving'
+        })
+
+        // 4. Save to database & handle stock check in background
+        setProductFinalStock(targetId, qty).then((res) => {
+            if (res.success) {
+                setSaveToast({
+                    id: targetId,
+                    productName,
+                    status: 'saved',
+                    message: `Final Stock locked at ${qty} pc across all stores`
+                })
+                saveToastTimeoutRef.current = setTimeout(() => {
+                    setSaveToast(null)
+                }, 2500)
+            } else {
+                setSaveToast({
+                    id: targetId,
+                    productName,
+                    status: 'error',
+                    message: res.message || 'Failed to lock final stock'
+                })
+                saveToastTimeoutRef.current = setTimeout(() => {
+                    setSaveToast(null)
+                }, 4000)
+            }
+        }).catch((err: any) => {
+            setSaveToast({
+                id: targetId,
+                productName,
+                status: 'error',
+                message: err?.message || 'Failed to lock final stock'
+            })
+            saveToastTimeoutRef.current = setTimeout(() => {
+                setSaveToast(null)
+            }, 4000)
+        })
+    }
+
+    const handleReleaseFinalStock = () => {
+        if (!finalStockModalProduct) return
+
+        const targetId = finalStockModalProduct.product_id
+        const productName = finalStockModalProduct.product_name
+
+        // 1. Close modal popup immediately
+        setFinalStockModalProduct(null)
+
+        // 2. Optimistic local state update
+        setData(prev => prev.map(item => {
+            if (item.product_id === targetId) {
+                return {
+                    ...item,
+                    is_final_stock_locked: false,
+                    final_stock_qty: null,
+                    final_stock_error: null,
+                    final_stock_locked_at: null
+                }
+            }
+            return item
+        }))
+
+        // 3. Show top notification
+        if (saveToastTimeoutRef.current) clearTimeout(saveToastTimeoutRef.current)
+        setSaveToast({
+            id: targetId,
+            productName,
+            status: 'saving'
+        })
+
+        // 4. Release in background
+        releaseProductFinalStock(targetId).then((res) => {
+            if (res.success) {
+                setSaveToast({
+                    id: targetId,
+                    productName,
+                    status: 'saved',
+                    message: 'Final Stock lock released'
+                })
+                saveToastTimeoutRef.current = setTimeout(() => {
+                    setSaveToast(null)
+                }, 2500)
+            } else {
+                setSaveToast({
+                    id: targetId,
+                    productName,
+                    status: 'error',
+                    message: res.message || 'Failed to release final stock'
+                })
+                saveToastTimeoutRef.current = setTimeout(() => {
+                    setSaveToast(null)
+                }, 4000)
+            }
+        }).catch((err: any) => {
+            setSaveToast({
+                id: targetId,
+                productName,
+                status: 'error',
+                message: err?.message || 'Failed to release final stock'
+            })
+            saveToastTimeoutRef.current = setTimeout(() => {
+                setSaveToast(null)
+            }, 4000)
+        })
+    }
+
     const allSellerAccounts = Array.from(new Set(data.flatMap(d => d.seller_accounts || []))).filter(Boolean).sort()
 
     const filteredData = data.filter(item => {
@@ -1141,21 +1296,25 @@ export default function DarazAverageSalesPricePage() {
         }
 
         if (stockFilter !== 'all' && matches) {
-            // Get active live prices for this product (exclude inactive SKUs)
-            const activeLivePrices = Object.values(item.live_prices || {}).filter(lp => {
-                const statusStr = (lp.status || '').toLowerCase().trim()
-                return statusStr !== 'inactive' && statusStr !== 'deleted' && statusStr !== 'suspended' && statusStr !== 'deactivated'
-            })
+            if (stockFilter === 'final_stock') {
+                matches = !!item.is_final_stock_locked;
+            } else {
+                // Get active live prices for this product (exclude inactive SKUs)
+                const activeLivePrices = Object.values(item.live_prices || {}).filter(lp => {
+                    const statusStr = (lp.status || '').toLowerCase().trim()
+                    return statusStr !== 'inactive' && statusStr !== 'deleted' && statusStr !== 'suspended' && statusStr !== 'deactivated'
+                })
 
-            // If a product has no active live price 1-4, hide/exclude it
-            if (activeLivePrices.length === 0) {
-                matches = false
-            } else if (stockFilter === 'stock_out') {
-                // Show if at least one active Live price has quantity === 0
-                matches = activeLivePrices.some(lp => (lp.quantity || 0) === 0)
-            } else if (stockFilter === 'low_stock') {
-                // Show if at least one active Live price has stock > 0 and stock < 15
-                matches = activeLivePrices.some(lp => (lp.quantity || 0) > 0 && (lp.quantity || 0) < 15)
+                // If a product has no active live price 1-4, hide/exclude it
+                if (activeLivePrices.length === 0) {
+                    matches = false
+                } else if (stockFilter === 'stock_out') {
+                    // Show if at least one active Live price has quantity === 0
+                    matches = activeLivePrices.some(lp => (lp.quantity || 0) === 0)
+                } else if (stockFilter === 'low_stock') {
+                    // Show if at least one active Live price has stock > 0 and stock < 15
+                    matches = activeLivePrices.some(lp => (lp.quantity || 0) > 0 && (lp.quantity || 0) < 15)
+                }
             }
         }
 
@@ -1548,12 +1707,13 @@ export default function DarazAverageSalesPricePage() {
                     <select
                         value={stockFilter}
                         onChange={(e) => {
-                            setStockFilter(e.target.value as 'all' | 'stock_out' | 'low_stock');
+                            setStockFilter(e.target.value as any);
                             setCurrentPage(1);
                         }}
-                        className={`h-[42px] min-w-[150px] px-[12px] rounded-[12px] transition-all border text-[13px] font-semibold outline-none focus:ring-4 focus:ring-indigo-500/10 cursor-pointer ${stockFilter !== 'all' ? 'bg-[#F3F4F6] text-[#111827] border-[#D1D5DB]' : 'bg-white text-gray-700 border-[#E5E7EB] hover:bg-gray-50'}`}
+                        className={`h-[42px] min-w-[160px] px-[12px] rounded-[12px] transition-all border text-[13px] font-semibold outline-none focus:ring-4 focus:ring-indigo-500/10 cursor-pointer ${stockFilter !== 'all' ? 'bg-[#F3F4F6] text-[#111827] border-[#D1D5DB]' : 'bg-white text-gray-700 border-[#E5E7EB] hover:bg-gray-50'}`}
                     >
                         <option value="all">All Stock</option>
+                        <option value="final_stock">🔒 Final Stock (Locked)</option>
                         <option value="stock_out">Stock Out</option>
                         <option value="low_stock">Low Stock (&lt;15)</option>
                     </select>
@@ -1592,21 +1752,23 @@ export default function DarazAverageSalesPricePage() {
                     </a>
 
                     <button
-                        onClick={handlePull}
-                        disabled={isPulling}
-                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[120px] px-[16px] bg-white hover:bg-gray-50 text-[13px] font-semibold text-gray-700 border border-[#E5E7EB] rounded-[12px] transition-colors whitespace-nowrap"
+                        onClick={() => setConfirmSheetAction('pull')}
+                        disabled={isPulling || isSyncing}
+                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[140px] px-[16px] bg-white hover:bg-amber-50 text-[13px] font-semibold text-gray-700 hover:text-amber-700 border border-[#E5E7EB] hover:border-amber-300 rounded-[12px] transition-colors whitespace-nowrap cursor-pointer shadow-xs"
+                        title="Import prices from Google Sheet into Webapp"
                     >
-                        {isPulling ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} className="text-gray-400" />}
-                        Sync by Sheet
+                        {isPulling ? <Loader2 size={16} className="animate-spin text-amber-600 shrink-0" /> : <RefreshCw size={16} className="text-amber-600 shrink-0" />}
+                        <span>Sheet to Webapp</span>
                     </button>
 
                     <button
-                        onClick={handleSync}
-                        disabled={isSyncing}
-                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[120px] px-[16px] bg-white hover:bg-gray-50 text-[13px] font-semibold text-gray-700 border border-[#E5E7EB] rounded-[12px] transition-colors whitespace-nowrap"
+                        onClick={() => setConfirmSheetAction('sync')}
+                        disabled={isSyncing || isPulling}
+                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[140px] px-[16px] bg-white hover:bg-emerald-50 text-[13px] font-semibold text-gray-700 hover:text-emerald-700 border border-[#E5E7EB] hover:border-emerald-300 rounded-[12px] transition-colors whitespace-nowrap cursor-pointer shadow-xs"
+                        title="Export current webapp prices to Google Sheet"
                     >
-                        {isSyncing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} className="text-gray-400" />}
-                        Sync with Sheets
+                        {isSyncing ? <Loader2 size={16} className="animate-spin text-emerald-600 shrink-0" /> : <RefreshCw size={16} className="text-emerald-600 shrink-0" />}
+                        <span>Webapp to Sheet</span>
                     </button>
 
                     <button
@@ -1630,7 +1792,7 @@ export default function DarazAverageSalesPricePage() {
 
                     <button
                         onClick={() => setIsCompareModalOpen(true)}
-                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[140px] px-[16px] bg-indigo-650 hover:bg-indigo-700 text-[13px] font-semibold text-white rounded-[12px] transition-colors border-none whitespace-nowrap cursor-pointer"
+                        className="flex flex-row items-center justify-center gap-[8px] h-[42px] min-w-[140px] px-[16px] bg-indigo-600 hover:bg-indigo-700 text-[13px] font-semibold text-white rounded-[12px] transition-all border-none whitespace-nowrap cursor-pointer shadow-sm hover:shadow active:scale-[0.98]"
                     >
                         <FileSpreadsheet size={16} />
                         Price Compare
@@ -1765,13 +1927,41 @@ export default function DarazAverageSalesPricePage() {
                                                 )}
                                             </div>
                                             <div className="flex flex-col flex-1 min-w-0 gap-1">
-                                                <p
-                                                    className={`font-bold text-[14.5px] leading-snug ${hasMrpViolation ? 'text-[#DC2626]' : isOutOfStock ? 'text-[#DC2626]' : 'text-[#111827]'}`}
-                                                    style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any, overflow: 'hidden' }}
-                                                    title={hasMrpViolation ? `MRP Violation: ${mrpViolations.join(', ')}` : item.product_name}
-                                                >
-                                                    {item.product_name}
-                                                </p>
+                                                <div className="flex items-start justify-between gap-1.5">
+                                                    <p
+                                                        className={`font-bold text-[14.5px] leading-snug flex-1 ${hasMrpViolation ? 'text-[#DC2626]' : isOutOfStock ? 'text-[#DC2626]' : 'text-[#111827]'}`}
+                                                        style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any, overflow: 'hidden' }}
+                                                        title={hasMrpViolation ? `MRP Violation: ${mrpViolations.join(', ')}` : item.product_name}
+                                                    >
+                                                        {item.product_name}
+                                                    </p>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFinalStockModal(item)}
+                                                        className={`shrink-0 inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full transition-all shadow-2xs cursor-pointer ${
+                                                            item.is_final_stock_locked
+                                                                ? 'bg-rose-600 hover:bg-rose-700 text-white border border-rose-700 shadow-rose-500/20 animate-in fade-in'
+                                                                : 'bg-gray-100 hover:bg-gray-200 text-gray-600 hover:text-gray-900 border border-gray-200'
+                                                        }`}
+                                                        title={item.is_final_stock_locked ? `Final Stock locked at ${item.final_stock_qty ?? 0} pc across all stores. Click to edit or release.` : 'Set Final Stock (Stock Lock)'}
+                                                    >
+                                                        <Lock size={11} className={item.is_final_stock_locked ? 'text-white' : 'text-gray-500'} />
+                                                        {item.is_final_stock_locked ? (
+                                                            <span>{item.final_stock_qty ?? 0} pc</span>
+                                                        ) : (
+                                                            <span className="text-[10px] text-gray-500 font-semibold">Stock Lock</span>
+                                                        )}
+                                                        {item.is_final_stock_locked && item.final_stock_error && (
+                                                            <AlertTriangle size={11} className="text-amber-200 animate-pulse" />
+                                                        )}
+                                                    </button>
+                                                </div>
+                                                {item.is_final_stock_locked && item.final_stock_error && (
+                                                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md mt-0.5" title={item.final_stock_error}>
+                                                        <AlertTriangle size={11} className="shrink-0 text-rose-600 animate-pulse" />
+                                                        <span className="truncate">Stock Out Error: {item.final_stock_error}</span>
+                                                    </div>
+                                                )}
                                                 <div className="flex items-center flex-wrap gap-1.5 mt-0.5">
                                                     {(item.sold_qty || 0) > 0 && (
                                                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#4F46E5] bg-[#EEF2FF] px-[7px] py-[2px] rounded-full whitespace-nowrap">
@@ -2877,6 +3067,175 @@ export default function DarazAverageSalesPricePage() {
                 )
             })()}
 
+            {/* Final Stock (Stock Lock) Modal */}
+            {finalStockModalProduct && (() => {
+                const item = finalStockModalProduct
+                const liveEntries = Object.entries(item.live_prices || {}).filter(([key]) => !key.includes('_slot_'))
+                const isCurrentlyLocked = !!item.is_final_stock_locked
+                const currentQty = item.final_stock_qty ?? null
+
+                return (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4 animate-in fade-in duration-75">
+                        <Card className="w-full max-w-md bg-white dark:bg-zinc-900 shadow-2xl border border-gray-100 dark:border-zinc-800 rounded-2xl overflow-hidden animate-in zoom-in-98 duration-75">
+                            {/* Header */}
+                            <div className="px-6 py-4 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between bg-gradient-to-r from-rose-50/70 via-red-50/50 to-orange-50/40 dark:from-zinc-800/60 dark:to-zinc-800/30">
+                                <div className="flex items-center gap-3 min-w-0">
+                                    <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shadow-md shadow-rose-500/20 shrink-0">
+                                        <Lock size={18} />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                                            <span>Final Stock Lock</span>
+                                            {isCurrentlyLocked && (
+                                                <span className="text-[10px] bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 font-extrabold px-2 py-0.5 rounded-full">
+                                                    ACTIVE
+                                                </span>
+                                            )}
+                                        </h2>
+                                        <p className="text-xs text-gray-500 truncate max-w-xs mt-0.5" title={item.product_name}>
+                                            {item.product_name}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setFinalStockModalProduct(null)}
+                                    className="p-1.5 hover:bg-gray-200/80 dark:hover:bg-zinc-800 rounded-full transition-colors text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            {/* Error Warning Banner if previous stock out failed */}
+                            {item.final_stock_error && (
+                                <div className="mx-6 mt-4 p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-start gap-2.5 text-xs text-red-700 dark:text-red-300">
+                                    <AlertTriangle size={16} className="text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                                    <div className="flex-1 min-w-0">
+                                        <span className="font-bold block">Daraz API Stock-Out Failed:</span>
+                                        <span className="font-mono text-[11px] break-words">{item.final_stock_error}</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Body */}
+                            <div className="p-6 space-y-4">
+                                <div className="bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/40 rounded-xl p-3 text-xs text-amber-900 dark:text-amber-200 space-y-1">
+                                    <span className="font-bold block flex items-center gap-1.5">
+                                        <span>⚡ How Final Stock Lock Works:</span>
+                                    </span>
+                                    <p className="text-[11.5px] leading-relaxed text-amber-800/90 dark:text-amber-300/80">
+                                        Set your actual remaining quantity (e.g. 1, 2, or 3 pcs). Every new order received in our sales entry decrements this count. When it reaches <strong>0 pc</strong>, our system automatically calls Daraz API to set stock to <strong>0 (Stock Out) across ALL stores</strong>.
+                                    </p>
+                                </div>
+
+                                {/* Current Live Store Stocks Overview */}
+                                <div>
+                                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
+                                        Live Stock on Connected Stores:
+                                    </span>
+                                    {liveEntries.length === 0 ? (
+                                        <p className="text-xs text-gray-400 italic">No live store listings found</p>
+                                    ) : (
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {liveEntries.map(([sku, lp]) => (
+                                                <div key={sku} className="p-2.5 bg-gray-50 dark:bg-zinc-800/60 rounded-lg border border-gray-100 dark:border-zinc-800 flex items-center justify-between text-xs">
+                                                    <div className="min-w-0 pr-1">
+                                                        <span className="font-bold text-gray-800 dark:text-gray-200 block truncate text-[11px]">
+                                                            {lp.store_name}
+                                                        </span>
+                                                        <span className="font-mono text-[10px] text-gray-400 block truncate">{sku}</span>
+                                                    </div>
+                                                    <span className={`font-bold tabular-nums text-xs px-2 py-0.5 rounded ${
+                                                        (lp.quantity || 0) === 0 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                                                    }`}>
+                                                        {lp.quantity ?? 0} pc
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Stock Quantity Input */}
+                                <div className="space-y-1.5 pt-2">
+                                    <label className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center justify-between">
+                                        <span>Final Stock Quantity (remaining pcs):</span>
+                                        {isCurrentlyLocked && currentQty !== null && (
+                                            <span className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+                                                Currently locked: {currentQty} pc
+                                            </span>
+                                        )}
+                                    </label>
+                                    <div className="relative">
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            step="1"
+                                            autoFocus
+                                            value={finalStockInputQty}
+                                            onChange={(e) => setFinalStockInputQty(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleSaveFinalStock() }}
+                                            placeholder="e.g. 1, 2, 3"
+                                            className="w-full px-4 py-2.5 text-base font-bold text-gray-900 dark:text-gray-100 bg-white dark:bg-zinc-900 border border-rose-200 dark:border-rose-900/60 rounded-xl focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition-all shadow-sm"
+                                        />
+                                        <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400">
+                                            PCS
+                                        </span>
+                                    </div>
+                                    <p className="text-[11px] text-gray-400">
+                                        Enter remaining quantity. (Setting to 0 will immediately trigger stock-out across all stores).
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="px-6 py-4 bg-gray-50 dark:bg-zinc-800/50 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between gap-2">
+                                {isCurrentlyLocked ? (
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        onClick={handleReleaseFinalStock}
+                                        className="border-amber-200 dark:border-amber-900/50 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30 text-xs h-9 px-3 flex items-center gap-1.5"
+                                        title="Unlock / remove final stock tracking"
+                                    >
+                                        <Unlock size={14} />
+                                        <span>Unlock / Release</span>
+                                    </Button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const prod = finalStockModalProduct
+                                            setFinalStockModalProduct(null)
+                                            if (prod) openStockModal(prod)
+                                        }}
+                                        className="text-xs text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                    >
+                                        Manage Store Stock →
+                                    </button>
+                                )}
+
+                                <div className="flex items-center gap-2 ml-auto">
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setFinalStockModalProduct(null)}
+                                        className="border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800 text-xs h-9 cursor-pointer"
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        onClick={handleSaveFinalStock}
+                                        className="bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs h-9 px-4 shadow-sm flex items-center gap-1.5 cursor-pointer"
+                                    >
+                                        <Lock size={14} />
+                                        <span>Lock Final Stock</span>
+                                    </Button>
+                                </div>
+                            </div>
+                        </Card>
+                    </div>
+                )
+            })()}
+
             {/* Push single product selection modal */}
             {pushSelectProduct && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200">
@@ -3327,6 +3686,112 @@ export default function DarazAverageSalesPricePage() {
                     </Card>
                 </div>
             )}
+
+            {/* Google Sheets Action Confirmation Modal */}
+            {confirmSheetAction && (
+                <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+                    <Card className="w-full max-w-md bg-white dark:bg-zinc-900 shadow-2xl border border-gray-100 dark:border-zinc-800 rounded-2xl p-6 overflow-hidden">
+                        <div className="flex items-start gap-4">
+                            <div className={`w-12 h-12 rounded-2xl shrink-0 flex items-center justify-center ${
+                                confirmSheetAction === 'pull'
+                                    ? 'bg-amber-100 text-amber-600 dark:bg-amber-950/40 dark:text-amber-400'
+                                    : 'bg-emerald-100 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400'
+                            }`}>
+                                {confirmSheetAction === 'pull' ? <AlertTriangle size={24} /> : <UploadCloud size={24} />}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                                <h3 className="text-base font-bold text-gray-900 dark:text-gray-100">
+                                    {confirmSheetAction === 'pull' ? 'Import: Sheet to Webapp' : 'Export: Webapp to Sheet'}
+                                </h3>
+
+                                <div className="text-xs text-gray-600 dark:text-gray-300 mt-2 leading-relaxed space-y-1.5">
+                                    {confirmSheetAction === 'pull' ? (
+                                        <>
+                                            <p>Are you sure you want to import data from Google Sheet?</p>
+                                            <div className="p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 rounded-xl text-amber-800 dark:text-amber-300 font-medium">
+                                                ⚠️ <strong>Warning:</strong> This will <strong>OVERWRITE</strong> the Market Price, Campaign Price, and Mega Price in your Webapp with the values currently inside the Google Sheet.
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p>Are you sure you want to push data to Google Sheet?</p>
+                                            <div className="p-2.5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl text-emerald-800 dark:text-emerald-300 font-medium">
+                                                📤 <strong>Note:</strong> This will update your Google Sheet with all the latest products, calculations, and prices (Market, Campaign, Mega Price) from this Webapp.
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+
+                                <div className="mt-5 flex items-center justify-end gap-2.5">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => setConfirmSheetAction(null)}
+                                        className="h-9 px-4 text-xs font-semibold text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-zinc-800 rounded-xl cursor-pointer"
+                                    >
+                                        Cancel
+                                    </Button>
+
+                                    <Button
+                                        size="sm"
+                                        onClick={() => {
+                                            const action = confirmSheetAction
+                                            setConfirmSheetAction(null)
+                                            if (action === 'pull') {
+                                                handlePull()
+                                            } else if (action === 'sync') {
+                                                handleSync()
+                                            }
+                                        }}
+                                        className={`h-9 px-4 text-xs font-semibold text-white rounded-xl shadow-sm cursor-pointer border-none ${
+                                            confirmSheetAction === 'pull'
+                                                ? 'bg-amber-600 hover:bg-amber-700'
+                                                : 'bg-emerald-600 hover:bg-emerald-700'
+                                        }`}
+                                    >
+                                        {confirmSheetAction === 'pull' ? 'Yes, Import from Sheet' : 'Yes, Export to Sheet'}
+                                    </Button>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
+                </div>
+            )}
+
+            {/* Google Sheets Sync & Pull Processing Overlay */}
+            {(isSyncing || isPulling) && (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+                    <Card className="w-full max-w-sm bg-white dark:bg-zinc-900 shadow-2xl border border-gray-100 dark:border-zinc-800 rounded-2xl p-6 flex flex-col items-center text-center">
+                        <div className="relative mb-4">
+                            <div className="w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shadow-inner">
+                                <FileSpreadsheet size={32} />
+                            </div>
+                            <div className="absolute -bottom-1 -right-1 bg-white dark:bg-zinc-900 rounded-full p-1 shadow-md border border-gray-100 dark:border-zinc-800">
+                                <Loader2 size={18} className="animate-spin text-emerald-600" />
+                            </div>
+                        </div>
+
+                        <h3 className="text-base font-bold text-gray-900 dark:text-gray-100 mb-1">
+                            {isSyncing ? 'Exporting: Webapp to Sheet' : 'Importing: Sheet to Webapp'}
+                        </h3>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 max-w-xs leading-relaxed">
+                            {isSyncing 
+                                ? 'Uploading latest product data and syncing Market, Campaign & Mega Prices into Google Sheets...' 
+                                : 'Reading Google Sheet and updating prices in Webapp database...'}
+                        </p>
+
+                        <div className="w-full bg-gray-100 dark:bg-zinc-800 h-1.5 rounded-full overflow-hidden mt-5 mb-2.5">
+                            <div className="h-full bg-emerald-500 rounded-full animate-pulse w-full"></div>
+                        </div>
+
+                        <span className="text-[11px] text-gray-400 font-medium">
+                            Please wait, this will take a few seconds
+                        </span>
+                    </Card>
+                </div>
+            )}
         </div>
     )
 }
+
