@@ -3,27 +3,8 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 
-export interface DarazCommissionItem {
-    id?: string
-    category_1: string
-    category_2?: string | null
-    category_3?: string | null
-    category_4?: string | null
-    category_5?: string | null
-    category_6?: string | null
-    leaf_category: string
-    category_path: string
-    commission_rate: number
-    created_at?: string
-    updated_at?: string
-}
-
-import {
-    OtherFeeItem,
-    DEFAULT_OTHER_FEES
-} from '@/features/sales/utils/daraz-fee-calculator'
-
-export type { OtherFeeItem }
+import type { OtherFeeItem, DarazCommissionItem } from '@/features/sales/utils/daraz-fee-calculator'
+import { DEFAULT_OTHER_FEES } from '@/features/sales/utils/daraz-fee-calculator'
 
 
 /**

@@ -13,9 +13,9 @@ import {
     calculateExactProductProfit,
     calculateDarazFeeBreakdown,
     calculateExactBreakevenPrice,
-    getDarazHandlingFee,
-    OtherFeeItem
+    getDarazHandlingFee
 } from '@/features/sales/utils/daraz-fee-calculator'
+import type { OtherFeeItem } from '@/features/sales/utils/daraz-fee-calculator'
 
 const DEFAULT_STORE_THEME: { bg: string; text: string; border: string } = { bg: 'bg-[#F3F4F6]', text: 'text-[#374151]', border: 'border-[#E5E7EB]' }
 

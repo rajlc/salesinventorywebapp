@@ -9,6 +9,21 @@ export interface OtherFeeItem {
     description?: string
 }
 
+export interface DarazCommissionItem {
+    id?: string
+    category_1: string
+    category_2?: string | null
+    category_3?: string | null
+    category_4?: string | null
+    category_5?: string | null
+    category_6?: string | null
+    leaf_category: string
+    category_path: string
+    commission_rate: number
+    created_at?: string
+    updated_at?: string
+}
+
 export interface HandlingFeeBracket {
     minPrice: number
     maxPrice: number | null

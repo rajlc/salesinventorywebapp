@@ -29,9 +29,9 @@ import {
     calculateExactBreakevenPrice,
     calculateExactProductProfit,
     calculateDarazFeeBreakdown,
-    getDarazHandlingFee,
-    OtherFeeItem
+    getDarazHandlingFee
 } from '@/features/sales/utils/daraz-fee-calculator'
+import type { OtherFeeItem } from '@/features/sales/utils/daraz-fee-calculator'
 
 export interface DarazAvgPriceItem {
     product_id: string

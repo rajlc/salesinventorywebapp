@@ -30,14 +30,16 @@ import {
     deleteDarazCategoryCommission,
     clearAllDarazCategoryCommissions,
     getDarazOtherFees,
-    saveDarazOtherFees,
-    DarazCommissionItem
+    saveDarazOtherFees
 } from '@/features/sales/actions/daraz-commission-actions'
 import {
     calculateDarazFeeBreakdown,
-    OtherFeeItem,
     DEFAULT_OTHER_FEES,
     DARAZ_HANDLING_FEE_BRACKETS
+} from '@/features/sales/utils/daraz-fee-calculator'
+import type {
+    OtherFeeItem,
+    DarazCommissionItem
 } from '@/features/sales/utils/daraz-fee-calculator'
 
 
