@@ -246,14 +246,16 @@ export default function ProfitTrackerOrderPage() {
     }
 
     // Helper to get fee from transactions array
-    const getFinanceTotal = (feeTypeKeywords: string[]) => {
+    const getFinanceTotal = (feeTypeKeywords: string[], excludeKeywords: string[] = []) => {
         if (!transactions || !transactions.length) return 0
 
         const total = transactions
             .filter(t => {
                 const name = (t.fee_name || '').toLowerCase()
                 const type = (t.transaction_type || t.fee_type || '').toLowerCase()
-                return feeTypeKeywords.some(k => name.includes(k) || type.includes(k))
+                const matches = feeTypeKeywords.some(k => name.includes(k) || type.includes(k))
+                const excluded = excludeKeywords.some(k => name.includes(k) || type.includes(k))
+                return matches && !excluded
             })
             .reduce((sum, t) => sum - parseFloat(t.amount || 0), 0)
 
@@ -275,29 +277,49 @@ export default function ProfitTrackerOrderPage() {
     const isFinanceVisible = ['delivered', 'completed', 'shipped', 'returned', 'failed', 'customer return delivered'].includes(status)
     const isDelivered = status === 'delivered' || status === 'customer return delivered' // Allow calc for mixed status orders
 
-    // 1. Product Price (Always from Items)
-    // 1. Product Price (Always from Items - Multiply by Quantity)
-    const val_price = items.reduce((sum: number, item: any) => sum + ((parseFloat(item.item_price || 0)) * (item.qty || 1)), 0)
+    // 1. Product Price (From Finance API or Items)
+    const financeItemPrice = hasFinance
+        ? transactions.filter(t => {
+            const name = (t.fee_name || '').toLowerCase()
+            return name.includes('product price paid by buyer') || name.includes('item price credit')
+        }).reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+        : 0
+    const val_price = financeItemPrice > 0
+        ? financeItemPrice
+        : items.reduce((sum: number, item: any) => sum + ((parseFloat(item.item_price || 0)) * (item.qty || 1)), 0)
 
-    // 2. Shipping Fee (Buyer) (Always from Items)
+    // 2. Shipping Fee (Buyer)
     const val_shipping_buyer = calculateTotal('shipping_amount')
 
-    // 3. Shipping Fee (Original)
-    const val_shipping_original = calculateTotal('shipping_fee_original')
+    // 3. Shipping Fee (Original / Standard)
+    const val_shipping_original = hasFinance
+        ? getFinanceTotal(['shipping fee'], ['delivery failed', 'discount'])
+        : calculateTotal('shipping_fee_original')
 
-    // 4. Shipping Fee Discount (Always from Items)
-    const val_shipping_discount = items.reduce((sum: number, i: any) => sum + (parseFloat(i.shipping_fee_discount_platform || 0) + parseFloat(i.shipping_fee_discount_seller || 0)), 0)
+    // 4. Shipping Fee Discount (Subsidies/waivers)
+    const val_shipping_discount = hasFinance
+        ? transactions.filter(t => (t.fee_name || '').toLowerCase().includes('shipping fee discount')).reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+        : items.reduce((sum: number, i: any) => sum + (parseFloat(i.shipping_fee_discount_platform || 0) + parseFloat(i.shipping_fee_discount_seller || 0)), 0)
 
-    // 5. Free Shipping Max Fee (Fallback: 4% + 13% VAT) - Show only if delivered
-    const val_free_ship_raw = calculateTotal('free_shipping_max_fee')
+    // 5. Delivery Failed / Re-attempt Shipping Fee (Fee type 172 or type includes 'delivery failed')
+    const deliveryFailedTransactions = hasFinance
+        ? transactions.filter(t =>
+            (t.transaction_type || '').toLowerCase().includes('delivery failed') ||
+            String(t.fee_type) === '172' ||
+            ((t.fee_name || '').toLowerCase().includes('shipping fee') && (t.transaction_type || '').toLowerCase().includes('failed'))
+        )
+        : []
+    const val_shipping_delivery_failed = deliveryFailedTransactions.reduce((sum, t) => sum - parseFloat(t.amount || 0), 0)
+
+    // 6. Free Shipping Max Fee (Fallback: 4% + 13% VAT)
+    const val_free_ship_raw = hasFinance ? getFinanceTotal(['free shipping', 'free_shipping']) : calculateTotal('free_shipping_max_fee')
     const val_free_ship = isFinanceVisible ? ((val_free_ship_raw > 0) ? val_free_ship_raw : (val_price * 0.04 * 1.13)) : 0
 
-    // 6. Co-funded Voucher (Fallback: 3%) - Show only if delivered
-    const val_voucher_raw = items.reduce((sum: number, i: any) => sum + (parseFloat(i.voucher_platform || 0) + parseFloat(i.voucher_seller || 0)), 0)
+    // 7. Co-funded Voucher (Fallback: 3%)
+    const val_voucher_raw = hasFinance ? getFinanceTotal(['co-funded', 'cofunded', 'co_funded', 'voucher']) : items.reduce((sum: number, i: any) => sum + (parseFloat(i.voucher_platform || 0) + parseFloat(i.voucher_seller || 0)), 0)
     const val_voucher = isFinanceVisible ? ((val_voucher_raw > 0) ? val_voucher_raw : (val_price * 0.03)) : 0
 
-    // 7. Fees (Finance API or Fallback)
-    // Commission Fee: Show only if delivered (per user request)
+    // 8. Other standard fees
     const val_commission_raw = hasFinance ? getFinanceTotal(['commission']) : calculateTotal('commission_amount')
     const val_commission = isFinanceVisible ? val_commission_raw : 0
 
@@ -306,22 +328,45 @@ export default function ProfitTrackerOrderPage() {
     const val_coin = hasFinance ? getFinanceTotal(['coin']) : parseFloat(calculateTotal('lazada_coin_discount') || '0')
     const val_tax = hasFinance ? getFinanceTotal(['tax', 'vat', 'wht']) : calculateTotal('tax_amount')
 
-    // Grand Total Calculation (User Formula)
-    // Grand Total = Product Price - Free Shipping - Voucher - Commission - Payment - Handling - Coins - Tax
-    const grand_total = (
-        val_price
-        - val_free_ship
-        - val_voucher
-        - val_commission
-        - val_payment
-        - val_handling
-        - val_coin
-        - val_tax
-    )
+    // 9. Detect any unexpected/miscellaneous fees from Daraz
+    const standardKeywords = [
+        'product price paid by buyer', 'item price credit',
+        'commission', 'payment fee', 'handling fee',
+        'tax', 'vat', 'wht', 'withholding',
+        'free shipping', 'free_shipping',
+        'co-funded', 'cofunded', 'co_funded', 'voucher',
+        'coin',
+        'shipping fee', 'shipping fee discount'
+    ]
+    const unexpectedFeeTransactions = hasFinance
+        ? transactions.filter(t => {
+            const name = (t.fee_name || '').toLowerCase().trim()
+            const type = (t.transaction_type || '').toLowerCase().trim()
+            const isStandard = standardKeywords.some(k => name.includes(k) || type.includes(k))
+            return !isStandard
+        })
+        : []
+    const val_unexpected_fees = unexpectedFeeTransactions.reduce((sum, t) => sum - parseFloat(t.amount || 0), 0)
 
-    // Analysis Percentages
-    // Combined Fees: Show only if delivered (per user request)
-    const val_combined_fees_raw = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax
+    // Grand Total (Receivable Amount from Daraz):
+    // When finance API is present, it is the EXACT net sum of all transaction ledger entries!
+    const grand_total = hasFinance
+        ? transactions.reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+        : (
+            val_price
+            - val_free_ship
+            - val_voucher
+            - val_commission
+            - val_payment
+            - val_handling
+            - val_coin
+            - val_tax
+            - val_shipping_delivery_failed
+            - val_unexpected_fees
+        )
+
+    // Total Daraz deductions
+    const val_combined_fees_raw = Math.max(0, val_price - grand_total)
     const val_combined_fees = isFinanceVisible ? val_combined_fees_raw : 0
 
     const pct_commission = val_price > 0 ? ((val_commission / val_price) * 100).toFixed(2) : '0.00'
@@ -474,7 +519,7 @@ export default function ProfitTrackerOrderPage() {
                                             <div className="space-y-1">
                                                 <div className="flex justify-between py-1 border-b border-gray-100 dark:border-zinc-800 text-[11px]">
                                                     <span className="text-gray-600">Product Price (Paid by Buyer)</span>
-                                                    <span className="font-mono">{val_price.toFixed(2)}</span>
+                                                    <span className="font-mono font-medium">{val_price.toFixed(2)}</span>
                                                 </div>
                                                 <div className="flex justify-between py-1 border-b border-gray-100 dark:border-zinc-800 text-[11px]">
                                                     <span className="text-gray-600">Shipping Fee (Paid by Buyer)</span>
@@ -482,14 +527,53 @@ export default function ProfitTrackerOrderPage() {
                                                 </div>
                                                 <div className="flex justify-between py-1 border-b border-gray-100 dark:border-zinc-800 text-[11px]">
                                                     <span className="text-gray-600">Shipping Fee (Original)</span>
-                                                    <span className="font-mono">{val_shipping_original.toFixed(2)}</span>
+                                                    <span className="font-mono text-red-600">
+                                                        {val_shipping_original > 0 ? `-${val_shipping_original.toFixed(2)}` : '0.00'}
+                                                    </span>
                                                 </div>
                                                 <div className="flex justify-between py-1 border-b border-gray-100 dark:border-zinc-800 text-[11px]">
                                                     <span className="text-gray-600">Shipping Fee Discount</span>
                                                     <span className="font-mono text-green-600">
-                                                        -{val_shipping_discount.toFixed(2)}
+                                                        {val_shipping_discount > 0 ? `+${val_shipping_discount.toFixed(2)}` : '-0.00'}
                                                     </span>
                                                 </div>
+
+                                                {/* Delivery Failed / Re-attempt Shipping Fee Banner */}
+                                                {val_shipping_delivery_failed > 0 && (
+                                                    <div className="flex justify-between items-center py-1.5 px-2 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/40 rounded-lg text-[11px] my-1">
+                                                        <div className="flex flex-col">
+                                                            <span className="font-bold text-rose-700 dark:text-rose-400 flex items-center gap-1.5">
+                                                                <span>⚠️ Shipping Fee (Delivery Failed / Re-attempt)</span>
+                                                            </span>
+                                                            <span className="text-[9.5px] text-rose-600/80 dark:text-rose-400/70 font-medium">
+                                                                Type: Delivered Orders Marked Delivery Failed
+                                                            </span>
+                                                        </div>
+                                                        <span className="font-mono font-bold text-rose-600 text-xs">
+                                                            -{val_shipping_delivery_failed.toFixed(2)}
+                                                        </span>
+                                                    </div>
+                                                )}
+
+                                                {/* Unexpected / Other Daraz Fees if any */}
+                                                {unexpectedFeeTransactions.map((tx: any, idx: number) => (
+                                                    <div key={idx} className="flex justify-between items-center py-1.5 px-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 rounded-lg text-[11px] my-1">
+                                                        <div className="flex flex-col">
+                                                            <span className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                                                                <span>⚡ {tx.fee_name || 'Extra Daraz Fee'}</span>
+                                                            </span>
+                                                            {tx.transaction_type && (
+                                                                <span className="text-[9.5px] text-amber-700/80 dark:text-amber-400/70 font-medium">
+                                                                    Type: {tx.transaction_type}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <span className={`font-mono font-bold text-xs ${parseFloat(tx.amount || 0) < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                            {parseFloat(tx.amount || 0) < 0 ? '-' : '+'}{Math.abs(parseFloat(tx.amount || 0)).toFixed(2)}
+                                                        </span>
+                                                    </div>
+                                                ))}
+
                                                 <div className="flex justify-between py-1 border-b border-gray-100 dark:border-zinc-800 text-[11px]">
                                                     <span className="text-gray-600">Free Shipping Max Fee</span>
                                                     <span className="font-mono text-red-600">
@@ -529,7 +613,7 @@ export default function ProfitTrackerOrderPage() {
 
                                                 <div className="flex justify-between py-1 font-bold text-sm bg-gray-50 dark:bg-zinc-800/50 px-2 rounded">
                                                     <span>Grand Total</span>
-                                                    <span>{grand_total.toFixed(2)}</span>
+                                                    <span className="font-mono">{grand_total.toFixed(2)}</span>
                                                 </div>
                                             </div>
                                         </CardContent>
@@ -587,7 +671,9 @@ export default function ProfitTrackerOrderPage() {
                                         const val_receivable = grand_total
 
                                         // Calculate Total Fee (all Daraz fees combined)
-                                        const val_total_fee = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax
+                                        const val_total_fee = hasFinance
+                                            ? Math.max(0, val_price - val_receivable)
+                                            : (val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax + val_shipping_delivery_failed + val_unexpected_fees)
 
                                         const val_other_fee_fixed = 30
                                         const val_total_purchase_cost = items.reduce((sum: number, item: any) => sum + ((item.purchase_price || 0) * (item.qty || 1)), 0)

@@ -3,8 +3,8 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getProducts, exportProducts, toggleProductStatus, updateProduct, approveProduct, rejectProduct, updateSyncStatuses, syncWebsiteStatus, remapAllCategories, permanentlyDeleteSelectedProducts } from '@/features/inventory/actions/product-actions'
-import { syncSelectedProductsFromDaraz } from '@/features/inventory/actions/daraz-sync-products'
-import { ArrowLeft, Plus, Upload, Download, Search, X, Package, Trash2, Box, Image as ImageIcon, Check, RefreshCw, ExternalLink, Filter, CheckSquare, Square, Zap, Tags } from 'lucide-react'
+import { syncSelectedProductsFromDaraz, syncDarazCategoriesOnly } from '@/features/inventory/actions/daraz-sync-products'
+import { ArrowLeft, Plus, Upload, Download, Search, X, Package, Trash2, Box, Image as ImageIcon, Check, RefreshCw, ExternalLink, Filter, CheckSquare, Square, Zap, Tags, ChevronDown } from 'lucide-react'
 import Link from 'next/link'
 import { Card } from '@/components/ui-shim'
 import { AddProductModal } from '@/features/inventory/components/AddProductModal'
@@ -109,6 +109,8 @@ export default function ProductListPage() {
     const [isSyncingWebsite, setIsSyncingWebsite] = useState(false)
     const [isSyncingFromDaraz, setIsSyncingFromDaraz] = useState(false)
     const [isRemapping, setIsRemapping] = useState(false)
+    const [isRemappingDaraz, setIsRemappingDaraz] = useState(false)
+    const [isRemapDropdownOpen, setIsRemapDropdownOpen] = useState(false)
     const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false)
     const [isDeletingSelected, setIsDeletingSelected] = useState(false)
 
@@ -205,17 +207,44 @@ export default function ProductListPage() {
     }
 
     const handleRemapCategories = async () => {
-        if (!confirm('Re-map website & marketplace categories for ALL products based on current mapping table?\n\nProducts with no Daraz category will have their categories cleared.')) return
+        const isSelected = selectedProductIds.size > 0
+        const promptText = isSelected
+            ? `Re-map website & marketplace categories for ${selectedProductIds.size} SELECTED product(s) based on current mapping table?`
+            : `Re-map website & marketplace categories for ALL products based on current mapping table?\n\nProducts with no Daraz category will have their categories cleared.`
+        if (!confirm(promptText)) return
         setIsRemapping(true)
+        setIsRemapDropdownOpen(false)
         try {
-            const result = await remapAllCategories()
+            const targetIds = isSelected ? Array.from(selectedProductIds) : undefined
+            const result = await remapAllCategories(targetIds)
             if (!result.success) throw new Error(result.error)
-            alert(`✅ Category remap complete!\n\n🟢 Remapped: ${result.updated} products\n🟡 Cleared (no Daraz category): ${result.cleared} products`)
+            alert(`✅ Website Category remap complete!\n\n🟢 Remapped: ${result.updated} products\n🟡 Cleared (no Daraz category): ${result.cleared} products`)
             queryClient.invalidateQueries({ queryKey: ['products'] })
         } catch (err: any) {
             alert(`Category remap failed: ${err.message}`)
         } finally {
             setIsRemapping(false)
+        }
+    }
+
+    const handleRemapDarazCategories = async () => {
+        const isSelected = selectedProductIds.size > 0
+        const promptText = isSelected
+            ? `Fetch official Daraz Categories from Daraz API for ${selectedProductIds.size} SELECTED product(s)?\n\n(Priority: Seller SKU 1 > SKU 2 > SKU 3 > SKU 4. Only category_name will be updated; titles, prices, and images are untouched.)`
+            : `Fetch official Daraz Categories from Daraz API for ALL products in the database?\n\n(Priority: Seller SKU 1 > SKU 2 > SKU 3 > SKU 4. Only category_name will be updated; titles, prices, and images are untouched.)`
+        if (!confirm(promptText)) return
+        setIsRemappingDaraz(true)
+        setIsRemapDropdownOpen(false)
+        try {
+            const targetIds = isSelected ? Array.from(selectedProductIds) : undefined
+            const result = await syncDarazCategoriesOnly(targetIds)
+            if (!result.success) throw new Error(result.message)
+            alert(`✅ Daraz Categories Remapped!\n\n🟢 Updated: ${result.updated} products\n⚪ Already Up-to-Date: ${result.unchanged || 0}\n⚠️ No Daraz Match: ${result.noMatch || 0}\n\n${result.message}`)
+            queryClient.invalidateQueries({ queryKey: ['products'] })
+        } catch (err: any) {
+            alert(`Daraz category remap failed: ${err.message}`)
+        } finally {
+            setIsRemappingDaraz(false)
         }
     }
 
@@ -642,15 +671,86 @@ export default function ProductListPage() {
                             <RefreshCw size={14} className={`text-emerald-500 ${isSyncingWebsite ? 'animate-spin' : ''}`} />
                             {isSyncingWebsite ? 'Syncing...' : 'Sync Website'}
                         </button>
-                        <button
-                            onClick={handleRemapCategories}
-                            disabled={isRemapping}
-                            title="Re-map website & marketplace categories for all products"
-                            className="hidden md:flex items-center gap-2 px-4 py-2 text-sm font-medium text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800 rounded-lg hover:bg-violet-100 dark:hover:bg-violet-900/50 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <Tags size={14} className={`text-violet-500 ${isRemapping ? 'animate-pulse' : ''}`} />
-                            {isRemapping ? 'Remapping...' : 'Remap Categories'}
-                        </button>
+                        <div className="relative">
+                            <button
+                                onClick={() => setIsRemapDropdownOpen(!isRemapDropdownOpen)}
+                                disabled={isRemapping || isRemappingDaraz}
+                                title={selectedProductIds.size > 0 ? `Remap categories for ${selectedProductIds.size} selected products` : "Remap categories for all products"}
+                                className={`hidden md:flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-lg transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                                    selectedProductIds.size > 0
+                                        ? 'text-violet-900 dark:text-violet-100 bg-violet-100 dark:bg-violet-900/60 border border-violet-300 dark:border-violet-700 ring-2 ring-violet-400/30'
+                                        : 'text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800 hover:bg-violet-100 dark:hover:bg-violet-900/50'
+                                }`}
+                            >
+                                <Tags size={14} className={`text-violet-500 ${(isRemapping || isRemappingDaraz) ? 'animate-pulse' : ''}`} />
+                                <span>
+                                    {isRemappingDaraz
+                                        ? 'Syncing Daraz...'
+                                        : isRemapping
+                                            ? 'Remapping...'
+                                            : selectedProductIds.size > 0
+                                                ? `Remap Categories (${selectedProductIds.size})`
+                                                : 'Remap Categories'}
+                                </span>
+                                <ChevronDown size={13} className={`text-violet-500 transition-transform duration-200 ${isRemapDropdownOpen ? 'rotate-180' : ''}`} />
+                            </button>
+
+                            {isRemapDropdownOpen && (
+                                <>
+                                    <div className="fixed inset-0 z-10" onClick={() => setIsRemapDropdownOpen(false)} />
+                                    <div className="absolute right-0 mt-1.5 w-72 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-xl shadow-xl z-20 py-1.5 overflow-hidden">
+                                        <div className="px-3 py-1.5 border-b border-gray-100 dark:border-zinc-700/60 bg-gray-50/50 dark:bg-zinc-800/50">
+                                            <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500">
+                                                {selectedProductIds.size > 0 ? `Target: ${selectedProductIds.size} Selected Products` : 'Target: All Database Products'}
+                                            </p>
+                                        </div>
+
+                                        <button
+                                            onClick={handleRemapDarazCategories}
+                                            className="w-full text-left px-3.5 py-2.5 hover:bg-violet-50/60 dark:hover:bg-violet-950/30 transition-colors flex items-start gap-2.5 group"
+                                        >
+                                            <div className="w-7 h-7 rounded-lg bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-800/50 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                                                <RefreshCw size={13} className="text-orange-600 dark:text-orange-400" />
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="text-xs font-bold text-gray-900 dark:text-gray-100 group-hover:text-orange-600 dark:group-hover:text-orange-400 transition-colors">
+                                                        Remap Daraz Category
+                                                    </span>
+                                                    <span className="text-[10px] font-medium px-1.5 py-0.2 bg-orange-100 dark:bg-orange-900/50 text-orange-700 dark:text-orange-300 rounded">
+                                                        API
+                                                    </span>
+                                                </div>
+                                                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 leading-snug">
+                                                    Fetch official category from Daraz API matching Seller SKU (SKU1 &gt; SKU2 &gt; SKU3 &gt; SKU4).
+                                                </p>
+                                            </div>
+                                        </button>
+
+                                        <div className="h-px bg-gray-100 dark:bg-zinc-700/60 mx-2" />
+
+                                        <button
+                                            onClick={handleRemapCategories}
+                                            className="w-full text-left px-3.5 py-2.5 hover:bg-violet-50/60 dark:hover:bg-violet-950/30 transition-colors flex items-start gap-2.5 group"
+                                        >
+                                            <div className="w-7 h-7 rounded-lg bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-800/50 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                                                <Tags size={13} className="text-violet-600 dark:text-violet-400" />
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="text-xs font-bold text-gray-900 dark:text-gray-100 group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
+                                                        Remap Website &amp; Marketplace
+                                                    </span>
+                                                </div>
+                                                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 leading-snug">
+                                                    Map existing Daraz category to Website &amp; Marketplace using the mapping table.
+                                                </p>
+                                            </div>
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
                         <button
                             onClick={() => setIsModalOpen(true)}
                             className="hidden md:flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-md hover:shadow-lg hover:shadow-blue-500/20 transition-all active:scale-[0.98]"
@@ -802,21 +902,31 @@ export default function ProductListPage() {
                                                     </div>
                                                 </td>
                                                 <td className="hidden md:table-cell px-4 py-3">
-                                                    <span className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded-full border ${product.product_type === 'combo'
-                                                        ? (product.product_combos?.length === 1
-                                                            ? 'bg-blue-50 text-blue-700 border-blue-100 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-900/30'
-                                                            : 'bg-purple-50 text-purple-700 border-purple-100 dark:bg-purple-900/20 dark:text-purple-300 dark:border-purple-900/30')
-                                                        : 'bg-gray-50 text-gray-700 border-gray-100 dark:bg-zinc-800 dark:text-gray-300 dark:border-zinc-700'
-                                                        }`}>
-                                                        {product.product_type === 'combo' ? (
-                                                            <Package size={12} />
-                                                        ) : (
-                                                            <Box size={12} />
+                                                    <div className="flex flex-col items-start gap-1">
+                                                        <span className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded-full border ${product.product_type === 'combo'
+                                                            ? (product.product_combos?.length === 1
+                                                                ? 'bg-blue-50 text-blue-700 border-blue-100 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-900/30'
+                                                                : 'bg-purple-50 text-purple-700 border-purple-100 dark:bg-purple-900/20 dark:text-purple-300 dark:border-purple-900/30')
+                                                            : 'bg-gray-50 text-gray-700 border-gray-100 dark:bg-zinc-800 dark:text-gray-300 dark:border-zinc-700'
+                                                            }`}>
+                                                            {product.product_type === 'combo' ? (
+                                                                <Package size={12} />
+                                                            ) : (
+                                                                <Box size={12} />
+                                                            )}
+                                                            {product.product_type === 'combo'
+                                                                ? (product.product_combos?.length === 1 ? 'Variation' : 'Combo')
+                                                                : 'Single'}
+                                                        </span>
+                                                        {product.category_name && (
+                                                            <span
+                                                                className="text-[10px] font-semibold text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-950/20 px-1.5 py-0.5 rounded border border-orange-100 dark:border-orange-900/30 max-w-[150px] truncate"
+                                                                title={`Daraz Category: ${product.category_name}`}
+                                                            >
+                                                                {product.category_name}
+                                                            </span>
                                                         )}
-                                                        {product.product_type === 'combo'
-                                                            ? (product.product_combos?.length === 1 ? 'Variation' : 'Combo')
-                                                            : 'Single'}
-                                                    </span>
+                                                    </div>
                                                 </td>
                                                 <td className="hidden md:table-cell px-4 py-3">
                                                     <button

@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { signRequest } from '@/features/sales/actions/daraz-sync-order'
 import axios from 'axios'
 import { revalidatePath } from 'next/cache'
+import { revalidateDarazAvgPricesCache } from '@/features/sales/actions/avg-price-actions'
 
 /**
  * Syncs product listings from all active Daraz stores.
@@ -595,4 +596,260 @@ export async function syncSelectedProductsFromDaraz(productIds: string[]): Promi
         message: `Updated ${updated} products from Daraz.${notFound > 0 ? ` ${notFound} products had no Daraz match.` : ''}`
     }
 }
+
+/**
+ * Remaps/Syncs official Daraz categories ONLY from Daraz API.
+ * Prioritizes: seller_sku1 -> seller_sku2 -> seller_sku3 -> seller_sku4.
+ * Does NOT touch product titles, images, descriptions, prices, or stock locks.
+ * If productIds is provided and non-empty, only those products are updated;
+ * otherwise all active products with at least one seller SKU are updated.
+ */
+export async function syncDarazCategoriesOnly(productIds?: string[]) {
+    const appKey = process.env.NEXT_PUBLIC_DARAZ_APP_KEY?.trim()
+    const appSecret = process.env.DARAZ_APP_SECRET?.trim()
+    const apiUrl = process.env.DARAZ_API_URL?.trim() || 'https://api.daraz.com.np/rest'
+
+    if (!appKey || !appSecret) {
+        throw new Error('Daraz API configuration missing (NEXT_PUBLIC_DARAZ_APP_KEY or DARAZ_APP_SECRET)')
+    }
+
+    const supabase = await createAdminClient()
+
+    // 1. Fetch target products from DB
+    let query = supabase
+        .from('products')
+        .select('id, seller_sku1, seller_sku2, seller_sku3, seller_sku4, category_name, category_path')
+        .eq('is_deleted', false)
+
+    if (productIds && productIds.length > 0) {
+        query = query.in('id', productIds)
+    }
+
+    const { data: targetProducts, error: prodError } = await query
+    if (prodError) throw new Error(`Failed to fetch products: ${prodError.message}`)
+
+    if (!targetProducts || targetProducts.length === 0) {
+        return { success: true, updated: 0, unchanged: 0, noMatch: 0, total: 0, message: 'No eligible products found.' }
+    }
+
+    // Filter to products that have at least one seller SKU
+    const productsToProcess = targetProducts.filter(p =>
+        (p.seller_sku1 && p.seller_sku1.trim()) ||
+        (p.seller_sku2 && p.seller_sku2.trim()) ||
+        (p.seller_sku3 && p.seller_sku3.trim()) ||
+        (p.seller_sku4 && p.seller_sku4.trim())
+    )
+
+    if (productsToProcess.length === 0) {
+        return {
+            success: true,
+            updated: 0,
+            unchanged: 0,
+            noMatch: targetProducts.length,
+            total: targetProducts.length,
+            message: 'None of the selected products have a valid Seller SKU.'
+        }
+    }
+
+    // 2. Fetch active online stores
+    const { data: stores, error: storesError } = await supabase
+        .from('online_stores')
+        .select('id, seller_account')
+        .eq('is_active', true)
+
+    if (storesError) throw new Error(`Failed to fetch stores: ${storesError.message}`)
+    if (!stores || stores.length === 0) {
+        throw new Error('No active Daraz stores found.')
+    }
+
+    // 3. For each active store, fetch category tree and product listings to build SKU -> Category Name map
+    // Key: SKU (lowercased, trimmed) -> { leafName, fullPath }
+    const skuCategoryMap = new Map<string, { leafName: string, fullPath: string }>()
+
+    for (const store of stores) {
+        const { data: tokenData } = await supabase
+            .from('daraz_api_tokens')
+            .select('access_token')
+            .eq('store_id', store.id)
+            .eq('app_type', 'order')
+            .maybeSingle()
+
+        if (!tokenData?.access_token) {
+            console.log(`[DarazCatSync] No token for store: ${store.seller_account}. Skipping.`)
+            continue
+        }
+
+        const accessToken = tokenData.access_token
+
+        // Fetch category tree
+        const categoryMap = new Map<string, { leafName: string, fullPath: string }>()
+        try {
+            const catTimestamp = Date.now().toString()
+            const catParams: Record<string, any> = {
+                app_key: appKey,
+                access_token: accessToken,
+                timestamp: catTimestamp,
+                sign_method: 'sha256',
+            }
+            catParams.sign = signRequest('/category/tree/get', catParams, appSecret)
+            const catResponse = await axios.get(`${apiUrl}/category/tree/get`, { params: catParams })
+            if (catResponse.data?.code === '0' || catResponse.data?.code === 0) {
+                const buildCategoryMap = (list: any[], parentPath = '') => {
+                    for (const cat of list) {
+                        const fullPath = parentPath ? `${parentPath} > ${cat.name}` : cat.name
+                        if (cat.name) {
+                            categoryMap.set(String(cat.category_id), { leafName: cat.name, fullPath })
+                        }
+                        if (cat.children?.length) {
+                            buildCategoryMap(cat.children, fullPath)
+                        }
+                    }
+                }
+                buildCategoryMap(catResponse.data?.data || [])
+            }
+        } catch (catErr: any) {
+            console.error(`[DarazCatSync] Category tree fetch failed for ${store.seller_account}:`, catErr.message)
+        }
+
+        // Fetch products from Daraz
+        const limit = 50
+        let pageIndex = 0
+        const maxPages = 40 // up to 2000 items per store
+
+        while (pageIndex < maxPages) {
+            const offset = pageIndex * limit
+            const timestamp = Date.now().toString()
+            const params: Record<string, any> = {
+                app_key: appKey,
+                access_token: accessToken,
+                timestamp: timestamp,
+                sign_method: 'sha256',
+                filter: 'all',
+                limit,
+                offset,
+            }
+            params.sign = signRequest('/products/get', params, appSecret)
+
+            try {
+                const response = await axios.get(`${apiUrl}/products/get`, { params })
+                if (response.data?.code !== '0' && response.data?.code !== 0) {
+                    console.error(`[DarazCatSync] /products/get error for ${store.seller_account}:`, response.data?.message)
+                    break
+                }
+
+                const productsList = response.data?.data?.products || []
+                if (productsList.length === 0) break
+
+                for (const item of productsList) {
+                    const categoryId = item.primary_category ? String(item.primary_category) : null
+                    const catInfo = categoryId ? (categoryMap.get(categoryId) || null) : null
+                    if (!catInfo) continue
+
+                    const skus = item.skus || []
+                    for (const s of skus) {
+                        const sSku = (s.SellerSku || '').trim().toLowerCase()
+                        if (sSku && !skuCategoryMap.has(sSku)) {
+                            skuCategoryMap.set(sSku, catInfo)
+                        }
+                    }
+                }
+
+                if (productsList.length < limit) break
+                pageIndex++
+                await new Promise(r => setTimeout(r, 100))
+            } catch (err: any) {
+                console.error(`[DarazCatSync] Request error at offset ${offset}:`, err.message)
+                break
+            }
+        }
+    }
+
+    // 4. Match target products by SKU priority (seller_sku1 -> seller_sku2 -> seller_sku3 -> seller_sku4)
+    let updated = 0
+    let unchanged = 0
+    let noMatch = 0
+
+    // Group updates by resolved category path to bulk-update efficiently
+    const categoryGroups = new Map<string, { leafName: string, fullPath: string, ids: string[] }>()
+
+    for (const prod of productsToProcess) {
+        let matchedInfo: { leafName: string, fullPath: string } | null = null
+
+        // Priority 1: seller_sku1
+        if (prod.seller_sku1) {
+            const k1 = prod.seller_sku1.trim().toLowerCase()
+            if (skuCategoryMap.has(k1)) matchedInfo = skuCategoryMap.get(k1)!
+        }
+        // Priority 2: seller_sku2
+        if (!matchedInfo && prod.seller_sku2) {
+            const k2 = prod.seller_sku2.trim().toLowerCase()
+            if (skuCategoryMap.has(k2)) matchedInfo = skuCategoryMap.get(k2)!
+        }
+        // Priority 3: seller_sku3
+        if (!matchedInfo && prod.seller_sku3) {
+            const k3 = prod.seller_sku3.trim().toLowerCase()
+            if (skuCategoryMap.has(k3)) matchedInfo = skuCategoryMap.get(k3)!
+        }
+        // Priority 4: seller_sku4
+        if (!matchedInfo && prod.seller_sku4) {
+            const k4 = prod.seller_sku4.trim().toLowerCase()
+            if (skuCategoryMap.has(k4)) matchedInfo = skuCategoryMap.get(k4)!
+        }
+
+        if (matchedInfo) {
+            if (prod.category_name === matchedInfo.leafName && prod.category_path === matchedInfo.fullPath) {
+                unchanged++
+            } else {
+                const groupKey = `${matchedInfo.leafName}:::${matchedInfo.fullPath}`
+                if (!categoryGroups.has(groupKey)) {
+                    categoryGroups.set(groupKey, { leafName: matchedInfo.leafName, fullPath: matchedInfo.fullPath, ids: [] })
+                }
+                categoryGroups.get(groupKey)!.ids.push(prod.id)
+            }
+        } else {
+            noMatch++
+        }
+    }
+
+    // 5. Bulk update products by category
+    const CHUNK_SIZE = 100
+    for (const group of categoryGroups.values()) {
+        for (let i = 0; i < group.ids.length; i += CHUNK_SIZE) {
+            const chunk = group.ids.slice(i, i + CHUNK_SIZE)
+            const { error: upErr } = await supabase
+                .from('products')
+                .update({
+                    category_name: group.leafName,
+                    category_path: group.fullPath,
+                    updated_at: new Date().toISOString()
+                })
+                .in('id', chunk)
+
+            if (upErr) {
+                console.error(`[DarazCatSync] Failed to update category "${group.fullPath}":`, upErr.message)
+            } else {
+                updated += chunk.length
+            }
+        }
+    }
+
+    revalidatePath('/dashboard/inventory/product-list')
+    revalidatePath('/dashboard/sales/daraz/average-sales-price')
+    revalidatePath('/dashboard/sales/daraz/profit-tracker')
+    try {
+        await revalidateDarazAvgPricesCache()
+    } catch (e) {
+        // ignore
+    }
+
+    return {
+        success: true,
+        updated,
+        unchanged,
+        noMatch,
+        total: targetProducts.length,
+        message: `Remapped Daraz categories: ${updated} updated, ${unchanged} already up-to-date, ${noMatch} not found on Daraz.`
+    }
+}
+
 

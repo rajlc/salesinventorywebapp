@@ -5,6 +5,8 @@ import { revalidatePath } from 'next/cache'
 import { fetchDarazFinanceTransactions } from './daraz-finance-service'
 import { unstable_cache } from 'next/cache'
 import { format } from 'date-fns'
+import { calculateDarazFeeBreakdown } from '@/features/sales/utils/daraz-fee-calculator'
+import { getDarazOtherFees } from './daraz-commission-actions'
 
 export interface OrderReportItem {
     order_primary_id: string
@@ -33,6 +35,92 @@ export interface GetOrderReportParams {
 
 
 
+
+// In-memory cache for Daraz category commissions (5,229 rows)
+let cachedCategoryCommissionMap: Map<string, number> | null = null
+let cachedCategoryCommissionTime = 0
+const CATEGORY_CACHE_TTL = 15 * 60 * 1000 // 15 minutes
+
+export async function getCachedCategoryCommissionMap(): Promise<Map<string, number>> {
+    const now = Date.now()
+    if (cachedCategoryCommissionMap && (now - cachedCategoryCommissionTime) < CATEGORY_CACHE_TTL) {
+        return cachedCategoryCommissionMap
+    }
+    const supabase = await createAdminClient()
+    const map = new Map<string, number>()
+    const ranges = [
+        [0, 999],
+        [1000, 1999],
+        [2000, 2999],
+        [3000, 3999],
+        [4000, 4999],
+        [5000, 5999]
+    ]
+    try {
+        const results = await Promise.all(
+            ranges.map(([start, end]) =>
+                supabase
+                    .from('daraz_category_commissions')
+                    .select('leaf_category, category_path, commission_rate')
+                    .range(start, end)
+            )
+        )
+        for (const res of results) {
+            if (res.data) {
+                for (const row of res.data) {
+                    const rate = Number(row.commission_rate)
+                    if (!isNaN(rate)) {
+                        if (row.leaf_category) map.set(row.leaf_category.toLowerCase().trim(), rate)
+                        if (row.category_path) {
+                            const p = row.category_path.toLowerCase().trim()
+                            map.set(p, rate)
+                            map.set(p.replace(/\s*>\s*/g, ' > '), rate)
+                        }
+                    }
+                }
+            }
+        }
+        cachedCategoryCommissionMap = map
+        cachedCategoryCommissionTime = now
+    } catch (err: any) {
+        console.warn('Failed to load category commissions cache:', err.message)
+    }
+    return map
+}
+
+function findCategoryCommissionRate(
+    categoryPath: string | null | undefined,
+    fallbackLeaf: string | null | undefined,
+    commissionMap: Map<string, number>
+): number | null {
+    // Priority 1: Exact full category path match (e.g. "Home Appliances > Small Kitchen Appliances > Coffee Machines & Accessories > Milk Frothers")
+    if (categoryPath) {
+        const pathKey = categoryPath.toLowerCase().trim()
+        if (commissionMap.has(pathKey)) {
+            return commissionMap.get(pathKey)!
+        }
+        const normalized = pathKey.replace(/\s*>\s*/g, ' > ')
+        if (commissionMap.has(normalized)) {
+            return commissionMap.get(normalized)!
+        }
+    }
+
+    // Priority 2: Fallback to leaf category name
+    const leaf = fallbackLeaf || categoryPath
+    if (!leaf) return null
+    const leafKey = leaf.toLowerCase().trim()
+    if (commissionMap.has(leafKey)) {
+        return commissionMap.get(leafKey)!
+    }
+
+    // Priority 3: Substring search as last resort
+    for (const [k, r] of Array.from(commissionMap.entries())) {
+        if (k.includes(leafKey) || leafKey.includes(k)) {
+            return r
+        }
+    }
+    return null
+}
 
 // --- Helper Functions ---
 
@@ -307,38 +395,55 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
         const from = (page - 1) * limit
         const to = from + limit - 1
 
-        // 1. Get the list of paginated orders (without count: 'exact' to avoid timeout)
+        // 1. Get the list of paginated orders directly from daraz_orders (fast index scan)
+        let selectFields = `
+            id,
+            order_number,
+            invoice_number,
+            order_status,
+            delivered_at,
+            delivered_by_daraz,
+            created_at,
+            daraz_fees,
+            price
+        `;
+        if (sellerAccount && sellerAccount !== 'All') {
+            selectFields += `, daraz_order_items!inner(seller_account)`;
+        }
+
         let query = supabase
-            .from('daraz_order_report_view')
-            .select('*')
+            .from('daraz_orders')
+            .select(selectFields)
+            .eq('order_status', 'Delivered')
+            .or('deleted.is.null,deleted.eq.false');
 
         if (search && search.trim()) {
-            query = query.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`)
+            query = query.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`);
         }
 
         if (sellerAccount && sellerAccount !== 'All') {
-            query = query.eq('seller_account', sellerAccount)
+            query = query.eq('daraz_order_items.seller_account', sellerAccount);
         }
 
         if (syncStatus === 'synced') {
-            query = query.gt('daraz_fees', 0).gt('total_purchase_cost', 0);
+            query = query.gt('daraz_fees', 0);
         } else if (syncStatus === 'not_synced') {
-            query = query.or('daraz_fees.is.null,daraz_fees.lte.0,total_purchase_cost.lte.0');
+            query = query.or('daraz_fees.is.null,daraz_fees.lte.0');
         }
 
         if (startDate) {
-            query = query.gte('delivery_date', startDate)
+            query = query.gte('delivered_by_daraz', startDate);
         }
         if (endDate) {
-            // Ensure endDate includes the full day
-            const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`
-            query = query.lte('delivery_date', endDateTime)
+            const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`;
+            query = query.lte('delivered_by_daraz', endDateTime);
         }
 
         query = query.range(from, to);
 
         query = query
-            .order('delivery_date', { ascending: false, nullsFirst: false })
+            .order('delivered_by_daraz', { ascending: false, nullsFirst: false })
+            .order('delivered_at', { ascending: false, nullsFirst: false })
             .order('created_at', { ascending: false, nullsFirst: false });
 
         // 2. Fetch count and data concurrently
@@ -347,37 +452,56 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
 
         const countPromise = (async () => {
             try {
-                const { data: rpcCount, error: rpcCountError } = await supabase.rpc('get_order_report_count', {
+                let countQuery = supabase
+                    .from('daraz_orders')
+                    .select(sellerAccount && sellerAccount !== 'All' ? 'id, daraz_order_items!inner(seller_account)' : 'id', { count: 'exact', head: true })
+                    .eq('order_status', 'Delivered')
+                    .or('deleted.is.null,deleted.eq.false');
+
+                if (search && search.trim()) {
+                    countQuery = countQuery.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`);
+                }
+
+                if (sellerAccount && sellerAccount !== 'All') {
+                    countQuery = countQuery.eq('daraz_order_items.seller_account', sellerAccount);
+                }
+
+                if (syncStatus === 'synced') {
+                    countQuery = countQuery.gt('daraz_fees', 0);
+                } else if (syncStatus === 'not_synced') {
+                    countQuery = countQuery.or('daraz_fees.is.null,daraz_fees.lte.0');
+                }
+
+                if (startDate) {
+                    countQuery = countQuery.gte('delivered_by_daraz', startDate);
+                }
+                if (endDate) {
+                    const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`;
+                    countQuery = countQuery.lte('delivered_by_daraz', endDateTime);
+                }
+
+                const { count: exactCount, error: countErr } = await countQuery;
+                if (!countErr && exactCount !== null) {
+                    return exactCount;
+                }
+                if (countErr) {
+                    console.warn('[SERVER ACTION] daraz_orders count error, using RPC fallback:', countErr.message);
+                }
+            } catch (e) {
+                console.error('Error fetching count from daraz_orders:', e);
+            }
+
+            // Fallback to RPC if needed
+            try {
+                const { data: rpcCount } = await supabase.rpc('get_order_report_count', {
                     search_term: search || '',
                     start_date_param: startDate || null,
                     end_date_param: endDate || null,
                     sync_status_param: syncStatus || 'all',
                     seller_account_param: sellerAccount === 'All' ? null : (sellerAccount || null)
                 });
-                if (!rpcCountError && rpcCount !== null) {
-                    return Number(rpcCount);
-                }
-                console.warn('RPC get_order_report_count failed, using fallback:', rpcCountError);
-            } catch (e) {
-                console.error('Error fetching RPC count:', e);
-            }
-            
-            // Fast fallback: count from base table
-            try {
-                let fallbackQuery = supabase
-                    .from('daraz_orders')
-                    .select('id', { count: 'exact', head: true })
-                    .eq('order_status', 'Delivered')
-                    .or('deleted.is.null,deleted.eq.false');
-                
-                if (search && search.trim()) {
-                    fallbackQuery = fallbackQuery.or(`order_number.ilike.%${search.trim()}%,invoice_number.ilike.%${search.trim()}%`);
-                }
-                
-                const { count: fallbackCount } = await fallbackQuery;
-                return fallbackCount || 0;
-            } catch (fallbackErr) {
-                console.error('Fallback count query failed:', fallbackErr);
+                return Number(rpcCount) || 0;
+            } catch {
                 return 0;
             }
         })();
@@ -387,7 +511,7 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
         totalCount = resolvedCount;
 
         if (error) {
-            console.warn('[SERVER ACTION] Query Warning / Timeout in getProfitTrackerData:', error.message);
+            console.warn('[SERVER ACTION] Query Warning in getProfitTrackerData:', error.message);
             return {
                 data: [],
                 totalCount: 0,
@@ -397,23 +521,113 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
             };
         }
 
-        const orderPrimaryIds = (data || []).map((o: any) => o.order_primary_id).filter(Boolean);
-        const orderNumbers = (data || []).map((o: any) => o.order_number).filter(Boolean);
+        const orderPrimaryIds = (data || []).map((o: any) => o.id || o.order_primary_id).filter(Boolean);
 
         let itemsByOrderMap: Record<string, any[]> = {};
-        if (orderPrimaryIds.length > 0 || orderNumbers.length > 0) {
+        let categoryCommissionMap = new Map<string, number>();
+        let otherFeesList: any[] = [];
+        let latestPurchaseCostMap = new Map<string, number>();
+
+        if (orderPrimaryIds.length > 0) {
             try {
-                const { data: orderItems } = await supabase
-                    .from('daraz_order_items')
-                    .select('order_id, order_number, name, product_name, item_name, seller_sku')
-                    .or(`order_id.in.(${orderPrimaryIds.map(id => `"${id}"`).join(',')}),order_number.in.(${orderNumbers.map(num => `"${num}"`).join(',')})`);
+                const [orderItemsRes, otherFees] = await Promise.all([
+                    supabase
+                        .from('daraz_order_items')
+                        .select(`
+                            id,
+                            order_id,
+                            product_name,
+                            seller_sku,
+                            product_id,
+                            seller_account,
+                            quantity,
+                            amount,
+                            total_amount,
+                            purchase_cost,
+                            product:products(
+                                id,
+                                product_id,
+                                category_name,
+                                category_path,
+                                marketplace_category,
+                                commission_percent,
+                                est_price
+                            )
+                        `)
+                        .in('order_id', orderPrimaryIds),
+                    getDarazOtherFees()
+                ]);
+
+                if (otherFees) {
+                    otherFeesList = otherFees;
+                }
+
+                const orderItems = orderItemsRes.data || [];
+
+                // Also map any items missing direct product link via seller_sku
+                const missingSkus = orderItems
+                    .filter((it: any) => !it.product && it.seller_sku)
+                    .map((it: any) => it.seller_sku.toLowerCase().trim());
+
+                const skuProductMap = new Map<string, any>();
+                if (missingSkus.length > 0) {
+                    const uniqueSkus = Array.from(new Set(missingSkus)).slice(0, 50);
+                    const { data: matchedProds } = await supabase
+                        .from('products')
+                        .select('id, product_id, category_name, category_path, marketplace_category, commission_percent, est_price, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+                        .or(uniqueSkus.map(s => `seller_sku1.ilike.${s},seller_sku2.ilike.${s},seller_sku3.ilike.${s},seller_sku4.ilike.${s}`).join(','));
+
+                    if (matchedProds) {
+                        matchedProds.forEach((p: any) => {
+                            [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                                if (sku) skuProductMap.set(sku.toLowerCase().trim(), p);
+                            });
+                        });
+                    }
+                }
+
+                // Batch lookup latest purchase cost for any products without cost
+                const missingCostProductIds = new Set<string>();
+                // Load fast cached category commission map
+                categoryCommissionMap = await getCachedCategoryCommissionMap();
+
+                orderItems.forEach((it: any) => {
+                    const prod = it.product || (it.seller_sku ? skuProductMap.get(it.seller_sku.toLowerCase().trim()) : null);
+                    const cost = Number(it.purchase_cost) || Number(prod?.est_price) || 0;
+                    if (cost <= 0 && it.product_id) {
+                        missingCostProductIds.add(it.product_id);
+                    }
+                });
+
+                if (missingCostProductIds.size > 0) {
+                    const { data: purchaseRows } = await supabase
+                        .from('purchases')
+                        .select('product_id, unit_amount')
+                        .in('product_id', Array.from(missingCostProductIds))
+                        .gt('unit_amount', 0)
+                        .order('purchase_date', { ascending: false });
+
+                    if (purchaseRows) {
+                        purchaseRows.forEach((p: any) => {
+                            if (!latestPurchaseCostMap.has(p.product_id)) {
+                                latestPurchaseCostMap.set(p.product_id, Number(p.unit_amount) || 0);
+                            }
+                        });
+                    }
+                }
 
                 if (orderItems && orderItems.length > 0) {
                     orderItems.forEach((item: any) => {
-                        const key = item.order_id || item.order_number;
+                        const key = item.order_id;
                         if (key) {
                             if (!itemsByOrderMap[key]) itemsByOrderMap[key] = [];
-                            itemsByOrderMap[key].push(item);
+                            const prod = item.product || (item.seller_sku ? skuProductMap.get(item.seller_sku.toLowerCase().trim()) : null);
+                            const enrichedItem = {
+                                ...item,
+                                product: prod,
+                                product_id: prod?.product_id || item.product_id
+                            };
+                            itemsByOrderMap[key].push(enrichedItem);
                         }
                     });
                 }
@@ -423,31 +637,93 @@ export async function getProfitTrackerData(params: GetOrderReportParams) {
         }
 
         let formattedData = (data || []).map((order: any) => {
-            const hasValidPurchaseCost = order.total_purchase_cost !== null && order.total_purchase_cost > 0;
-            const hasDarazFees = order.daraz_fees !== null && order.daraz_fees !== undefined && order.daraz_fees > 0;
+            const orderKey = order.id || order.order_primary_id;
+            const fetchedItems = itemsByOrderMap[orderKey] || itemsByOrderMap[order.order_number] || order.items_summary || [];
+
+            // 1. Calculate revenue from order items total_amount (or fallback to order.price)
+            let revenue = fetchedItems.reduce((sum: number, it: any) => {
+                const itemAmt = Number(it.total_amount) || Number(it.amount) || 0;
+                return sum + itemAmt;
+            }, 0);
+            if (revenue === 0 && order.price) {
+                revenue = parseFloat(String(order.price)) || 0;
+            }
+
+            // 2. Calculate purchase cost from items
+            let totalPurchaseCost = fetchedItems.reduce((sum: number, it: any) => {
+                const qty = Number(it.quantity) || 1;
+                const cost = Number(it.purchase_cost) 
+                    || Number(it.product?.est_price) 
+                    || (it.product_id ? (latestPurchaseCostMap.get(it.product_id) || 0) : 0);
+                return sum + (qty * cost);
+            }, 0);
+
+            const fees = Number(order.daraz_fees) || 0;
+            const hasValidPurchaseCost = totalPurchaseCost > 0;
+            const hasDarazFees = fees > 0;
             const isSynced = hasValidPurchaseCost && hasDarazFees;
             const calculatedSyncStatus = isSynced ? 'synced' : 'not_synced';
             const deliveredByDaraz = order.delivered_by_daraz || order.delivered_at;
 
-            const fetchedItems = itemsByOrderMap[order.order_primary_id] || itemsByOrderMap[order.order_number] || order.items_summary || [];
+            const sellerAccountVal = fetchedItems[0]?.seller_account 
+                || (Array.isArray(order.daraz_order_items) ? order.daraz_order_items[0]?.seller_account : null) 
+                || order.seller_account 
+                || 'Unknown';
+
+            const estimatedProfit = (revenue - totalPurchaseCost - fees) - 30;
+            const profitPercentage = revenue > 0 ? parseFloat(((estimatedProfit / revenue) * 100).toFixed(2)) : 0;
+
+            // Calculate expected Commission % from Average Sales Price
+            const firstItem = fetchedItems[0];
+            const prod = firstItem?.product;
+            let orderAvgCommPct: number | null = null;
+
+            if (prod) {
+                const rawCategory = prod.category_name || prod.marketplace_category || null;
+                const catRate = findCategoryCommissionRate(prod.category_path, rawCategory, categoryCommissionMap);
+
+                // Only compute if exact leaf category commission was found (if missing, do not crosscheck)
+                if (catRate !== null && revenue > 0) {
+                    const breakdown = calculateDarazFeeBreakdown({
+                        salesPrice: revenue,
+                        categoryCommissionRate: catRate,
+                        otherFees: otherFeesList
+                    });
+                    orderAvgCommPct = parseFloat(breakdown.totalEffectiveFeePercent.toFixed(2));
+                } else {
+                    orderAvgCommPct = null;
+                }
+            }
+
+            const actualCommPct = (isSynced && revenue > 0 && fees > 0)
+                ? parseFloat(((fees / revenue) * 100).toFixed(2))
+                : null;
+
+            const commDiff = (actualCommPct !== null && orderAvgCommPct !== null)
+                ? parseFloat(Math.abs(actualCommPct - orderAvgCommPct).toFixed(2))
+                : null;
 
             return {
-                order_primary_id: order.order_primary_id,
+                order_primary_id: orderKey,
                 order_number: order.order_number,
                 invoice_number: order.invoice_number,
                 order_status: order.order_status,
                 delivered_at: order.delivered_at,
                 delivered_by_daraz: deliveredByDaraz,
                 created_at: order.created_at,
-                seller_account: order.seller_account,
+                seller_account: sellerAccountVal,
                 products: fetchedItems,
                 items_summary: fetchedItems,
-                total_revenue: order.total_revenue || 0,
-                total_purchase_cost: order.total_purchase_cost || 0,
-                daraz_fees: order.daraz_fees || 0,
-                profit: order.estimated_profit,
-                profit_percentage: order.profit_percentage || 0,
-                sync_status: calculatedSyncStatus
+                total_revenue: revenue,
+                total_purchase_cost: totalPurchaseCost,
+                daraz_fees: fees,
+                profit: estimatedProfit,
+                profit_percentage: profitPercentage,
+                sync_status: calculatedSyncStatus,
+                commission_percentage: actualCommPct,
+                exact_commission_percentage: orderAvgCommPct,
+                avg_commission_percentage: orderAvgCommPct,
+                commission_difference: commDiff
             };
         });
 
@@ -797,20 +1073,31 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                 console.log(`[SYNC DEBUG] Order ${orderNumber}: No transactions found yet. skipping fee update.`)
                 feeSyncResult = 'Pending (No Finance Data)'
             } else {
-                // 1. Free Shipping Max Fee
-                const val_free_ship = getFinanceTotal(['free shipping', 'free_shipping'])
+                // Complete ledger calculation:
+                // All non-product-price transactions are deductions/charges/credits from Daraz.
+                // In Daraz API, fees are negative amounts (e.g. -150.48), while credits/discounts are positive (e.g. +175.01).
+                // Net Daraz fee is the net deductions, so we negate the sum of all non-item-price transactions.
+                const feeTransactions = transactions.filter((t: any) => {
+                    const name = (t.fee_name || '').toLowerCase().trim()
+                    return !name.includes('product price paid by buyer') && !name.includes('item price credit')
+                })
 
-                // 2. Co-funded Voucher Max
-                const val_voucher = getFinanceTotal(['co-funded', 'cofunded', 'co_funded'])
+                if (feeTransactions.length > 0) {
+                    finalFee = feeTransactions.reduce((sum: number, t: any) => sum - parseFloat(t.amount || 0), 0)
+                } else {
+                    const val_free_ship = getFinanceTotal(['free shipping', 'free_shipping'])
+                    const val_voucher = getFinanceTotal(['co-funded', 'cofunded', 'co_funded'])
+                    const val_commission = getFinanceTotal(['commission'])
+                    const val_payment = getFinanceTotal(['payment fee'])
+                    const val_handling = getFinanceTotal(['handling fee'])
+                    const val_coin = getFinanceTotal(['coin'])
+                    const val_tax = getFinanceTotal(['tax', 'vat', 'wht'])
+                    const val_shipping = getFinanceTotal(['shipping fee'])
+                    finalFee = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax + val_shipping
+                }
 
-                // 3. Other fees from Finance API
-                const val_commission = getFinanceTotal(['commission'])
-                const val_payment = getFinanceTotal(['payment fee'])
-                const val_handling = getFinanceTotal(['handling fee'])
-                const val_coin = getFinanceTotal(['coin'])
-                const val_tax = getFinanceTotal(['tax', 'vat', 'wht'])
-
-                finalFee = val_free_ship + val_voucher + val_commission + val_payment + val_handling + val_coin + val_tax
+                // Round to 2 decimal places
+                finalFee = Math.round((finalFee || 0) * 100) / 100
 
                 console.log(`[SYNC DEBUG] Order ${orderNumber} (ID: ${targetId}): Found ${transactions?.length || 0} txns. Total Fee: ${finalFee}`)
 
@@ -950,91 +1237,436 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
     }
 }
 
-// Fetch all orders for a specific delivery date
+// Fetch all orders for a specific delivery date with commission difference tracking
 export async function getDailyOrdersForDate(params: { dateStr: string, sellerAccount?: string }) {
     const { dateStr, sellerAccount } = params
-    const supabase = await createAdminClient()
+    try {
+        const supabase = await createAdminClient()
 
-    let query = supabase
-        .from('daraz_order_report_view')
-        .select(`
-            order_primary_id,
+        let selectFields = `
+            id,
             order_number,
             invoice_number,
             order_status,
             delivered_at,
             delivered_by_daraz,
-            delivery_date,
-            seller_account,
-            total_revenue,
-            total_purchase_cost,
+            created_at,
             daraz_fees,
-            estimated_profit,
-            items_summary
-        `)
-        .gte('delivery_date', `${dateStr}T00:00:00.000Z`)
-        .lte('delivery_date', `${dateStr}T23:59:59.999Z`)
-
-    if (sellerAccount && sellerAccount !== 'All') {
-        query = query.eq('seller_account', sellerAccount)
-    }
-
-    query = query.order('delivery_date', { ascending: false }).limit(2000)
-
-    let { data, error } = await query
-
-    if (error || !data || data.length === 0) {
-        // Try fallback date query without 'T' format or with date prefix
-        const fallbackQuery = supabase
-            .from('daraz_order_report_view')
-            .select(`
-                order_primary_id,
-                order_number,
-                invoice_number,
-                order_status,
-                delivered_at,
-                delivered_by_daraz,
-                delivery_date,
-                seller_account,
-                total_revenue,
-                total_purchase_cost,
-                daraz_fees,
-                estimated_profit,
-                items_summary
-            `)
-            .gte('delivery_date', dateStr)
-            .lte('delivery_date', `${dateStr} 23:59:59`)
-        
+            price
+        `
         if (sellerAccount && sellerAccount !== 'All') {
-            fallbackQuery.eq('seller_account', sellerAccount)
+            selectFields += `, daraz_order_items!inner(seller_account)`
         }
 
-        const fallbackResult = await fallbackQuery.order('delivery_date', { ascending: false }).limit(2000)
-        if (!fallbackResult.error && fallbackResult.data && fallbackResult.data.length > 0) {
-            data = fallbackResult.data
+        let query = supabase
+            .from('daraz_orders')
+            .select(selectFields)
+            .eq('order_status', 'Delivered')
+            .or('deleted.is.null,deleted.eq.false')
+            .gte('delivered_by_daraz', `${dateStr}T00:00:00.000Z`)
+            .lte('delivered_by_daraz', `${dateStr}T23:59:59.999Z`)
+
+        if (sellerAccount && sellerAccount !== 'All') {
+            query = query.eq('daraz_order_items.seller_account', sellerAccount)
+        }
+
+        query = query.order('delivered_by_daraz', { ascending: false }).limit(2000)
+
+        let { data, error } = await query
+
+        if (error || !data || data.length === 0) {
+            // Fallback checking delivered_at if delivered_by_daraz didn't match
+            let fallbackQuery = supabase
+                .from('daraz_orders')
+                .select(selectFields)
+                .eq('order_status', 'Delivered')
+                .or('deleted.is.null,deleted.eq.false')
+                .gte('delivered_at', `${dateStr}T00:00:00.000Z`)
+                .lte('delivered_at', `${dateStr}T23:59:59.999Z`)
+
+            if (sellerAccount && sellerAccount !== 'All') {
+                fallbackQuery = fallbackQuery.eq('daraz_order_items.seller_account', sellerAccount)
+            }
+
+            const fallbackResult = await fallbackQuery.order('delivered_at', { ascending: false }).limit(2000)
+            if (!fallbackResult.error && fallbackResult.data && fallbackResult.data.length > 0) {
+                data = fallbackResult.data
+            }
+        }
+
+        const rawOrders = data || []
+        const orderPrimaryIds = rawOrders.map((o: any) => o.id).filter(Boolean)
+
+        let itemsByOrderMap: Record<string, any[]> = {}
+        let categoryCommissionMap = new Map<string, number>()
+        let otherFeesList: any[] = []
+        let latestPurchaseCostMap = new Map<string, number>()
+
+        if (orderPrimaryIds.length > 0) {
+            try {
+                const chunkSize = 150
+                let orderItems: any[] = []
+                for (let i = 0; i < orderPrimaryIds.length; i += chunkSize) {
+                    const chunk = orderPrimaryIds.slice(i, i + chunkSize)
+                    const { data: chunkItems } = await supabase
+                        .from('daraz_order_items')
+                        .select(`
+                            id,
+                            order_id,
+                            product_name,
+                            seller_sku,
+                            product_id,
+                            seller_account,
+                            quantity,
+                            amount,
+                            total_amount,
+                            purchase_cost,
+                            product:products(
+                                id,
+                                product_id,
+                                category_name,
+                                category_path,
+                                marketplace_category,
+                                commission_percent,
+                                est_price
+                            )
+                        `)
+                        .in('order_id', chunk)
+
+                    if (chunkItems) {
+                        orderItems.push(...chunkItems)
+                    }
+                }
+
+                const otherFees = await getDarazOtherFees()
+                if (otherFees) otherFeesList = otherFees
+
+                const missingSkus: string[] = []
+                const targetCategories = new Set<string>()
+
+                orderItems.forEach((it: any) => {
+                    if (!itemsByOrderMap[it.order_id]) itemsByOrderMap[it.order_id] = []
+                    itemsByOrderMap[it.order_id].push(it)
+                    if (!it.product && it.seller_sku) missingSkus.push(it.seller_sku.toLowerCase().trim())
+                    if (it.product?.category_name) targetCategories.add(it.product.category_name.trim())
+                    if (it.product?.marketplace_category) targetCategories.add(it.product.marketplace_category.trim())
+                })
+
+                const skuProductMap = new Map<string, any>()
+                if (missingSkus.length > 0) {
+                    const uniqueSkus = Array.from(new Set(missingSkus)).slice(0, 50)
+                    const { data: matchedProds } = await supabase
+                        .from('products')
+                        .select('id, product_id, category_name, category_path, marketplace_category, commission_percent, est_price, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+                        .or(uniqueSkus.map(s => `seller_sku1.ilike.${s},seller_sku2.ilike.${s},seller_sku3.ilike.${s},seller_sku4.ilike.${s}`).join(','))
+
+                    if (matchedProds) {
+                        matchedProds.forEach((p: any) => {
+                            [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                                if (sku) skuProductMap.set(sku.toLowerCase().trim(), p)
+                            })
+                            if (p.category_name) targetCategories.add(p.category_name.trim())
+                            if (p.marketplace_category) targetCategories.add(p.marketplace_category.trim())
+                        })
+                    }
+                }
+
+                // Batch lookup latest purchase cost for items missing cost
+                const missingCostProductIds = new Set<string>()
+                orderItems.forEach((it: any) => {
+                    const prod = it.product || (it.seller_sku ? skuProductMap.get(it.seller_sku.toLowerCase().trim()) : null)
+                    const cost = Number(it.purchase_cost) || Number(prod?.est_price) || 0
+                    if (cost <= 0 && it.product_id) {
+                        missingCostProductIds.add(it.product_id)
+                    }
+                })
+
+                if (missingCostProductIds.size > 0) {
+                    const { data: purchaseRows } = await supabase
+                        .from('purchases')
+                        .select('product_id, unit_amount')
+                        .in('product_id', Array.from(missingCostProductIds))
+                        .gt('unit_amount', 0)
+                        .order('purchase_date', { ascending: false })
+
+                    if (purchaseRows) {
+                        purchaseRows.forEach((p: any) => {
+                            if (!latestPurchaseCostMap.has(p.product_id)) {
+                                latestPurchaseCostMap.set(p.product_id, Number(p.unit_amount) || 0)
+                            }
+                        })
+                    }
+                }
+
+                categoryCommissionMap = await getCachedCategoryCommissionMap()
+            } catch (itemErr) {
+                console.error('Failed to batch fetch daraz_order_items in getDailyOrdersForDate:', itemErr)
+            }
+        }
+
+        const orders = rawOrders.map((o: any) => {
+            const fetchedItems = itemsByOrderMap[o.id] || []
+
+            let revenue = fetchedItems.reduce((sum: number, it: any) => sum + (Number(it.total_amount) || Number(it.amount) || 0), 0)
+            if (revenue === 0 && o.price) {
+                revenue = parseFloat(String(o.price)) || 0
+            }
+
+            let totalPurchaseCost = fetchedItems.reduce((sum: number, it: any) => {
+                const qty = Number(it.quantity) || 1
+                const cost = Number(it.purchase_cost) 
+                    || Number(it.product?.est_price) 
+                    || (it.product_id ? (latestPurchaseCostMap.get(it.product_id) || 0) : 0)
+                return sum + (qty * cost)
+            }, 0)
+
+            const fees = Number(o.daraz_fees) || 0
+            const hasValidCost = totalPurchaseCost > 0
+            const hasValidFees = fees > 0
+            const isSynced = hasValidCost && hasValidFees
+            const estimatedProfit = (revenue - totalPurchaseCost - fees) - 30
+            const sellerAccountVal = fetchedItems[0]?.seller_account 
+                || (Array.isArray(o.daraz_order_items) ? o.daraz_order_items[0]?.seller_account : null) 
+                || o.seller_account 
+                || 'Unknown'
+
+            // Calculate Exact Commission & Diff
+            const firstItem = fetchedItems[0]
+            const prod = firstItem?.product
+            let orderExactCommPct: number | null = null
+
+            if (prod) {
+                const rawCategory = prod.category_name || prod.marketplace_category || null
+                const catRate = findCategoryCommissionRate(prod.category_path, rawCategory, categoryCommissionMap)
+
+                if (catRate !== null && revenue > 0) {
+                    const breakdown = calculateDarazFeeBreakdown({
+                        salesPrice: revenue,
+                        categoryCommissionRate: catRate,
+                        otherFees: otherFeesList
+                    })
+                    orderExactCommPct = parseFloat(breakdown.totalEffectiveFeePercent.toFixed(2))
+                }
+            }
+
+            const actualCommPct = (isSynced && revenue > 0 && fees > 0)
+                ? parseFloat(((fees / revenue) * 100).toFixed(2))
+                : null
+
+            const commDiff = (actualCommPct !== null && orderExactCommPct !== null)
+                ? parseFloat(Math.abs(actualCommPct - orderExactCommPct).toFixed(2))
+                : null
+
+            const isExactMissing = orderExactCommPct === null
+            const isDiffAlert = commDiff !== null && commDiff > 1.8
+
+            return {
+                order_primary_id: o.id,
+                order_number: o.order_number,
+                invoice_number: o.invoice_number,
+                order_status: o.order_status,
+                delivered_at: o.delivered_at,
+                delivered_by_daraz: o.delivered_by_daraz,
+                seller_account: sellerAccountVal,
+                total_revenue: revenue,
+                total_purchase_cost: totalPurchaseCost,
+                daraz_fees: fees,
+                estimated_profit: estimatedProfit,
+                profit: estimatedProfit,
+                items_summary: fetchedItems,
+                sync_status: isSynced ? 'synced' : 'not_synced',
+                actual_commission_pct: actualCommPct,
+                exact_commission_pct: orderExactCommPct,
+                commission_diff: commDiff,
+                is_exact_missing: isExactMissing,
+                is_diff_alert: isDiffAlert
+            }
+        })
+
+        const orderNumbers = orders.map((o: any) => o.order_number).filter(Boolean)
+        const syncedCount = orders.filter((o: any) => o.sync_status === 'synced').length
+        const unsyncedCount = orders.length - syncedCount
+
+        return {
+            orders,
+            orderNumbers,
+            totalCount: orders.length,
+            syncedCount,
+            unsyncedCount
+        }
+    } catch (err: any) {
+        console.error('Error in getDailyOrdersForDate:', err.message)
+        return {
+            orders: [],
+            orderNumbers: [],
+            totalCount: 0,
+            syncedCount: 0,
+            unsyncedCount: 0
         }
     }
+}
 
-    const orders = (data || []).map((o: any) => {
-        const hasValidCost = o.total_purchase_cost !== null && o.total_purchase_cost > 0
-        const hasValidFees = o.daraz_fees !== null && o.daraz_fees !== undefined && o.daraz_fees > 0
-        const isSynced = hasValidCost && hasValidFees
-        return {
-            ...o,
-            sync_status: isSynced ? 'synced' : 'not_synced'
+// Fetch aggregate commission alerts (count of diff > 1.8% and count of missing exact commission) per date
+export async function getDailyCommissionAlerts(params: {
+    startDate?: string
+    endDate?: string
+    sellerAccount?: string
+}) {
+    const { startDate, endDate, sellerAccount } = params
+    try {
+        const supabase = await createAdminClient()
+
+        let selectFields = 'id, order_number, delivered_by_daraz, delivered_at, daraz_fees, price'
+        if (sellerAccount && sellerAccount !== 'All') {
+            selectFields += ', daraz_order_items!inner(seller_account)'
         }
-    })
 
-    const orderNumbers = orders.map((o: any) => o.order_number).filter(Boolean)
-    const syncedCount = orders.filter((o: any) => o.sync_status === 'synced').length
-    const unsyncedCount = orders.length - syncedCount
+        let query = supabase
+            .from('daraz_orders')
+            .select(selectFields)
+            .eq('order_status', 'Delivered')
+            .or('deleted.is.null,deleted.eq.false')
+            .order('delivered_by_daraz', { ascending: false })
+            .limit(1500)
 
-    return {
-        orders,
-        orderNumbers,
-        totalCount: orders.length,
-        syncedCount,
-        unsyncedCount
+        if (startDate) {
+            query = query.gte('delivered_by_daraz', startDate)
+        } else {
+            const d = new Date()
+            d.setDate(d.getDate() - 45)
+            query = query.gte('delivered_by_daraz', d.toISOString())
+        }
+
+        if (endDate) {
+            const endDateTime = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`
+            query = query.lte('delivered_by_daraz', endDateTime)
+        }
+
+        if (sellerAccount && sellerAccount !== 'All') {
+            query = query.eq('daraz_order_items.seller_account', sellerAccount)
+        }
+
+        const { data: orders, error: ordersError } = await query
+        if (ordersError || !orders || orders.length === 0) {
+            return {}
+        }
+
+        const orderIds = orders.map((o: any) => o.id).filter(Boolean)
+
+        const chunkSize = 150
+        let allItems: any[] = []
+        for (let i = 0; i < orderIds.length; i += chunkSize) {
+            const chunk = orderIds.slice(i, i + chunkSize)
+            const { data: chunkItems } = await supabase
+                .from('daraz_order_items')
+                .select(`
+                    order_id,
+                    product_name,
+                    seller_sku,
+                    product_id,
+                    total_amount,
+                    amount,
+                    product:products(
+                        id,
+                        product_id,
+                        category_name,
+                        category_path,
+                        marketplace_category,
+                        commission_percent
+                    )
+                `)
+                .in('order_id', chunk)
+
+            if (chunkItems) {
+                allItems.push(...chunkItems)
+            }
+        }
+
+        const itemsByOrderMap: Record<string, any[]> = {}
+        const missingSkus: string[] = []
+        const targetCategories = new Set<string>()
+
+        allItems.forEach((it: any) => {
+            if (!itemsByOrderMap[it.order_id]) itemsByOrderMap[it.order_id] = []
+            itemsByOrderMap[it.order_id].push(it)
+            if (!it.product && it.seller_sku) missingSkus.push(it.seller_sku.toLowerCase().trim())
+            if (it.product?.category_name) targetCategories.add(it.product.category_name.trim())
+            if (it.product?.marketplace_category) targetCategories.add(it.product.marketplace_category.trim())
+        })
+
+        const skuProductMap = new Map<string, any>()
+        if (missingSkus.length > 0) {
+            const uniqueSkus = Array.from(new Set(missingSkus)).slice(0, 50)
+            const { data: matchedProds } = await supabase
+                .from('products')
+                .select('id, product_id, category_name, category_path, marketplace_category, commission_percent, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+                .or(uniqueSkus.map(s => `seller_sku1.ilike.${s},seller_sku2.ilike.${s},seller_sku3.ilike.${s},seller_sku4.ilike.${s}`).join(','))
+
+            if (matchedProds) {
+                matchedProds.forEach((p: any) => {
+                    [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                        if (sku) skuProductMap.set(sku.toLowerCase().trim(), p)
+                    })
+                    if (p.category_name) targetCategories.add(p.category_name.trim())
+                    if (p.marketplace_category) targetCategories.add(p.marketplace_category.trim())
+                })
+            }
+        }
+
+        const [categoryCommissionMap, otherFeesList] = await Promise.all([
+            getCachedCategoryCommissionMap(),
+            getDarazOtherFees()
+        ])
+
+        const alertsByDate: Record<string, { redDiffCount: number, missingExactCount: number, totalOrders: number }> = {}
+
+        orders.forEach((order: any) => {
+            const dateRaw = order.delivered_by_daraz || order.delivered_at
+            if (!dateRaw) return
+            const dateKey = format(new Date(dateRaw), 'yyyy-MM-dd')
+
+            if (!alertsByDate[dateKey]) {
+                alertsByDate[dateKey] = { redDiffCount: 0, missingExactCount: 0, totalOrders: 0 }
+            }
+            alertsByDate[dateKey].totalOrders++
+
+            const orderItems = itemsByOrderMap[order.id] || []
+            let revenue = orderItems.reduce((sum: number, it: any) => sum + (Number(it.total_amount) || Number(it.amount) || 0), 0)
+            if (revenue === 0 && order.price) {
+                revenue = parseFloat(String(order.price)) || 0
+            }
+
+            const fees = Number(order.daraz_fees) || 0
+            const firstItem = orderItems[0]
+            const prod = firstItem?.product || (firstItem?.seller_sku ? skuProductMap.get(firstItem.seller_sku.toLowerCase().trim()) : null)
+
+            let catRate: number | null = null
+            if (prod) {
+                const rawCategory = prod.category_name || prod.marketplace_category || null
+                catRate = findCategoryCommissionRate(prod.category_path, rawCategory, categoryCommissionMap)
+            }
+
+            if (catRate === null) {
+                alertsByDate[dateKey].missingExactCount++
+            } else if (fees > 0 && revenue > 0) {
+                const actualComm = (fees / revenue) * 100
+                const breakdown = calculateDarazFeeBreakdown({
+                    salesPrice: revenue,
+                    categoryCommissionRate: catRate,
+                    otherFees: otherFeesList || []
+                })
+                const exactComm = breakdown.totalEffectiveFeePercent
+                const diff = Math.abs(actualComm - exactComm)
+                if (diff > 1.8) {
+                    alertsByDate[dateKey].redDiffCount++
+                }
+            }
+        })
+
+        return alertsByDate
+    } catch (e: any) {
+        console.warn('Error in getDailyCommissionAlerts:', e.message)
+        return {}
     }
 }
 

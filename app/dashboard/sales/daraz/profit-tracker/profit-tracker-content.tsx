@@ -19,7 +19,7 @@ import {
 } from '@/components/ui-shim'
 import { Search, Eye, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText } from 'lucide-react'
 import Link from 'next/link'
-import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats } from '@/features/sales/actions/report-actions'
+import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats, getDailyCommissionAlerts } from '@/features/sales/actions/report-actions'
 import { format, startOfWeek, endOfWeek, getWeek } from 'date-fns'
 import { BulkSyncButton } from './bulk-sync-button'
 import { DailyBreakdownModal } from './daily-breakdown-modal'
@@ -424,6 +424,17 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         },
         staleTime: 5 * 60 * 1000,
         placeholderData: keepPreviousData
+    })
+
+    const { data: dailyAlerts } = useQuery({
+        queryKey: ['daily-commission-alerts', sellerAccount],
+        queryFn: async () => {
+            return getDailyCommissionAlerts({
+                sellerAccount: sellerAccount === 'All' ? undefined : sellerAccount
+            })
+        },
+        staleTime: 5 * 60 * 1000,
+        enabled: activeSubTab === 'daily'
     })
 
     const orders = profitData?.data || []
@@ -949,6 +960,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                     <TableHead className="text-[11px] font-bold uppercase">Product Name</TableHead>
                                     <TableHead className="text-right w-28 text-[11px] font-bold uppercase">Product Price</TableHead>
                                     <TableHead className="text-right w-28 text-[11px] font-bold uppercase">Purchase Cost</TableHead>
+                                    <TableHead className="text-center w-48 min-w-[190px] text-[11px] font-bold uppercase">Commission</TableHead>
                                     <TableHead className="text-right w-28 text-[11px] font-bold uppercase">Profit</TableHead>
                                     <TableHead className="text-center w-16 text-[11px] font-bold uppercase">Action</TableHead>
                                 </TableRow>
@@ -956,13 +968,13 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                             <TableBody>
                                 {isLoading ? (
                                     <TableRow>
-                                        <TableCell colSpan={10} className="text-center py-8 text-gray-500">
+                                        <TableCell colSpan={11} className="text-center py-8 text-gray-500">
                                             Loading orders...
                                         </TableCell>
                                     </TableRow>
                                 ) : sortedDateKeys.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={10} className="text-center py-8 text-gray-500">
+                                        <TableCell colSpan={11} className="text-center py-8 text-gray-500">
                                             No orders found.
                                         </TableCell>
                                     </TableRow>
@@ -977,7 +989,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                                             {group.dateLabel}
                                                         </span>
                                                     </TableCell>
-                                                    <TableCell colSpan={5} className="py-2.5 px-4 align-middle">
+                                                    <TableCell colSpan={6} className="py-2.5 px-4 align-middle">
                                                         <div className="flex flex-wrap items-center gap-2">
                                                             {Object.entries(group.statsBySeller || {}).map(([seller, sellerStats]: [string, any]) => {
                                                                 const sProfit = sellerStats.profit || 0
@@ -1047,7 +1059,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
 
                                                     const firstItem = itemsArray[0]
                                                     const firstProductName = extractProductName(firstItem) || 'Daraz Product'
-                                                    const productId = firstItem?.product_id || firstItem?.id || 'N/A'
+                                                    const productId = firstItem?.product?.product_id || firstItem?.product_id || firstItem?.id || 'N/A'
                                                     const extraItemsCount = itemsArray.length > 1 ? itemsArray.length - 1 : 0
                                                     const rowSNIndex = (page - 1) * limit + idx + 1
 
@@ -1121,6 +1133,79 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                                             <TableCell className="text-right font-semibold text-purple-600 dark:text-purple-400 py-3">
                                                                 Rs. {cost.toLocaleString()}
                                                             </TableCell>
+
+                                                            {/* Commission Column */}
+                                                            {(() => {
+                                                                const actualComm = o.commission_percentage != null
+                                                                    ? Number(o.commission_percentage)
+                                                                    : (revenue > 0 && o.daraz_fees ? (o.daraz_fees / revenue) * 100 : null);
+                                                                const exactComm = o.exact_commission_percentage != null ? Number(o.exact_commission_percentage) : null;
+                                                                const hasExact = exactComm !== null;
+                                                                const diff = (actualComm !== null && hasExact) ? Math.abs(actualComm - exactComm) : null;
+
+                                                                const isBlueText = isSynced && diff !== null && diff > 1.0 && diff <= 1.8;
+                                                                const isLightRedCell = isSynced && diff !== null && diff > 1.8;
+
+                                                                let cellHighlightClass = '';
+                                                                let textHighlightClass = 'text-gray-900 dark:text-gray-100 font-bold';
+                                                                let subtextHighlightClass = 'text-gray-400';
+
+                                                                if (isLightRedCell) {
+                                                                    cellHighlightClass = 'bg-red-50/90 dark:bg-red-950/40 border-x border-red-200/80 dark:border-red-900/50';
+                                                                    textHighlightClass = 'text-red-700 dark:text-red-400 font-bold';
+                                                                    subtextHighlightClass = 'text-red-600/70 dark:text-red-400/70';
+                                                                } else if (isBlueText) {
+                                                                    textHighlightClass = 'text-blue-600 dark:text-blue-400 font-bold';
+                                                                    subtextHighlightClass = 'text-blue-500/70 dark:text-blue-400/70';
+                                                                }
+
+                                                                return (
+                                                                    <TableCell className={`py-3 px-3 transition-colors ${cellHighlightClass}`}>
+                                                                        {!isSynced ? (
+                                                                            <div className="flex items-center justify-between gap-2">
+                                                                                <div className="flex flex-col items-start">
+                                                                                    <span className="font-semibold text-rose-500 text-[11px]">Not Synced</span>
+                                                                                </div>
+                                                                                {hasExact && (
+                                                                                    <div className="flex flex-col items-end border-l border-gray-200 dark:border-zinc-700/60 pl-2.5">
+                                                                                        <span className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">Exact</span>
+                                                                                        <span className="font-semibold text-xs text-gray-500 dark:text-gray-400">
+                                                                                            {exactComm.toFixed(2)}%
+                                                                                        </span>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div
+                                                                                className="flex items-center justify-between gap-2"
+                                                                                title={hasExact && diff !== null ? `Order Total Fee: ${(actualComm ?? 0).toFixed(2)}% (Rs. ${(o.daraz_fees || 0).toFixed(2)})\nAverage Sales Price Exact Commission: ${exactComm.toFixed(2)}%\nDifference: ${diff.toFixed(2)}%` : undefined}
+                                                                            >
+                                                                                {/* Left: Order Total Fee */}
+                                                                                <div className="flex flex-col items-start">
+                                                                                    <span className={`text-xs ${textHighlightClass}`}>
+                                                                                        {(actualComm ?? 0).toFixed(2)}%
+                                                                                    </span>
+                                                                                    <span className={`text-[10px] font-mono ${subtextHighlightClass}`}>
+                                                                                        Rs. {(o.daraz_fees || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                                                    </span>
+                                                                                </div>
+
+                                                                                {/* Right: Exact Commission of same product */}
+                                                                                {hasExact && (
+                                                                                    <div className="flex flex-col items-end border-l border-gray-200 dark:border-zinc-700/60 pl-2.5">
+                                                                                        <span className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">
+                                                                                            Exact
+                                                                                        </span>
+                                                                                        <span className={`text-xs ${isLightRedCell ? 'text-red-700 dark:text-red-400 font-bold' : (isBlueText ? 'text-blue-600 dark:text-blue-400 font-bold' : 'text-gray-700 dark:text-gray-300 font-bold')}`}>
+                                                                                            {exactComm.toFixed(2)}%
+                                                                                        </span>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                    </TableCell>
+                                                                );
+                                                            })()}
 
                                                             <TableCell className="text-right py-3">
                                                                 {!isSynced ? (
@@ -1218,6 +1303,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                         <TableHead className="text-right text-[11px] font-bold uppercase">Profit</TableHead>
                                         <TableHead className="text-right text-[11px] font-bold uppercase">Revenue</TableHead>
                                         <TableHead className="text-center text-[11px] font-bold uppercase">Stores</TableHead>
+                                        <TableHead className="text-center text-[11px] font-bold uppercase">Commission Alerts</TableHead>
                                         <TableHead className="text-center text-[11px] font-bold uppercase">Action</TableHead>
                                     </TableRow>
                                 </TableHeader>
@@ -1230,6 +1316,10 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                         const dateFormatted = !isNaN(dateObj.getTime()) ? format(dateObj, 'EEEE, MMM d, yyyy') : dateKey
                                         const totalProfit = dayStat.totalProfit || 0
                                         const totalRevenue = dayStat.totalRevenue || 0
+
+                                        const alertInfo = dailyAlerts?.[dateKey] || { redDiffCount: 0, missingExactCount: 0 }
+                                        const hasRedDiff = (alertInfo.redDiffCount || 0) > 0
+                                        const hasMissing = (alertInfo.missingExactCount || 0) > 0
 
                                         return (
                                             <TableRow key={dateKey}>
@@ -1247,6 +1337,32 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
 
                                                 <TableCell className="text-center font-medium text-gray-600 dark:text-gray-300 py-3.5">
                                                     {storeCount} Stores
+                                                </TableCell>
+
+                                                <TableCell className="text-center py-3.5">
+                                                    {hasRedDiff || hasMissing ? (
+                                                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                                            {hasRedDiff && (
+                                                                <span
+                                                                    title={`${alertInfo.redDiffCount} order(s) with commission diff > 1.8%`}
+                                                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-50 text-rose-600 border border-rose-200 dark:bg-rose-950/50 dark:text-rose-400 dark:border-rose-900"
+                                                                >
+                                                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+                                                                    {alertInfo.redDiffCount} (&gt;1.8%)
+                                                                </span>
+                                                            )}
+                                                            {hasMissing && (
+                                                                <span
+                                                                    title={`${alertInfo.missingExactCount} order(s) missing exact commission`}
+                                                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/50 dark:text-amber-400 dark:border-amber-900"
+                                                                >
+                                                                    {alertInfo.missingExactCount} Missing
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-gray-400 font-medium">-</span>
+                                                    )}
                                                 </TableCell>
 
                                                 <TableCell className="text-center py-3.5">

@@ -220,6 +220,19 @@ export function DailyBreakdownModal({
                                 </div>
 
                                 <div className="flex items-center gap-2">
+                                    {filteredOrders.some(o => !o.is_exact_missing && o.exact_commission_pct !== null && (o.is_diff_alert || (o.commission_diff !== null && o.commission_diff > 1.8))) && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-md bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-400 dark:border-rose-800">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                            Diff &gt; 1.8%
+                                        </span>
+                                    )}
+                                    {filteredOrders.some(o => o.is_exact_missing || o.exact_commission_pct === null) && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-md bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                            Missing Comm
+                                        </span>
+                                    )}
+
                                     <button
                                         type="button"
                                         onClick={() => setShowUnsyncedOnly(!showUnsyncedOnly)}
@@ -258,27 +271,38 @@ export function DailyBreakdownModal({
                                             <TableHead className="text-right text-[10px] font-bold uppercase">Revenue</TableHead>
                                             <TableHead className="text-right text-[10px] font-bold uppercase">Cost</TableHead>
                                             <TableHead className="text-right text-[10px] font-bold uppercase">Daraz Fee</TableHead>
+                                            <TableHead className="text-center text-[10px] font-bold uppercase">Diff</TableHead>
                                             <TableHead className="text-right text-[10px] font-bold uppercase">Profit</TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody className="text-xs">
                                         {isLoading ? (
                                             <TableRow>
-                                                <TableCell colSpan={8} className="text-center py-6 text-gray-500">
+                                                <TableCell colSpan={9} className="text-center py-6 text-gray-500">
                                                     Loading orders for this day...
                                                 </TableCell>
                                             </TableRow>
                                         ) : filteredOrders.length === 0 ? (
                                             <TableRow>
-                                                <TableCell colSpan={8} className="text-center py-6 text-gray-500">
+                                                <TableCell colSpan={9} className="text-center py-6 text-gray-500">
                                                     No matching orders found.
                                                 </TableCell>
                                             </TableRow>
                                         ) : (
                                             filteredOrders.map((o: any, idx: number) => {
                                                 const isSynced = o.sync_status === 'synced'
+                                                const isMissingExact = o.is_exact_missing || o.exact_commission_pct === null
+                                                const isDiffAlert = !isMissingExact && (o.is_diff_alert || (o.commission_diff !== null && o.commission_diff > 1.8))
+
+                                                let rowBgClass = 'hover:bg-gray-50/50 dark:hover:bg-zinc-800/40 transition-colors'
+                                                if (isDiffAlert) {
+                                                    rowBgClass = 'bg-rose-50/80 hover:bg-rose-100/80 dark:bg-rose-950/40 dark:hover:bg-rose-900/50 border-y border-rose-200/70 dark:border-rose-900/50 transition-colors'
+                                                } else if (isMissingExact) {
+                                                    rowBgClass = 'bg-amber-50/80 hover:bg-amber-100/80 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 border-y border-amber-200/70 dark:border-amber-900/50 transition-colors'
+                                                }
+
                                                 return (
-                                                    <TableRow key={o.order_primary_id || idx} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/40">
+                                                    <TableRow key={o.order_primary_id || idx} className={rowBgClass}>
                                                         <TableCell className="text-center text-gray-400 py-2">{idx + 1}</TableCell>
                                                         <TableCell className="py-2">
                                                             {isSynced ? (
@@ -305,6 +329,27 @@ export function DailyBreakdownModal({
                                                         </TableCell>
                                                         <TableCell className="text-right py-2 text-amber-600 dark:text-amber-400 font-medium">
                                                             Rs. {(o.daraz_fees || 0).toLocaleString()}
+                                                        </TableCell>
+                                                        <TableCell className="text-center py-2 font-semibold">
+                                                            {isMissingExact ? (
+                                                                <span className="font-bold text-amber-700 dark:text-amber-400 text-sm" title="Exact category commission missing">-</span>
+                                                            ) : isDiffAlert ? (
+                                                                <span
+                                                                    className="font-bold text-rose-600 dark:text-rose-400"
+                                                                    title={`Actual Fee: ${o.actual_commission_pct?.toFixed(2)}% | Exact Comm: ${o.exact_commission_pct?.toFixed(2)}% | Diff: ${o.commission_diff?.toFixed(2)}%`}
+                                                                >
+                                                                    {o.commission_diff?.toFixed(2)}%
+                                                                </span>
+                                                            ) : o.commission_diff !== null ? (
+                                                                <span
+                                                                    className="text-gray-700 dark:text-gray-300 font-medium"
+                                                                    title={`Actual Fee: ${o.actual_commission_pct?.toFixed(2)}% | Exact Comm: ${o.exact_commission_pct?.toFixed(2)}%`}
+                                                                >
+                                                                    {o.commission_diff?.toFixed(2)}%
+                                                                </span>
+                                                            ) : (
+                                                                <span className="text-gray-400 font-medium">-</span>
+                                                            )}
                                                         </TableCell>
                                                         <TableCell className={`text-right font-bold py-2 ${(o.estimated_profit || o.profit || 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}`}>
                                                             Rs. {(o.estimated_profit || o.profit || 0).toLocaleString()}

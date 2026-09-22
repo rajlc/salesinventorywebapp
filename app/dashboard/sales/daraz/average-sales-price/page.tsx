@@ -8,6 +8,14 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { getDarazAvgPrices, updateDarazAvgPrice, bulkUpdateDarazAvgPrice, syncDarazAvgPricesGoogleSheets, pullDarazAvgPricesFromGoogleSheets, syncLiveSellerPrices, pushPriceToDaraz, DarazAvgPriceItem, updateWebsitePricesBulk, syncLiveSellerPricesForProduct, toggleProductPriceLock, autoUpdateWebsitePrices, setProductFinalStock, releaseProductFinalStock } from '@/features/sales/actions/avg-price-actions'
 import { saveCompetitorLinks, syncAllCompetitorsCron, CompetitorItem } from '@/features/sales/actions/competitor-actions'
+import { getDarazOtherFees } from '@/features/sales/actions/daraz-commission-actions'
+import {
+    calculateExactProductProfit,
+    calculateDarazFeeBreakdown,
+    calculateExactBreakevenPrice,
+    getDarazHandlingFee,
+    OtherFeeItem
+} from '@/features/sales/utils/daraz-fee-calculator'
 
 const DEFAULT_STORE_THEME: { bg: string; text: string; border: string } = { bg: 'bg-[#F3F4F6]', text: 'text-[#374151]', border: 'border-[#E5E7EB]' }
 
@@ -20,6 +28,7 @@ const storeColorMap: Record<string, { bg: string; text: string; border: string }
 
 export default function DarazAverageSalesPricePage() {
     const [data, setData] = useState<DarazAvgPriceItem[]>([])
+    const [otherFees, setOtherFees] = useState<OtherFeeItem[]>([])
     const [isLoading, setIsLoading] = useState(true)
     const [salesDays, setSalesDays] = useState<number | string>(60)
     const [isSyncing, setIsSyncing] = useState(false)
@@ -209,6 +218,76 @@ export default function DarazAverageSalesPricePage() {
         return Array.from(storesMap.values())
     }
 
+    const getExactCommissionDisplay = (item: DarazAvgPriceItem) => {
+        // If exact_category_commission is available, compute reactive breakdown using otherFees and live prices
+        if (item.exact_category_commission !== null && item.exact_category_commission !== undefined && otherFees && otherFees.length > 0) {
+            let liveSellingPrice: number | null = null
+            if (item.sales_priority && item.priority_seller_account) {
+                const pAcc = String(item.priority_seller_account).toLowerCase().trim()
+                const skus = [item.seller_sku1, item.seller_sku2, item.seller_sku3, item.seller_sku4]
+                const accounts = [item.seller_account1, item.seller_account2, item.seller_account3, item.seller_account4]
+                for (let i = 0; i < 4; i++) {
+                    const acc = accounts[i] ? String(accounts[i]).toLowerCase().trim() : ''
+                    const sku = skus[i]
+                    if (acc.includes(pAcc) && sku) {
+                        const detail = item.live_prices?.[`${sku}_slot_${i}`] || item.live_prices?.[sku]
+                        if (detail && detail.price > 0) {
+                            liveSellingPrice = detail.special_price || detail.price
+                            break
+                        }
+                    }
+                }
+            }
+            if (!liveSellingPrice) {
+                const skus = [item.seller_sku1, item.seller_sku2, item.seller_sku3, item.seller_sku4]
+                for (let i = 0; i < 4; i++) {
+                    const sku = skus[i]
+                    if (sku) {
+                        const detail = item.live_prices?.[`${sku}_slot_${i}`] || item.live_prices?.[sku]
+                        if (detail && detail.price > 0) {
+                            liveSellingPrice = detail.special_price || detail.price
+                            break
+                        }
+                    }
+                }
+            }
+            const refPrice = liveSellingPrice || item.market_price || item.campaign_price || item.mega_campaign_price || item.regular_sales_price || 0
+            if (refPrice > 0) {
+                const breakdown = calculateDarazFeeBreakdown({
+                    salesPrice: refPrice,
+                    categoryCommissionRate: item.exact_category_commission,
+                    otherFees
+                })
+                const totalComm = parseFloat(breakdown.totalEffectiveFeePercent.toFixed(2))
+                return {
+                    totalPercent: totalComm,
+                    rawCategoryRate: item.exact_category_commission,
+                    effectiveCategoryRate: parseFloat(breakdown.effectiveCommissionRate.toFixed(2)),
+                    handlingFee: breakdown.handlingFeeDetail?.totalFee || 0,
+                    handlingFeeBracket: breakdown.handlingFeeDetail?.bracketLabel || '',
+                    handlingFeePercent: parseFloat(((breakdown.handlingFeeDetail?.totalFee || 0) / refPrice * 100).toFixed(2)),
+                    otherFeesPercent: parseFloat((breakdown.otherFeeDetails.filter(f => f.id !== 'handling_fee').reduce((sum, f) => sum + f.deductionAmount, 0) / refPrice * 100).toFixed(2)),
+                    referencePrice: refPrice,
+                    isLivePrice: !!liveSellingPrice
+                }
+            }
+        }
+        if (item.exact_total_commission !== null && item.exact_total_commission !== undefined) {
+            return {
+                totalPercent: item.exact_total_commission,
+                rawCategoryRate: item.exact_commission_breakdown?.rawCategoryRate ?? 0,
+                effectiveCategoryRate: item.exact_commission_breakdown?.effectiveCategoryRate ?? 0,
+                handlingFee: item.exact_commission_breakdown?.handlingFee ?? 0,
+                handlingFeeBracket: item.exact_commission_breakdown?.handlingFeeBracket ?? '',
+                handlingFeePercent: item.exact_commission_breakdown?.handlingFeePercent ?? 0,
+                otherFeesPercent: item.exact_commission_breakdown?.otherFeesPercent ?? 0,
+                referencePrice: item.exact_commission_breakdown?.referencePrice ?? 0,
+                isLivePrice: item.exact_commission_breakdown?.isLivePrice ?? false
+            }
+        }
+        return null
+    }
+
     useEffect(() => {
         const timer = setTimeout(() => setDebouncedSearch(search), 500)
         return () => clearTimeout(timer)
@@ -221,8 +300,14 @@ export default function DarazAverageSalesPricePage() {
     async function loadData(days: number | string = salesDays, forceFresh: boolean = false) {
         setIsLoading(true)
         try {
-            const result = await getDarazAvgPrices(days, forceFresh)
-            setData(result)
+            const [result, fees] = await Promise.all([
+                getDarazAvgPrices(days, forceFresh),
+                getDarazOtherFees()
+            ])
+            setData(result || [])
+            if (fees && fees.length > 0) {
+                setOtherFees(fees)
+            }
         } catch (error) {
             console.error('Failed to load data:', error)
         } finally {
@@ -413,14 +498,26 @@ export default function DarazAverageSalesPricePage() {
                 }
             }
             if (type === 'regular') {
-                const commPct = item.commission_percent !== null ? item.commission_percent : 25
-                const breakeven = item.purchasing_price / (1 - commPct / 100)
+                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                    ? item.exact_category_commission
+                    : (item.commission_percent !== null ? item.commission_percent : 25)
+                const breakeven = calculateExactBreakevenPrice({
+                    purchasingPrice: item.purchasing_price,
+                    categoryCommissionRate: commPct,
+                    otherFees
+                }) || (item.purchasing_price / (1 - commPct / 100))
                 const rawReg = breakeven * (1 + regularPct / 100)
                 newPrice = Math.ceil(rawReg / 5) * 5
             }
             if (type === 'breakeven') {
-                const commPct = item.commission_percent !== null ? item.commission_percent : 25
-                const breakeven = item.purchasing_price / (1 - commPct / 100)
+                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                    ? item.exact_category_commission
+                    : (item.commission_percent !== null ? item.commission_percent : 25)
+                const breakeven = calculateExactBreakevenPrice({
+                    purchasingPrice: item.purchasing_price,
+                    categoryCommissionRate: commPct,
+                    otherFees
+                }) || (item.purchasing_price / (1 - commPct / 100))
                 newPrice = Math.round(breakeven / 5) * 5
             }
             if (type === 'lowest_live') {
@@ -498,8 +595,14 @@ export default function DarazAverageSalesPricePage() {
                 const darazPrice = item.market_price || 0
                 newCampaignPrice = Math.round(darazPrice - amount)
             } else if (type === 'breakeven_pct' || type === 'breakeven_amt') {
-                const commPct = item.commission_percent !== null ? item.commission_percent : 25
-                const breakeven = item.purchasing_price / (1 - commPct / 100)
+                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                    ? item.exact_category_commission
+                    : (item.commission_percent !== null ? item.commission_percent : 25)
+                const breakeven = calculateExactBreakevenPrice({
+                    purchasingPrice: item.purchasing_price,
+                    categoryCommissionRate: commPct,
+                    otherFees
+                }) || (item.purchasing_price / (1 - commPct / 100))
                 if (type === 'breakeven_pct') {
                     newCampaignPrice = Math.round(breakeven + (breakeven * (amount / 100)))
                 } else {
@@ -636,7 +739,11 @@ export default function DarazAverageSalesPricePage() {
                     const reg15 = matchedProd ? (matchedProd.regular_sales_price || 0) : 0
                     const campaign = matchedProd ? (matchedProd.campaign_price || 0) : 0
                     const purchase = matchedProd ? (matchedProd.purchasing_price || 0) : 0
-                    const commission = matchedProd ? (matchedProd.commission_percent !== null ? matchedProd.commission_percent : 25) : 25
+                    const commission = matchedProd
+                        ? ((matchedProd.exact_category_commission !== null && matchedProd.exact_category_commission !== undefined)
+                            ? matchedProd.exact_category_commission
+                            : (matchedProd.commission_percent !== null ? matchedProd.commission_percent : 25))
+                        : 25
                     const name = matchedProd ? matchedProd.product_name : 'Product Not Found'
 
                     let basePrice = 0
@@ -754,8 +861,13 @@ export default function DarazAverageSalesPricePage() {
             const sorted = getSortedCompareRows()
             const exportData = sorted.map(row => {
                 const custom = getCustomPrice(row)
-                const commissionAmt = custom * ((row.commission_percent || 0) / 100)
-                const profit = custom - commissionAmt - (row.purchasing_price || 0) - 30
+                const profitRes = calculateExactProductProfit({
+                    sellingPrice: custom,
+                    purchasingPrice: row.purchasing_price || 0,
+                    categoryCommissionRate: row.commission_percent !== undefined ? row.commission_percent : 25,
+                    otherFees
+                })
+                const profit = profitRes.profit !== null ? profitRes.profit : 0
 
                 const diffVal = getPriceOfCol(row, diffCol1) - getPriceOfCol(row, diffCol2)
                 const diffLabel = `${getColLabel(diffCol1)} - ${getColLabel(diffCol2)}`
@@ -1005,15 +1117,26 @@ export default function DarazAverageSalesPricePage() {
             // Optimistic update
             setData(prev => prev.map(item => {
                 if (item.product_id === productId) {
-                    const commissionFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                    const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                        ? item.exact_category_commission
+                        : (item.commission_percent !== null ? item.commission_percent : 25)
+                    const calcProfit = (price: number | null) => {
+                        if (!price || price <= 0 || item.purchasing_price <= 0) return null
+                        return calculateExactProductProfit({
+                            sellingPrice: price,
+                            purchasingPrice: item.purchasing_price,
+                            categoryCommissionRate: commPct,
+                            otherFees
+                        }).profit
+                    }
                     return {
                         ...item,
                         market_price: mPrice,
-                        market_price_profit: mPrice ? (mPrice - (mPrice * commissionFactor) - item.purchasing_price) : null,
+                        market_price_profit: calcProfit(mPrice),
                         campaign_price: cPrice,
-                        campaign_price_profit: cPrice ? (cPrice - (cPrice * commissionFactor) - item.purchasing_price) : null,
+                        campaign_price_profit: calcProfit(cPrice),
                         mega_campaign_price: mcPrice,
-                        mega_campaign_price_profit: mcPrice ? (mcPrice - (mcPrice * commissionFactor) - item.purchasing_price) : null
+                        mega_campaign_price_profit: calcProfit(mcPrice)
                     }
                 }
                 return item
@@ -1058,15 +1181,26 @@ export default function DarazAverageSalesPricePage() {
         // 2. Optimistic UI update in the table immediately
         setData(prev => prev.map(item => {
             if (item.product_id === targetId) {
-                const commissionFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                    ? item.exact_category_commission
+                    : (item.commission_percent !== null ? item.commission_percent : 25)
+                const calcProfit = (price: number | null) => {
+                    if (!price || price <= 0 || item.purchasing_price <= 0) return null
+                    return calculateExactProductProfit({
+                        sellingPrice: price,
+                        purchasingPrice: item.purchasing_price,
+                        categoryCommissionRate: commPct,
+                        otherFees
+                    }).profit
+                }
                 return {
                     ...item,
                     market_price: mPrice,
-                    market_price_profit: mPrice ? (mPrice - (mPrice * commissionFactor) - item.purchasing_price) : null,
+                    market_price_profit: calcProfit(mPrice),
                     campaign_price: cPrice,
-                    campaign_price_profit: cPrice ? (cPrice - (cPrice * commissionFactor) - item.purchasing_price) : null,
+                    campaign_price_profit: calcProfit(cPrice),
                     mega_campaign_price: mcPrice,
-                    mega_campaign_price_profit: mcPrice ? (mcPrice - (mcPrice * commissionFactor) - item.purchasing_price) : null
+                    mega_campaign_price_profit: calcProfit(mcPrice)
                 }
             }
             return item
@@ -1548,8 +1682,13 @@ export default function DarazAverageSalesPricePage() {
                                     <tbody className="divide-y dark:divide-zinc-800 font-semibold text-gray-700 dark:text-gray-300">
                                         {sortedRows.map((row, index) => {
                                             const customPrice = getCustomPrice(row)
-                                            const commissionAmt = customPrice * ((row.commission_percent || 0) / 100)
-                                            const netProfit = customPrice - commissionAmt - (row.purchasing_price || 0) - 30
+                                            const profitRes = calculateExactProductProfit({
+                                                sellingPrice: customPrice,
+                                                purchasingPrice: row.purchasing_price || 0,
+                                                categoryCommissionRate: row.commission_percent !== undefined ? row.commission_percent : 25,
+                                                otherFees
+                                            })
+                                            const netProfit = profitRes.profit !== null ? profitRes.profit : 0
 
                                             const val1 = getPriceOfCol(row, diffCol1)
                                             const val2 = getPriceOfCol(row, diffCol2)
@@ -1825,8 +1964,15 @@ export default function DarazAverageSalesPricePage() {
                                 const totalStock = Object.values(item.live_prices || {}).reduce((sum, lp) => sum + (lp.quantity || 0), 0)
                                 const isOutOfStock = totalStock === 0 && Object.keys(item.live_prices || {}).length > 0
 
-                                const commPct = item.commission_percent !== null ? item.commission_percent : 25
-                                const rawReg = item.breakeven_price * (1 + regularPct / 100)
+                                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                                    ? item.exact_category_commission
+                                    : (item.commission_percent !== null ? item.commission_percent : 25)
+                                const effectiveBreakeven = calculateExactBreakevenPrice({
+                                    purchasingPrice: item.purchasing_price,
+                                    categoryCommissionRate: commPct,
+                                    otherFees
+                                }) || item.breakeven_price
+                                const rawReg = effectiveBreakeven * (1 + regularPct / 100)
                                 const regPrice = Math.ceil(rawReg / 5) * 5
 
                                 const isBestSelling = (item.sold_qty || 0) > 30
@@ -1876,30 +2022,56 @@ export default function DarazAverageSalesPricePage() {
                                     'BTAS': 'bg-amber-50 text-amber-700 border-amber-200',
                                 }
 
-                                // Helper profit calculator for Daraz / Campaign prices based on purchasing price & commission
-                                const calcPriceProfit = (price: number | null | undefined) => {
-                                    if (price == null || price <= 0 || item.purchasing_price <= 0) return null
-                                    const commPct = item.commission_percent !== null ? item.commission_percent : 25
-                                    const netPayout = price * (1 - commPct / 100)
-                                    return netPayout - item.purchasing_price
+                                // Helper profit calculator for Daraz / Campaign / Live prices based on exact Daraz deductions:
+                                // Category Commission with 13% VAT + Other % Fees with 13% VAT + Tiered Handling Fee with 13% VAT
+                                const calcPriceProfitDetail = (price: number | null | undefined) => {
+                                    if (price == null || price <= 0 || item.purchasing_price <= 0) return { profit: null, breakdown: null, tooltip: '' }
+                                    const res = calculateExactProductProfit({
+                                        sellingPrice: price,
+                                        purchasingPrice: item.purchasing_price,
+                                        categoryCommissionRate: commPct,
+                                        otherFees
+                                    })
+
+                                    let tooltip = ''
+                                    if (res.breakdown) {
+                                        const bd = res.breakdown
+                                        const feeLines = bd.otherFeeDetails.map(f =>
+                                            `• ${f.name} (${f.type === 'bracket' ? (f.bracketNote || 'Tiered') : `${f.baseRate}%${f.applyVat ? ' + 13% VAT' : ''}`}): -Rs. ${f.deductionAmount.toFixed(2)}`
+                                        ).join('\n')
+
+                                        const commLabel = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                                            ? `Exact Category Commission (${item.daraz_category || 'Category'})`
+                                            : `Category Commission`
+
+                                        tooltip = `Selling Price: Rs. ${price.toLocaleString()}\n• ${commLabel} (${bd.rawCommissionRate.toFixed(2)}% + 13% VAT = ${bd.effectiveCommissionRate.toFixed(2)}%): -Rs. ${bd.totalCommissionFee.toFixed(2)}\n${feeLines}\n-----------------------------------\nTotal Daraz Deductions: -Rs. ${bd.totalDeduction.toFixed(2)} (${bd.totalEffectiveFeePercent.toFixed(1)}%)\nNet Payout: Rs. ${bd.netPayout.toFixed(2)}\nPurchasing Cost: Rs. ${item.purchasing_price.toFixed(2)}\nNet Profit: ${res.profit !== null && res.profit >= 0 ? '+' : ''}Rs. ${res.profit?.toFixed(2)}`
+                                    }
+                                    return { profit: res.profit, breakdown: res.breakdown, tooltip }
                                 }
 
-                                const darazProfit = item.market_price_profit !== null && item.market_price_profit !== undefined
-                                    ? item.market_price_profit
-                                    : calcPriceProfit(item.market_price)
+                                const calcPriceProfit = (price: number | null | undefined) => {
+                                    return calcPriceProfitDetail(price).profit
+                                }
 
-                                const campaignProfit = item.campaign_price_profit !== null && item.campaign_price_profit !== undefined
-                                    ? item.campaign_price_profit
-                                    : calcPriceProfit(item.campaign_price)
+                                const darazProfitInfo = calcPriceProfitDetail(item.market_price)
+                                const darazProfit = (darazProfitInfo.profit !== null && darazProfitInfo.profit !== undefined)
+                                    ? darazProfitInfo.profit
+                                    : (item.market_price_profit ?? null)
 
-                                const megaCampaignProfit = item.mega_campaign_price_profit !== null && item.mega_campaign_price_profit !== undefined
-                                    ? item.mega_campaign_price_profit
-                                    : calcPriceProfit(item.mega_campaign_price)
+                                const campaignProfitInfo = calcPriceProfitDetail(item.campaign_price)
+                                const campaignProfit = (campaignProfitInfo.profit !== null && campaignProfitInfo.profit !== undefined)
+                                    ? campaignProfitInfo.profit
+                                    : (item.campaign_price_profit ?? null)
+
+                                const megaCampaignProfitInfo = calcPriceProfitDetail(item.mega_campaign_price)
+                                const megaCampaignProfit = (megaCampaignProfitInfo.profit !== null && megaCampaignProfitInfo.profit !== undefined)
+                                    ? megaCampaignProfitInfo.profit
+                                    : (item.mega_campaign_price_profit ?? null)
 
                                 return (
                                     <div
                                         key={item.product_id}
-                                        className={`flex items-center bg-white rounded-2xl border border-[#E5E7EB] shadow-sm overflow-visible border-l-[4px] ${leftBorderColor} gap-6 p-5 min-h-[136px] max-h-[140px]`}
+                                        className={`flex items-center bg-white rounded-2xl border border-[#E5E7EB] shadow-sm overflow-visible border-l-[4px] ${leftBorderColor} gap-6 px-5 py-4 min-h-[136px]`}
                                         style={{ fontFamily: 'Inter, sans-serif' }}
                                     >
                                         {/* ─── Checkbox & Row Number ─── */}
@@ -1973,7 +2145,7 @@ export default function DarazAverageSalesPricePage() {
                                                     </span>
                                                     {isOutOfStock && (
                                                         <span className="inline-flex text-[11px] font-semibold text-[#DC2626] bg-[#FEE2E2] px-[7px] py-[2px] rounded-full">
-                                                            OUT
+                                                            Stock Out
                                                         </span>
                                                     )}
                                                     {item.is_new_pushed && (
@@ -1987,6 +2159,17 @@ export default function DarazAverageSalesPricePage() {
                                                         </span>
                                                     )}
                                                 </div>
+                                                {item.daraz_category && (
+                                                    <div className="flex items-center gap-1 mt-1 mb-0.5">
+                                                        <span
+                                                            className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-orange-700 dark:text-orange-400 bg-orange-50 dark:bg-orange-950/30 px-2 py-0.5 rounded border border-orange-200 dark:border-orange-900/40 max-w-[240px] truncate"
+                                                            title={`Daraz Category: ${item.daraz_category}`}
+                                                        >
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-orange-500 shrink-0"></span>
+                                                            <span className="truncate">{item.daraz_category}</span>
+                                                        </span>
+                                                    </div>
+                                                )}
                                                 <div className="space-y-0.5 mt-0.5">
                                                     {skusToShow.map((sku, i) => (
                                                         <div key={i} className="font-mono text-[11px] font-medium text-[#6B7280] leading-[15px] truncate max-w-[200px]" title={sku}>
@@ -2013,19 +2196,50 @@ export default function DarazAverageSalesPricePage() {
                                             <div className="flex flex-col">
                                                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-[#9CA3AF]">📈 COMMISSION</span>
                                                 <div className="mt-0.5">
-                                                    {item.commission_percent !== null ? (
-                                                        <span className="inline-flex items-center bg-gray-100 text-[#111827] border border-gray-200 text-[11px] font-bold px-[7px] py-[1.5px] rounded-full">
-                                                            {item.commission_percent.toFixed(2)}%{item.is_default_commission ? ' (est)' : ''}
-                                                        </span>
-                                                    ) : (
-                                                        <span className="text-[11px] font-medium text-[#9CA3AF] italic">No orders</span>
-                                                    )}
+                                                    {(() => {
+                                                        const exactComm = getExactCommissionDisplay(item)
+                                                        if (exactComm) {
+                                                            return (
+                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                    {item.commission_percent !== null && (
+                                                                        <span
+                                                                            className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 line-through decoration-red-500/80 decoration-[1.5px]"
+                                                                            title={`Previous Commission: ${item.commission_percent.toFixed(2)}%`}
+                                                                        >
+                                                                            {item.commission_percent.toFixed(2)}%
+                                                                        </span>
+                                                                    )}
+                                                                    <span
+                                                                        className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-extrabold px-[7px] py-[1.5px] rounded-full shadow-sm cursor-help"
+                                                                        title={
+                                                                            `Exact Total Commission: ${exactComm.totalPercent.toFixed(2)}%\n` +
+                                                                            `• Daraz Leaf Category (${item.daraz_category || 'Category'}): ${exactComm.rawCategoryRate}% (+13% VAT = ${exactComm.effectiveCategoryRate}%)\n` +
+                                                                            `• Ref Price: Rs.${exactComm.referencePrice} (${exactComm.isLivePrice ? 'Live Price' : 'Default'})\n` +
+                                                                            `• Handling Fee: Rs.${exactComm.handlingFee} (${exactComm.handlingFeePercent}%)\n` +
+                                                                            `• Other Fees: ${exactComm.otherFeesPercent}%`
+                                                                        }
+                                                                    >
+                                                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                                                                        {exactComm.totalPercent.toFixed(2)}%
+                                                                    </span>
+                                                                </div>
+                                                            )
+                                                        }
+                                                        if (item.commission_percent !== null) {
+                                                            return (
+                                                                <span className="inline-flex items-center bg-gray-100 text-[#111827] border border-gray-200 text-[11px] font-bold px-[7px] py-[1.5px] rounded-full">
+                                                                    {item.commission_percent.toFixed(2)}%{item.is_default_commission ? ' (est)' : ''}
+                                                                </span>
+                                                            )
+                                                        }
+                                                        return <span className="text-[11px] font-medium text-[#9CA3AF] italic">No orders</span>
+                                                    })()}
                                                 </div>
                                             </div>
                                             <div className="flex flex-col">
                                                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-[#9CA3AF]">🔥 BREAKEVEN</span>
                                                 <span className="text-[15px] font-bold text-[#111827] leading-tight mt-0.5">
-                                                    Rs.{item.breakeven_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                                    Rs.{effectiveBreakeven.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                                                 </span>
                                             </div>
                                         </div>
@@ -2056,7 +2270,8 @@ export default function DarazAverageSalesPricePage() {
                                                 const isStockOut = stockQty === 0
                                                 const isLowStock = stockQty > 0 && stockQty <= 5
                                                 const isAboveMrpLive = mrpVal != null && sellingPrice > mrpVal
-                                                const liveProfit = calcPriceProfit(sellingPrice)
+                                                const liveProfitInfo = calcPriceProfitDetail(sellingPrice)
+                                                const liveProfit = liveProfitInfo.profit
 
                                                 const getStoreAlias = (storeName?: string | null) => {
                                                     if (!storeName) return 'STORE'
@@ -2112,8 +2327,11 @@ export default function DarazAverageSalesPricePage() {
                                                                 )}
                                                             </div>
                                                             {liveProfit !== null && (
-                                                                <span className={`text-[11px] font-bold shrink-0 ${liveProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
-                                                                    {liveProfit >= 0 ? '+' : ''}Rs.{liveProfit.toFixed(2)}
+                                                                <span
+                                                                    className={`text-[11px] font-bold shrink-0 cursor-help ${liveProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}
+                                                                    title={liveProfitInfo.tooltip || undefined}
+                                                                >
+                                                                    {liveProfit >= 0 ? '+' : ''}Rs.{liveProfit.toFixed(1)}
                                                                 </span>
                                                             )}
                                                         </div>
@@ -2198,7 +2416,10 @@ export default function DarazAverageSalesPricePage() {
                                                         <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
                                                     )}
                                                     {darazProfit !== null && (
-                                                        <span className={`text-[11px] font-bold ${darazProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                        <span
+                                                            className={`text-[11px] font-bold cursor-help ${darazProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}
+                                                            title={darazProfitInfo.tooltip || undefined}
+                                                        >
                                                             {darazProfit >= 0 ? '+' : ''}Rs.{darazProfit.toFixed(1)}
                                                         </span>
                                                     )}
@@ -2217,7 +2438,10 @@ export default function DarazAverageSalesPricePage() {
                                                         <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
                                                     )}
                                                     {campaignProfit !== null && (
-                                                        <span className={`text-[11px] font-bold ${campaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                        <span
+                                                            className={`text-[11px] font-bold cursor-help ${campaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}
+                                                            title={campaignProfitInfo.tooltip || undefined}
+                                                        >
                                                             {campaignProfit >= 0 ? '+' : ''}Rs.{campaignProfit.toFixed(1)}
                                                         </span>
                                                     )}
@@ -2236,7 +2460,10 @@ export default function DarazAverageSalesPricePage() {
                                                         <span className="text-[14px] font-semibold text-[#9CA3AF]">—</span>
                                                     )}
                                                     {megaCampaignProfit !== null && (
-                                                        <span className={`text-[11px] font-bold ${megaCampaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}>
+                                                        <span
+                                                            className={`text-[11px] font-bold cursor-help ${megaCampaignProfit >= 0 ? 'text-[#16A34A]' : 'text-[#DC2626]'}`}
+                                                            title={megaCampaignProfitInfo.tooltip || undefined}
+                                                        >
                                                             {megaCampaignProfit >= 0 ? '+' : ''}Rs.{megaCampaignProfit.toFixed(1)}
                                                         </span>
                                                     )}
@@ -2339,9 +2566,16 @@ export default function DarazAverageSalesPricePage() {
                                                 <div className="space-y-1.5 max-h-[105px] overflow-y-auto hide-scrollbar">
                                                     {item.competitors.map((comp, idx) => {
                                                         const compPrice = comp.current_price || 0
-                                                        const commFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                                                        const compCommPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                                                            ? item.exact_category_commission
+                                                            : (item.commission_percent !== null ? item.commission_percent : 25)
                                                         const compProfit = compPrice > 0 && item.purchasing_price > 0
-                                                            ? compPrice - (compPrice * commFactor) - item.purchasing_price
+                                                            ? calculateExactProductProfit({
+                                                                sellingPrice: compPrice,
+                                                                purchasingPrice: item.purchasing_price,
+                                                                categoryCommissionRate: compCommPct,
+                                                                otherFees
+                                                            }).profit
                                                             : null
 
                                                         return (
@@ -2823,13 +3057,31 @@ export default function DarazAverageSalesPricePage() {
                 const pCamp = modalCampaignPrice.trim() !== '' ? parseFloat(modalCampaignPrice) : NaN
                 const pMega = modalMegaCampaignPrice.trim() !== '' ? parseFloat(modalMegaCampaignPrice) : NaN
 
-                const commFactor = (item.commission_percent !== null ? item.commission_percent : 25) / 100
+                const commPct = (item.exact_category_commission !== null && item.exact_category_commission !== undefined)
+                    ? item.exact_category_commission
+                    : (item.commission_percent !== null ? item.commission_percent : 25)
                 const purchasing = item.purchasing_price || 0
 
+                const calcModalProfit = (p: number) => {
+                    if (isNaN(p) || p <= 0 || purchasing <= 0) return null
+                    return calculateExactProductProfit({
+                        sellingPrice: p,
+                        purchasingPrice: purchasing,
+                        categoryCommissionRate: commPct,
+                        otherFees
+                    }).profit
+                }
+
+                const modalBreakeven = calculateExactBreakevenPrice({
+                    purchasingPrice: purchasing,
+                    categoryCommissionRate: commPct,
+                    otherFees
+                }) || item.breakeven_price
+
                 // Profit calculations
-                const darazProfit = (!isNaN(pDaraz) && pDaraz > 0) ? (pDaraz - (pDaraz * commFactor) - purchasing) : null
-                const campProfit = (!isNaN(pCamp) && pCamp > 0) ? (pCamp - (pCamp * commFactor) - purchasing) : null
-                const megaProfit = (!isNaN(pMega) && pMega > 0) ? (pMega - (pMega * commFactor) - purchasing) : null
+                const darazProfit = calcModalProfit(pDaraz)
+                const campProfit = calcModalProfit(pCamp)
+                const megaProfit = calcModalProfit(pMega)
 
                 // Campaign vs Daraz Difference
                 const hasCampVsDaraz = !isNaN(pDaraz) && pDaraz > 0 && !isNaN(pCamp) && pCamp > 0
@@ -2883,13 +3135,13 @@ export default function DarazAverageSalesPricePage() {
                                 <div className="bg-white dark:bg-zinc-900 p-2 rounded-lg border border-gray-100 dark:border-zinc-800">
                                     <span className="text-[10px] uppercase font-bold text-gray-400 block">Commission</span>
                                     <span className="font-bold text-gray-800 dark:text-gray-200">
-                                        {item.commission_percent != null ? `${item.commission_percent}%` : '25%'}
+                                        {commPct != null ? `${commPct}%` : '25%'}
                                     </span>
                                 </div>
                                 <div className="bg-white dark:bg-zinc-900 p-2 rounded-lg border border-gray-100 dark:border-zinc-800">
                                     <span className="text-[10px] uppercase font-bold text-gray-400 block">Breakeven</span>
                                     <span className="font-bold text-gray-800 dark:text-gray-200">
-                                        Rs.{item.breakeven_price ? item.breakeven_price.toFixed(1) : '—'}
+                                        Rs.{modalBreakeven ? modalBreakeven.toFixed(1) : '—'}
                                     </span>
                                 </div>
                             </div>
@@ -3506,9 +3758,16 @@ export default function DarazAverageSalesPricePage() {
                             <div className="space-y-4">
                                 {(viewCompetitorProduct.competitors || []).map((comp) => {
                                     const compPrice = comp.current_price || 0
-                                    const commFactor = (viewCompetitorProduct.commission_percent !== null ? viewCompetitorProduct.commission_percent : 25) / 100
+                                    const compCommPct = (viewCompetitorProduct.exact_category_commission !== null && viewCompetitorProduct.exact_category_commission !== undefined)
+                                        ? viewCompetitorProduct.exact_category_commission
+                                        : (viewCompetitorProduct.commission_percent !== null ? viewCompetitorProduct.commission_percent : 25)
                                     const compProfit = compPrice > 0 && viewCompetitorProduct.purchasing_price > 0
-                                        ? compPrice - (compPrice * commFactor) - viewCompetitorProduct.purchasing_price
+                                        ? calculateExactProductProfit({
+                                            sellingPrice: compPrice,
+                                            purchasingPrice: viewCompetitorProduct.purchasing_price,
+                                            categoryCommissionRate: compCommPct,
+                                            otherFees
+                                        }).profit
                                         : null
 
                                     return (
@@ -3564,7 +3823,12 @@ export default function DarazAverageSalesPricePage() {
                                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
                                                                  {parsedPrices.map((vPrice, vIdx) => {
                                                                      const vProfit = vPrice > 0 && viewCompetitorProduct.purchasing_price > 0
-                                                                         ? vPrice - (vPrice * commFactor) - viewCompetitorProduct.purchasing_price
+                                                                         ? calculateExactProductProfit({
+                                                                             sellingPrice: vPrice,
+                                                                             purchasingPrice: viewCompetitorProduct.purchasing_price,
+                                                                             categoryCommissionRate: compCommPct,
+                                                                             otherFees
+                                                                         }).profit
                                                                          : null
                                                                      const vDiff = vPrice > 0 && live1Price > 0 ? vPrice - live1Price : null
 

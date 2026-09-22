@@ -34,9 +34,10 @@ export default function RootLayout({
 }>) {
     return (
         <html lang="en" suppressHydrationWarning>
-            <head>
+            <head suppressHydrationWarning>
                 {/* Prevent dark-mode flash of unstyled content (FOUC) before hydration */}
                 <script
+                    suppressHydrationWarning
                     dangerouslySetInnerHTML={{
                         __html: `try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark')}else{document.documentElement.classList.remove('dark')}}catch(e){}`,
                     }}

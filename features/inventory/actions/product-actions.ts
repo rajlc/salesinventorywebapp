@@ -2370,7 +2370,7 @@ export async function syncWebsiteStatus(): Promise<{
  * Rule: if category_name is null → clear both category columns.
  *       if category_name exists → apply mapping (or null if not in mapping).
  */
-export async function remapAllCategories(): Promise<{
+export async function remapAllCategories(productIds?: string[]): Promise<{
     success: boolean
     updated: number
     cleared: number
@@ -2397,9 +2397,9 @@ export async function remapAllCategories(): Promise<{
             if (pageError) {
                 // marketplace_category column may not exist — fall back
                 const { data: pageData2, error: pageError2 } = await supabase
-                    .from('daraz_website_category_mappings')
-                    .select('daraz_category, website_category')
-                    .range(pageFrom, pageFrom + PAGE_SIZE - 1)
+                .from('daraz_website_category_mappings')
+                .select('daraz_category, website_category')
+                .range(pageFrom, pageFrom + PAGE_SIZE - 1)
                 if (pageError2) throw new Error(`Failed to fetch mappings: ${pageError2.message}`)
                 mappingsData = [...mappingsData, ...(pageData2 || [])]
                 break // No marketplace_category column — stop after first page with fallback
@@ -2420,11 +2420,17 @@ export async function remapAllCategories(): Promise<{
             }
         }
 
-        // 2. Fetch all non-deleted products (id + category_name only)
-        const { data: products, error: prodError } = await supabase
+        // 2. Fetch non-deleted products (id + category_name only), optionally filtered by productIds
+        let prodQuery = supabase
             .from('products')
             .select('id, category_name')
             .eq('is_deleted', false)
+
+        if (productIds && productIds.length > 0) {
+            prodQuery = prodQuery.in('id', productIds)
+        }
+
+        const { data: products, error: prodError } = await prodQuery
 
         if (prodError) throw new Error(`Failed to fetch products: ${prodError.message}`)
 

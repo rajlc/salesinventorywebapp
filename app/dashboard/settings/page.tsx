@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Store, Calendar, MapPin, CheckCircle, Database, Users, Shield, RefreshCw, Scale, Globe, Brain } from 'lucide-react'
+import { Store, Calendar, MapPin, CheckCircle, Database, Users, Shield, RefreshCw, Scale, Globe, Brain, Percent } from 'lucide-react'
 
 const settingsCards = [
     {
@@ -10,6 +10,13 @@ const settingsCards = [
         icon: Store,
         href: '/dashboard/settings/stores',
         color: 'bg-blue-500',
+    },
+    {
+        title: 'Daraz Commission',
+        description: 'Manage category commission rates and platform fees',
+        icon: Percent,
+        href: '/dashboard/settings/daraz-commission',
+        color: 'bg-orange-500',
     },
     {
         title: 'AI Integration',

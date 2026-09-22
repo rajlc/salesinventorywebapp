@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath, unstable_cache } from 'next/cache'
+import { revalidatePath } from 'next/cache'
 import { getGoogleSheetsClient } from '@/lib/google-sheets'
 import axios from 'axios'
 import crypto from 'crypto'
@@ -24,6 +24,14 @@ export interface LivePriceDetail {
 }
 
 import { CompetitorItem, getCompetitorDataForProducts } from './competitor-actions'
+import { getDarazOtherFees } from './daraz-commission-actions'
+import {
+    calculateExactBreakevenPrice,
+    calculateExactProductProfit,
+    calculateDarazFeeBreakdown,
+    getDarazHandlingFee,
+    OtherFeeItem
+} from '@/features/sales/utils/daraz-fee-calculator'
 
 export interface DarazAvgPriceItem {
     product_id: string
@@ -70,6 +78,20 @@ export interface DarazAvgPriceItem {
     competitors?: CompetitorItem[]
     weekly_competitor_sold?: number
     has_price_alert?: boolean
+    daraz_category?: string | null
+    category_path?: string | null
+    exact_category_commission?: number | null
+    exact_total_commission?: number | null
+    exact_commission_breakdown?: {
+        rawCategoryRate: number
+        effectiveCategoryRate: number
+        handlingFee: number
+        handlingFeeBracket: string
+        handlingFeePercent: number
+        otherFeesPercent: number
+        referencePrice: number
+        isLivePrice: boolean
+    } | null
 }
 
 async function getSoldQuantitiesMap(days: number) {
@@ -218,28 +240,40 @@ async function fetchAllRows(
     }
 }
 
-// Cache key varies by `days` param. TTL = 90 seconds.
-// This prevents the 8-parallel full-table-scan storm from firing on every page render.
-const _getDarazAvgPricesCached = unstable_cache(
-    async (days: number | string) => _getDarazAvgPricesInner(days),
-    ['daraz-avg-prices'],
-    { revalidate: 90, tags: ['daraz-avg-prices'] }
-)
+// In-memory cache for Average Sales Price (bypasses Next.js 2MB unstable_cache hard limit)
+let inMemoryAvgPricesCache = new Map<string, { data: any[]; timestamp: number }>()
+const AVG_PRICES_CACHE_TTL = 90 * 1000 // 90 seconds
 
 export async function getDarazAvgPrices(days: number | string = 60, forceFresh: boolean = false) {
-    if (forceFresh) {
-        return _getDarazAvgPricesInner(days)
+    const key = `days_${days}`
+    const now = Date.now()
+
+    if (!forceFresh && inMemoryAvgPricesCache.has(key)) {
+        const entry = inMemoryAvgPricesCache.get(key)!
+        if (now - entry.timestamp < AVG_PRICES_CACHE_TTL) {
+            const cached = entry.data
+            // Safety check: if cached data has items but all have 0 SKUs, or cached data has no categories or exact commission yet, bypass cache
+            if (cached && cached.length > 0) {
+                const hasSkus = cached.some(item => (item.seller_skus && item.seller_skus.length > 0))
+                const hasCategories = cached.some(item => !!item.daraz_category)
+                const hasExactComm = cached.some(item => item.exact_total_commission != null)
+                if (hasSkus && hasCategories && hasExactComm) {
+                    return cached
+                }
+            }
+        }
     }
-    const cached = await _getDarazAvgPricesCached(days)
-    // Safety check: if cached data has items but all have 0 SKUs (e.g. from an earlier migration delay), bypass cache
-    if (cached && cached.length > 0 && !cached.some(item => (item.seller_skus && item.seller_skus.length > 0))) {
-        return _getDarazAvgPricesInner(days)
+
+    const fresh = await _getDarazAvgPricesInner(days)
+    if (fresh && fresh.length > 0) {
+        inMemoryAvgPricesCache.set(key, { data: fresh, timestamp: now })
     }
-    return cached
+    return fresh
 }
 
 export async function revalidateDarazAvgPricesCache() {
     try {
+        inMemoryAvgPricesCache.clear()
         revalidatePath('/dashboard/sales/daraz/average-sales-price')
     } catch (e) {
         // ignore
@@ -266,12 +300,12 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
     // 4. Fetch products SKUs, priorities, lock flags, push flags concurrently (PAGINATED with safe fallback)
     const skusPromise = (async () => {
         try {
-            const res = await fetchAllRows(supabase, 'products', 'id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at, is_final_stock_locked, final_stock_qty, final_stock_error, final_stock_locked_at')
+            const res = await fetchAllRows(supabase, 'products', 'id, product_id, category_name, category_path, marketplace_category, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at, is_final_stock_locked, final_stock_qty, final_stock_error, final_stock_locked_at')
             if (res && res.length > 0) return res
         } catch (err) {
             console.warn('fetchAllRows with final stock columns failed, falling back to base columns:', err)
         }
-        return fetchAllRows(supabase, 'products', 'id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at')
+        return fetchAllRows(supabase, 'products', 'id, product_id, category_name, category_path, marketplace_category, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, sales_priority, priority_seller_account, commission_percent, is_price_locked, is_new_pushed, pushed_at')
     })()
 
     // 5. Fetch combos concurrently (PAGINATED)
@@ -301,6 +335,12 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         .from('daraz_live_prices')
         .select('*', { count: 'exact', head: true })
 
+    // 10. Fetch Daraz Other Fees
+    const otherFeesPromise = getDarazOtherFees()
+
+    // 11. Fetch Daraz Category Commissions (PAGINATED for full category tree)
+    const commissionsPromise = fetchAllRows(supabase, 'daraz_category_commissions', 'leaf_category, category_path, commission_rate')
+
     // Await all independent calls concurrently!
     const [
         soldQtyMap,
@@ -311,7 +351,9 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         wholesalePricesData,
         dbPrices,
         webProducts,
-        liveCountRes
+        liveCountRes,
+        otherFeesList,
+        commissionsData
     ] = await Promise.all([
         soldQtyMapPromise,
         productsPromise,
@@ -321,7 +363,9 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         wholesalePricesPromise,
         dbPricesPromise,
         ecommercePromise,
-        liveCountPromise
+        liveCountPromise,
+        otherFeesPromise,
+        commissionsPromise
     ])
 
     // Parallel fetch live prices page-by-page concurrently!
@@ -367,15 +411,34 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
     }
 
     const skuMap = new Map<string, any>()
+    const skuByCodeMap = new Map<string, any>()
     const reverseSkuMap = new Map<string, string>() // Map SKU to Product ID
 
     if (skusData) {
         skusData.forEach((s: any) => {
-            skuMap.set(s.id, s)
+            if (s.id) skuMap.set(s.id, s)
+            if (s.product_id) skuByCodeMap.set(String(s.product_id), s)
             if (s.seller_sku1) reverseSkuMap.set(s.seller_sku1.toLowerCase().trim(), s.id)
             if (s.seller_sku2) reverseSkuMap.set(s.seller_sku2.toLowerCase().trim(), s.id)
             if (s.seller_sku3) reverseSkuMap.set(s.seller_sku3.toLowerCase().trim(), s.id)
             if (s.seller_sku4) reverseSkuMap.set(s.seller_sku4.toLowerCase().trim(), s.id)
+        })
+    }
+
+    const categoryCommissionMap = new Map<string, number>()
+    if (commissionsData) {
+        commissionsData.forEach((c: any) => {
+            const rate = Number(c.commission_rate)
+            if (!isNaN(rate)) {
+                if (c.leaf_category) {
+                    categoryCommissionMap.set(c.leaf_category.toLowerCase().trim(), rate)
+                }
+                if (c.category_path) {
+                    const p = c.category_path.toLowerCase().trim()
+                    categoryCommissionMap.set(p, rate)
+                    categoryCommissionMap.set(p.replace(/\s*>\s*/g, ' > '), rate)
+                }
+            }
         })
     }
 
@@ -459,7 +522,15 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
     const competitorMap = await getCompetitorDataForProducts(productIds)
 
     const result: DarazAvgPriceItem[] = (productsData || []).map((p: any) => {
-        const prodSkus = skuMap.get(p.product_id) || {}
+        let prodSkus = skuMap.get(p.product_id)
+        if (!prodSkus && p.product_code) {
+            prodSkus = skuByCodeMap.get(String(p.product_code))
+        }
+        if (!prodSkus && p.seller_sku) {
+            const resolvedId = reverseSkuMap.get(p.seller_sku.toLowerCase().trim())
+            if (resolvedId) prodSkus = skuMap.get(resolvedId)
+        }
+        prodSkus = prodSkus || {}
         const skus = [prodSkus.seller_sku1, prodSkus.seller_sku2, prodSkus.seller_sku3, prodSkus.seller_sku4].filter(Boolean)
         const sellerAccounts = [prodSkus.seller_account1, prodSkus.seller_account2, prodSkus.seller_account3, prodSkus.seller_account4].filter(Boolean)
 
@@ -470,40 +541,7 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
         const purchasingPrice = isCombo ? comboData.price : baseData.price
         const purchasingRemark = isCombo ? comboData.remark : baseData.remark
 
-        // Latest Commission Percent
-        // Load directly from products table if available, fallback to 25%
-        const dbComm = prodSkus.commission_percent
-        let commissionPercent = 0.25
-        let isDefaultCommission = true
-
-        if (dbComm !== undefined && dbComm !== null) {
-            commissionPercent = dbComm / 100
-            if (dbComm !== 25.00) {
-                isDefaultCommission = false
-            }
-        }
-
-        // Calculations
-        let breakevenPrice = 0
-        if (commissionPercent !== null && commissionPercent < 1) {
-            breakevenPrice = purchasingPrice / (1 - commissionPercent)
-        } else {
-            breakevenPrice = purchasingPrice // fallback if no commission data
-        }
-
-        const rawRegularSalesPrice = breakevenPrice * 1.15
-        const regularSalesPrice = Math.ceil(rawRegularSalesPrice / 5) * 5
-
-        const editableStats = pricesMap.get(p.product_id)
-        const marketPrice = editableStats?.market_price || null
-        const campaignPrice = editableStats?.campaign_price || null
-        const megaCampaignPrice = editableStats?.mega_campaign_price || null
-
-        const marketPriceProfit = marketPrice ? (marketPrice - (marketPrice * commissionPercent) - purchasingPrice) : null
-        const campaignPriceProfit = campaignPrice ? (campaignPrice - (campaignPrice * commissionPercent) - purchasingPrice) : null
-        const megaCampaignPriceProfit = megaCampaignPrice ? (megaCampaignPrice - (megaCampaignPrice * commissionPercent) - purchasingPrice) : null
-
-        // Live Prices Mapping across 4 slots
+        // 1. Live Prices Mapping across 4 slots
         const productLivePrices: Record<string, LivePriceDetail> = {}
         const rawSkus = [prodSkus.seller_sku1, prodSkus.seller_sku2, prodSkus.seller_sku3, prodSkus.seller_sku4]
         const rawAccounts = [prodSkus.seller_account1, prodSkus.seller_account2, prodSkus.seller_account3, prodSkus.seller_account4]
@@ -516,10 +554,10 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
 
             if (prices && prices.length > 0) {
                 // 1. Try to find store matching targetAccount for this slot
-                let sp = targetAccount 
+                let sp = targetAccount
                     ? prices.find(p => p.store_name?.toLowerCase().includes(targetAccount) || p.account?.toLowerCase().includes(targetAccount))
                     : null
-                
+
                 // 2. Fallback to prices[idx] if available, else prices[0]
                 if (!sp) {
                     sp = prices[idx] || prices[0]
@@ -546,6 +584,151 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
                 }
             }
         })
+
+        // 2. Daraz Category & Exact Commission Lookup
+        const rawCategory = prodSkus?.category_name || prodSkus?.marketplace_category || null
+        const rawCategoryPath = prodSkus?.category_path || null
+        let exactCategoryCommission: number | null = null
+
+        // Priority 1: Exact full category path match
+        if (rawCategoryPath) {
+            const pathKey = rawCategoryPath.toLowerCase().trim()
+            if (categoryCommissionMap.has(pathKey)) {
+                exactCategoryCommission = categoryCommissionMap.get(pathKey)!
+            } else {
+                const normalized = pathKey.replace(/\s*>\s*/g, ' > ')
+                if (categoryCommissionMap.has(normalized)) {
+                    exactCategoryCommission = categoryCommissionMap.get(normalized)!
+                }
+            }
+        }
+
+        // Priority 2: Fallback to leaf category name
+        if (exactCategoryCommission === null && rawCategory) {
+            const key = rawCategory.toLowerCase().trim()
+            if (categoryCommissionMap.has(key)) {
+                exactCategoryCommission = categoryCommissionMap.get(key)!
+            } else {
+                for (const [k, r] of Array.from(categoryCommissionMap.entries())) {
+                    if (k.includes(key) || key.includes(k)) {
+                        exactCategoryCommission = r
+                        break
+                    }
+                }
+            }
+        }
+
+        // Priority is exact leaf category commission from daraz_category_commissions.
+        // Fallback to products table commission_percent, else 25%
+        const dbComm = prodSkus.commission_percent
+        let rawCommissionRate = 25.0
+        let isDefaultCommission = true
+
+        if (exactCategoryCommission !== null) {
+            rawCommissionRate = exactCategoryCommission
+            isDefaultCommission = false
+        } else if (dbComm !== undefined && dbComm !== null) {
+            rawCommissionRate = Number(dbComm)
+            if (rawCommissionRate !== 25.00) {
+                isDefaultCommission = false
+            }
+        }
+
+        // 3. Exact breakeven price with tiered handling fee & 13% VAT rules
+        const breakevenPrice = calculateExactBreakevenPrice({
+            purchasingPrice,
+            categoryCommissionRate: rawCommissionRate,
+            otherFees: otherFeesList
+        })
+
+        const rawRegularSalesPrice = breakevenPrice * 1.15
+        const regularSalesPrice = Math.ceil(rawRegularSalesPrice / 5) * 5
+
+        const editableStats = pricesMap.get(p.product_id)
+        const marketPrice = editableStats?.market_price || null
+        const campaignPrice = editableStats?.campaign_price || null
+        const megaCampaignPrice = editableStats?.mega_campaign_price || null
+
+        const marketPriceProfit = marketPrice ? calculateExactProductProfit({
+            sellingPrice: marketPrice,
+            purchasingPrice,
+            categoryCommissionRate: rawCommissionRate,
+            otherFees: otherFeesList
+        }).profit : null
+
+        const campaignPriceProfit = campaignPrice ? calculateExactProductProfit({
+            sellingPrice: campaignPrice,
+            purchasingPrice,
+            categoryCommissionRate: rawCommissionRate,
+            otherFees: otherFeesList
+        }).profit : null
+
+        const megaCampaignPriceProfit = megaCampaignPrice ? calculateExactProductProfit({
+            sellingPrice: megaCampaignPrice,
+            purchasingPrice,
+            categoryCommissionRate: rawCommissionRate,
+            otherFees: otherFeesList
+        }).profit : null
+
+        // 4. Live selling price determination for handling fee from Live 1 to 4
+        let liveSellingPrice: number | null = null
+        if (prodSkus.sales_priority && prodSkus.priority_seller_account) {
+            const pAcc = String(prodSkus.priority_seller_account).toLowerCase().trim()
+            for (let i = 0; i < 4; i++) {
+                const acc = rawAccounts[i] ? String(rawAccounts[i]).toLowerCase().trim() : ''
+                const sku = rawSkus[i]
+                if (acc.includes(pAcc) && sku) {
+                    const detail = productLivePrices[`${sku}_slot_${i}`] || productLivePrices[sku]
+                    if (detail && detail.price > 0) {
+                        liveSellingPrice = detail.special_price || detail.price
+                        break
+                    }
+                }
+            }
+        }
+        if (!liveSellingPrice) {
+            for (let i = 0; i < 4; i++) {
+                const sku = rawSkus[i]
+                if (sku) {
+                    const detail = productLivePrices[`${sku}_slot_${i}`] || productLivePrices[sku]
+                    if (detail && detail.price > 0) {
+                        liveSellingPrice = detail.special_price || detail.price
+                        break
+                    }
+                }
+            }
+        }
+
+        // 5. Calculate Exact Total Commission
+        let exactTotalCommission: number | null = null
+        let exactCommissionBreakdown: any = null
+
+        if (exactCategoryCommission !== null) {
+            const refPrice = liveSellingPrice || marketPrice || campaignPrice || megaCampaignPrice || regularSalesPrice || 0
+            if (refPrice > 0) {
+                const breakdown = calculateDarazFeeBreakdown({
+                    salesPrice: refPrice,
+                    categoryCommissionRate: exactCategoryCommission,
+                    otherFees: otherFeesList
+                })
+                exactTotalCommission = parseFloat(breakdown.totalEffectiveFeePercent.toFixed(2))
+                exactCommissionBreakdown = {
+                    rawCategoryRate: exactCategoryCommission,
+                    effectiveCategoryRate: parseFloat(breakdown.effectiveCommissionRate.toFixed(2)),
+                    handlingFee: breakdown.handlingFeeDetail?.totalFee || 0,
+                    handlingFeeBracket: breakdown.handlingFeeDetail?.bracketLabel || '',
+                    handlingFeePercent: parseFloat(((breakdown.handlingFeeDetail?.totalFee || 0) / refPrice * 100).toFixed(2)),
+                    otherFeesPercent: parseFloat((breakdown.otherFeeDetails.filter(f => f.id !== 'handling_fee').reduce((sum, f) => sum + f.deductionAmount, 0) / refPrice * 100).toFixed(2)),
+                    referencePrice: refPrice,
+                    isLivePrice: !!liveSellingPrice
+                }
+            } else {
+                const activeOtherFeesPct = otherFeesList
+                    .filter(f => f.is_active && f.type === 'percentage')
+                    .reduce((sum, f) => sum + (f.apply_vat ? f.rate * 1.13 : f.rate), 0)
+                exactTotalCommission = parseFloat(((exactCategoryCommission * 1.13) + activeOtherFeesPct).toFixed(2))
+            }
+        }
 
         const websitePrices = websitePricesMap.get(p.product_id) || { regular_price: null, special_price: null }
 
@@ -574,7 +757,7 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
             seller_accounts: sellerAccounts,
             purchasing_price: purchasingPrice,
             purchasing_remark: purchasingRemark,
-            commission_percent: commissionPercent !== null ? commissionPercent * 100 : null, // Convert to percentage 15%
+            commission_percent: rawCommissionRate,
             is_default_commission: isDefaultCommission,
             breakeven_price: breakevenPrice,
             regular_sales_price: regularSalesPrice,
@@ -602,7 +785,12 @@ async function _getDarazAvgPricesInner(days: number | string = 60) {
             final_stock_locked_at: prodSkus?.final_stock_locked_at || null,
             competitors: productCompetitors,
             weekly_competitor_sold: weeklyCompetitorSold,
-            has_price_alert: hasPriceAlert
+            has_price_alert: hasPriceAlert,
+            daraz_category: rawCategory,
+            category_path: rawCategoryPath,
+            exact_category_commission: exactCategoryCommission,
+            exact_total_commission: exactTotalCommission,
+            exact_commission_breakdown: exactCommissionBreakdown
         }
     })
 
@@ -1291,12 +1479,12 @@ export async function pushPriceToDaraz(productId: string, targetStoreIds?: strin
  * updates can be an array of { sku: string, quantity: number, store_id: string }
  */
 export async function pushStockToDaraz(
-    productId: string | Array<{ sku: string, quantity: number, store_id: string }>, 
+    productId: string | Array<{ sku: string, quantity: number, store_id: string }>,
     updates?: Array<{ sku: string, quantity: number, store_id: string }>,
     supabaseClient?: any
 ) {
     try {
-        const upds: Array<{ sku: string; quantity: number; store_id: string }> = 
+        const upds: Array<{ sku: string; quantity: number; store_id: string }> =
             Array.isArray(productId) ? productId : (updates || []);
         const supabase = supabaseClient || await createClient()
         const appKey = process.env.NEXT_PUBLIC_DARAZ_APP_KEY
@@ -1408,14 +1596,14 @@ export async function updateWebsitePricesBulk(updates: { inventory_id: string, r
     if (!ecommerceSupabaseUrl) {
         return { success: false, message: 'Ecommerce URL not configured.' }
     }
-    
+
     if (!ecommerceServiceRoleKey) {
         return { success: false, message: 'Missing ECOMMERCE_SUPABASE_SERVICE_ROLE_KEY in .env.local! Cannot bypass RLS to update prices.' }
     }
 
     try {
         const ecommerceSupabase = createJSClient(ecommerceSupabaseUrl, ecommerceServiceRoleKey)
-        
+
         const supabase = await createClient()
         const productIds = updates.map(u => u.inventory_id)
         const { data: dbProds } = await supabase
@@ -1437,12 +1625,12 @@ export async function updateWebsitePricesBulk(updates: { inventory_id: string, r
             // Only update products that already exist with this inventory_id
             const { error, count } = await ecommerceSupabase
                 .from('ecommerce_products')
-                .update({ 
-                    regular_price: upd.regular_price, 
-                    special_price: upd.special_price 
+                .update({
+                    regular_price: upd.regular_price,
+                    special_price: upd.special_price
                 })
                 .eq('inventory_id', upd.inventory_id)
-            
+
             if (error) {
                 console.error(`Failed to update website price for inventory_id ${upd.inventory_id}:`, error.message)
                 errorCount++
@@ -1452,7 +1640,7 @@ export async function updateWebsitePricesBulk(updates: { inventory_id: string, r
         }
 
         revalidatePath('/dashboard/sales/daraz/average-sales-price')
-        
+
         if (errorCount > 0) {
             return { success: true, message: `Updated ${successCount} products. ${errorCount} failed (likely not synced to website yet).` }
         }
@@ -1613,7 +1801,7 @@ export async function recalculateAllProductCommissions() {
     }
 
     const productIds = products.map(p => p.id)
-    
+
     // Process in chunks of 50 to avoid big IN filters
     const chunkSize = 50
     for (let i = 0; i < productIds.length; i += chunkSize) {
@@ -1740,7 +1928,7 @@ export async function autoUpdateWebsitePrices() {
 
         // Calculate discounted price
         const rawDiscountedPrice = lowestPrice * (1 - discountPercent / 100)
-        
+
         // Round to nearest multiple of 5
         const roundedDiscountedPrice = Math.round(rawDiscountedPrice / 5) * 5
         const roundedRegularPrice = Math.round(lowestPrice / 5) * 5
@@ -1927,12 +2115,12 @@ export async function triggerMultiAccountStockOut(productId: string, supabaseCli
             // Clear any previous error on success
             await supabase
                 .from('products')
-                .update({ 
+                .update({
                     final_stock_error: null,
-                    final_stock_qty: 0 
+                    final_stock_qty: 0
                 })
                 .eq('id', productId)
-            
+
             console.log(`[FinalStock] Automated Stock Out SUCCESS for product ${prod.product_name} (${productId}): ${pushRes.message}`)
             return { success: true, message: pushRes.message }
         } else {
@@ -1951,7 +2139,7 @@ export async function triggerMultiAccountStockOut(productId: string, supabaseCli
         console.error(`[FinalStock] Exception during automated stock out for product ${productId}:`, err)
         try {
             await supabase.from('products').update({ final_stock_error: errorMsg }).eq('id', productId)
-        } catch (_) {}
+        } catch (_) { }
         return { success: false, message: errorMsg }
     }
 }
@@ -1993,7 +2181,7 @@ export async function checkAndProcessFinalStockDecrement(
             const pSkus = [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4]
                 .filter(Boolean)
                 .map(s => s.toLowerCase().trim())
-            
+
             pSkus.forEach(s => skuToProdMap.set(s, p))
         }
 
@@ -2004,9 +2192,9 @@ export async function checkAndProcessFinalStockDecrement(
             const skuLower = (item.seller_sku || '').toLowerCase().trim()
             const matchingProd = skuToProdMap.get(skuLower)
             if (matchingProd) {
-                const existing = productDeltas.get(matchingProd.id) || { 
-                    product: matchingProd, 
-                    delta: 0, 
+                const existing = productDeltas.get(matchingProd.id) || {
+                    product: matchingProd,
+                    delta: 0,
                     sku: item.seller_sku || '',
                     seller_account: item.seller_account
                 }
