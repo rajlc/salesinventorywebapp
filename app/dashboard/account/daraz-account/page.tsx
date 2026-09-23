@@ -12,18 +12,19 @@ export default function DarazAccountPage() {
 }
 
 function DarazAccountContent() {
-    const { data: stores, isLoading: isStoresLoading } = useOnlineStores()
+    const { data: rawStores, isLoading: isStoresLoading } = useOnlineStores()
+    const stores = Array.isArray(rawStores) ? rawStores : []
     const [selectedStoreId, setSelectedStoreId] = useState<string>('')
     const [activeTab, setActiveTab] = useState<'report' | 'account-statement'>('account-statement')
 
     // Select first store by default
     useEffect(() => {
-        if (stores && stores.length > 0 && !selectedStoreId) {
+        if (stores.length > 0 && !selectedStoreId) {
             setSelectedStoreId(stores[0].id)
         }
     }, [stores, selectedStoreId])
 
-    const selectedStore = stores?.find(s => s.id === selectedStoreId)
+    const selectedStore = stores.find(s => s.id === selectedStoreId)
 
     return (
         <div className="flex flex-col h-full bg-gray-50 dark:bg-zinc-950">

@@ -77,7 +77,7 @@ function DashboardContent() {
     // Fetch daily sales report
     const { data: dailyReport, isLoading } = useQuery({
         queryKey: ['daily-sales-report'],
-        queryFn: getDailySalesReport,
+        queryFn: () => getDailySalesReport(),
         enabled: activeTab === 'daily',
         staleTime: 60 * 1000
     })
@@ -85,7 +85,7 @@ function DashboardContent() {
     // Fetch order summary report
     const { data: summaryReport, isLoading: isSummaryLoading } = useQuery({
         queryKey: ['order-summary-report'],
-        queryFn: getOrderSummaryReport,
+        queryFn: () => getOrderSummaryReport(),
         enabled: activeTab === 'summary',
         staleTime: 60 * 1000
     })
@@ -110,7 +110,7 @@ function DashboardContent() {
     }
 
     // Calculate totals for Daily Sales Report
-    const dailyTotals = dailyReport?.reduce((acc, row) => ({
+    const dailyTotals = dailyReport?.reduce((acc: any, row: any) => ({
         shipped_qty: acc.shipped_qty + row.shipped_qty,
         shipped_amount: acc.shipped_amount + row.shipped_amount,
         returning_to_seller_qty: acc.returning_to_seller_qty + row.returning_to_seller_qty,
@@ -129,7 +129,7 @@ function DashboardContent() {
     })
 
     // Calculate totals for Order Summary Report
-    const summaryTotals = summaryReport?.reduce((acc, row) => ({
+    const summaryTotals = summaryReport?.reduce((acc: any, row: any) => ({
         shipped_qty: acc.shipped_qty + row.shipped_qty,
         shipped_amount: acc.shipped_amount + row.shipped_amount,
         returning_to_seller_qty: acc.returning_to_seller_qty + row.returning_to_seller_qty,
@@ -343,15 +343,15 @@ function DashboardContent() {
                                     ) : dailyReport && dailyReport.length > 0 ? (
                                         (() => {
                                             // Group by date
-                                            const groupedReport = dailyReport?.reduce((acc, row) => {
+                                            const groupedReport = dailyReport?.reduce((acc: Record<string, any[]>, row: any) => {
                                                 if (!acc[row.date]) acc[row.date] = []
                                                 acc[row.date].push(row)
                                                 return acc
-                                            }, {} as Record<string, typeof dailyReport>)
+                                            }, {} as Record<string, any[]>)
 
                                             return Object.entries(groupedReport || {}).map(([date, rows]) => {
                                                 // Calculate date totals
-                                                const dateTotals = rows.reduce((acc, row) => ({
+                                                const dateTotals = (rows as any[]).reduce((acc: any, row: any) => ({
                                                     shipped_qty: acc.shipped_qty + row.shipped_qty,
                                                     shipped_amount: acc.shipped_amount + row.shipped_amount,
                                                     returning_to_seller_qty: acc.returning_to_seller_qty + row.returning_to_seller_qty,
@@ -371,7 +371,7 @@ function DashboardContent() {
 
                                                 return (
                                                     <Fragment key={date}>
-                                                        {rows.map((row, index) => (
+                                                        {(rows as any[]).map((row: any, index: number) => (
                                                             <tr key={`${row.date}-${row.seller_account}`} className="hover:bg-gray-50 dark:hover:bg-zinc-800/50">
                                                                 <td className="px-2 py-1.5 text-[13px] text-gray-500">{index + 1}</td>
                                                                 <td className="px-2 py-1.5 text-[13px] font-medium">{formatDate(row.date)}</td>
@@ -499,18 +499,18 @@ function DashboardContent() {
                             <div className="text-center py-8 text-gray-500">Loading details...</div>
                         ) : dailyReport && dailyReport.length > 0 ? (
                             (() => {
-                                const groupedReport = dailyReport?.reduce((acc, row) => {
+                                const groupedReport = dailyReport?.reduce((acc: Record<string, any[]>, row: any) => {
                                     if (!acc[row.date]) acc[row.date] = []
                                     acc[row.date].push(row)
                                     return acc
-                                }, {} as Record<string, typeof dailyReport>)
+                                }, {} as Record<string, any[]>)
 
                                 return Object.entries(groupedReport || {}).map(([date, rows]) => (
                                     <div key={date} className="space-y-3">
                                         <div className="sticky top-0 z-10 bg-gray-100 dark:bg-zinc-800 px-3 py-2 text-sm font-bold text-gray-700 dark:text-gray-300 border-b dark:border-zinc-700 shadow-sm">
                                             {formatDate(date)}
                                         </div>
-                                        {rows.map((row) => (
+                                        {(rows as any[]).map((row: any) => (
                                             <Card key={`${row.date}-${row.seller_account}`} className="p-3 space-y-3 mx-2">
                                                 <div className="flex justify-between items-start">
                                                     <span className="font-bold text-gray-900 dark:text-white">{row.seller_account}</span>
@@ -581,7 +581,7 @@ function DashboardContent() {
                                                     </td>
                                                 </tr>
                                             ) : summaryReport && summaryReport.length > 0 ? (
-                                                summaryReport.map((row, index) => (
+                                                (summaryReport as any[]).map((row: any, index: number) => (
                                                     <tr key={row.seller_account} className="hover:bg-gray-50 dark:hover:bg-zinc-800/50">
                                                         <td className="px-2 py-1.5 text-[13px] text-gray-500">{index + 1}</td>
                                                         <td className="px-2 py-1.5 text-[13px] font-medium">{row.seller_account}</td>
@@ -688,7 +688,7 @@ function DashboardContent() {
                                 {isSummaryLoading ? (
                                     <div className="text-center py-8 text-gray-500">Loading summary...</div>
                                 ) : summaryReport && summaryReport.length > 0 ? (
-                                    summaryReport.map((row) => (
+                                    (summaryReport as any[]).map((row: any) => (
                                         <Card key={row.seller_account} className="p-3 space-y-3">
                                             <div className="flex justify-between items-start">
                                                 <span className="font-bold text-gray-900 dark:text-white">{row.seller_account}</span>

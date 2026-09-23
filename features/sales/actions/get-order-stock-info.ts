@@ -96,21 +96,39 @@ export async function getProductsStock(productIds: string[]): Promise<Record<str
     return Object.fromEntries(map)
 }
 
-/**
- * Calculate total stock for multiple products
- * Uses the official stock_ledger_view to ensure consistency
- */
-async function calculateProductStocks(productIds: string[]): Promise<Map<string, number>> {
-    const supabase = await createClient()
-    const stockMap = new Map<string, number>()
+// In-memory cache for product stocks with 30s TTL to speed up repeated order stock lookups
+const stockCache = new Map<string, { stock: number; timestamp: number }>()
+const STOCK_CACHE_TTL = 30 * 1000 // 30 seconds
 
+async function calculateProductStocks(rawProductIds: string[]): Promise<Map<string, number>> {
+    const stockMap = new Map<string, number>()
+    const productIds = rawProductIds.filter(Boolean)
     if (productIds.length === 0) return stockMap
 
-    // Query the optimized view directly
+    const now = Date.now()
+    const missingIds: string[] = []
+
+    // Read from in-memory cache if fresh
+    productIds.forEach(id => {
+        const cached = stockCache.get(id)
+        if (cached && (now - cached.timestamp) < STOCK_CACHE_TTL) {
+            stockMap.set(id, cached.stock)
+        } else {
+            missingIds.push(id)
+        }
+    })
+
+    if (missingIds.length === 0) {
+        return stockMap
+    }
+
+    const supabase = await createClient()
+
+    // Query only the uncached products
     const { data: stocks, error } = await supabase
         .from('stock_ledger_view')
         .select('id, total_stock')
-        .in('id', productIds)
+        .in('id', missingIds)
 
     if (error) {
         console.error('Error fetching stock_ledger_view:', error)
@@ -118,7 +136,9 @@ async function calculateProductStocks(productIds: string[]): Promise<Map<string,
     }
 
     stocks?.forEach(item => {
-        stockMap.set(item.id, Number(item.total_stock) || 0)
+        const stockVal = Number(item.total_stock) || 0
+        stockMap.set(item.id, stockVal)
+        stockCache.set(item.id, { stock: stockVal, timestamp: now })
     })
 
     return stockMap

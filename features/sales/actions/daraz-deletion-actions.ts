@@ -38,12 +38,22 @@ interface DeletedOrder {
     restored: boolean
 }
 
+// In-memory cache for user roles (5-minute TTL)
+const userRoleCache = new Map<string, { role: 'admin' | 'user' | null; time: number }>()
+const ROLE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
 // Helper: Get user role from user_profiles
 export async function getUserRole(userId?: string): Promise<'admin' | 'user' | null> {
     const supabase = await createClient()
     const uid = userId || (await supabase.auth.getUser()).data.user?.id
 
     if (!uid) return null
+
+    const now = Date.now()
+    const cached = userRoleCache.get(uid)
+    if (cached && (now - cached.time) < ROLE_CACHE_TTL) {
+        return cached.role
+    }
 
     const { data, error } = await supabase
         .from('user_profiles')
@@ -52,7 +62,9 @@ export async function getUserRole(userId?: string): Promise<'admin' | 'user' | n
         .single()
 
     if (error || !data) return null
-    return data.role as 'admin' | 'user'
+    const role = data.role as 'admin' | 'user'
+    userRoleCache.set(uid, { role, time: now })
+    return role
 }
 
 // Helper: Get current user ID

@@ -25,7 +25,8 @@ export const metadata: Metadata = {
     title: "Dashboard Overview | Bagmati Traders",
 }
 
-export const revalidate = 0
+// Cache dashboard metrics for 30s so page loads instantly while staying fresh
+export const revalidate = 30
 
 export default async function DashboardPage() {
     const metrics = await getDashboardMetrics()

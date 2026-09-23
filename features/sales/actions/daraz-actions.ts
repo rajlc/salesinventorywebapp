@@ -1230,8 +1230,47 @@ export async function getDarazOrderStats(sellerAccount?: string, restrictShipped
     }
 }
 
+export interface DailySalesRow {
+    date: string
+    seller_account: string
+    shipped_qty: number
+    shipped_amount: number
+    returning_to_seller_qty: number
+    returned_delivered_qty: number
+    delivered_qty: number
+    return_qty: number
+    customer_return_delivered_qty: number
+}
+
+export interface OrderSummaryRow {
+    seller_account: string
+    shipped_qty: number
+    shipped_amount: number
+    delivered_qty: number
+    returning_to_seller_qty: number
+    returned_delivered_qty: number
+    return_qty: number
+    customer_return_delivered_qty: number
+    remain_qty: number
+}
+
+// In-memory cache for heavy sales reports (2-minute TTL)
+let cachedDailySalesReport: DailySalesRow[] | null = null
+let cachedDailySalesReportTime = 0
+
+let cachedOrderSummaryReport: OrderSummaryRow[] | null = null
+let cachedOrderSummaryReportTime = 0
+
+const DARAZ_REPORT_CACHE_TTL = 2 * 60 * 1000 // 2 minutes
+
 // Get Daily Sales Report - aggregated by date and seller account
-export async function getDailySalesReport() {
+export async function getDailySalesReport(params?: { forceRefresh?: boolean } | boolean): Promise<DailySalesRow[]> {
+    const forceRefresh = typeof params === 'boolean' ? params : !!params?.forceRefresh
+    const now = Date.now()
+    if (!forceRefresh && cachedDailySalesReport && (now - cachedDailySalesReportTime) < DARAZ_REPORT_CACHE_TTL) {
+        return cachedDailySalesReport
+    }
+
     const supabase = await createClient()
 
     try {
@@ -1342,18 +1381,6 @@ export async function getDailySalesReport() {
             const stats = getStats(dateStr, sellerAccount)
 
             switch (order.order_status) {
-                // Note: We do NOT count 'Shipped' here via updated_at, handled above.
-                // Note: We do NOT count 'Delivered' here either if using delivered_at logic
-                // For now, if delivered_at is present, we skip the switch case for 'Delivered'
-                // to avoid double counting or using the wrong date.
-
-                case 'Delivered':
-                    // Only count via status if no delivered_at exists (legacy fallback)
-                    if (!order.delivered_at) {
-                        stats.delivered_qty++
-                        stats.delivered_amount += price
-                    }
-                    break
                 case 'Returning to Seller':
                     stats.returning_to_seller_qty++
                     break
@@ -1396,6 +1423,8 @@ export async function getDailySalesReport() {
             })
         })
 
+        cachedDailySalesReport = result
+        cachedDailySalesReportTime = now
         return result
     } catch (error) {
         console.error('Error fetching daily sales report:', error)
@@ -1404,8 +1433,13 @@ export async function getDailySalesReport() {
 }
 
 // Get Order Summary Report - aggregated by seller account
-// Get Order Summary Report - aggregated by seller account
-export async function getOrderSummaryReport() {
+export async function getOrderSummaryReport(params?: { forceRefresh?: boolean } | boolean): Promise<OrderSummaryRow[]> {
+    const forceRefresh = typeof params === 'boolean' ? params : !!params?.forceRefresh
+    const now = Date.now()
+    if (!forceRefresh && cachedOrderSummaryReport && (now - cachedOrderSummaryReportTime) < DARAZ_REPORT_CACHE_TTL) {
+        return cachedOrderSummaryReport
+    }
+
     const supabase = await createClient()
 
     try {
@@ -1574,11 +1608,14 @@ export async function getOrderSummaryReport() {
         })
 
         // 4. Convert and Sort
-        return Array.from(summaryMap.entries()).map(([seller_account, stats]) => ({
+        const result = Array.from(summaryMap.entries()).map(([seller_account, stats]) => ({
             seller_account,
             ...stats
         })).sort((a, b) => a.seller_account.localeCompare(b.seller_account))
 
+        cachedOrderSummaryReport = result
+        cachedOrderSummaryReportTime = now
+        return result
     } catch (error) {
         console.error('Error fetching order summary report:', error)
         return []
@@ -2054,7 +2091,18 @@ const NON_SOLD_STATUSES = [
     'Unpaid',
 ]
 
+// In-memory cache for product report queries (2-minute TTL)
+const productReportCache = new Map<string, { data: any; time: number }>()
+const PRODUCT_REPORT_CACHE_TTL = 2 * 60 * 1000 // 2 minutes
+
 export async function getProductReportData(params: GetProductReportParams) {
+    const cacheKey = JSON.stringify(params)
+    const now = Date.now()
+    const cached = productReportCache.get(cacheKey)
+    if (cached && (now - cached.time) < PRODUCT_REPORT_CACHE_TTL) {
+        return cached.data
+    }
+
     const supabase = await createClient()
     const {
         sellerAccount,
@@ -2432,7 +2480,7 @@ export async function getProductReportData(params: GetProductReportParams) {
     const from = (page - 1) * limit
     const paginatedRows = allRows.slice(from, from + limit)
 
-    return {
+    const result = {
         rows: paginatedRows,
         summary: overallSummary,
         pagination: {
@@ -2442,6 +2490,9 @@ export async function getProductReportData(params: GetProductReportParams) {
             totalPages: Math.ceil(total / limit),
         },
     }
+
+    productReportCache.set(cacheKey, { data: result, time: now })
+    return result
 }
 
 // Get Daraz customer details (names, phones, orders, statuses) for the customer list subpage

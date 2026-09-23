@@ -68,7 +68,8 @@ export default function PanVatBillingPage() {
     const queryClient = useQueryClient()
 
     // Fetch fiscal years
-    const { data: fiscalYears = [] } = useFiscalYears()
+    const { data: rawFiscalYears } = useFiscalYears()
+    const fiscalYears = Array.isArray(rawFiscalYears) ? rawFiscalYears : []
     const { data: activeFiscalYear } = useActiveFiscalYear()
 
     // Get selected fiscal year data
@@ -77,7 +78,8 @@ export default function PanVatBillingPage() {
     }, [fiscalYearId, fiscalYears])
 
     // Fetch Online Stores (Seller accounts & Company mappings)
-    const { data: onlineStores = [] } = useOnlineStores()
+    const { data: rawOnlineStores } = useOnlineStores()
+    const onlineStores = Array.isArray(rawOnlineStores) ? rawOnlineStores : []
 
     // Sales Billing Section states
     const [isAddSalesBillModalOpen, setIsAddSalesBillModalOpen] = useState(false)

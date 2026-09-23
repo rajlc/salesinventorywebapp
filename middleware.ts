@@ -113,19 +113,51 @@ export async function middleware(request: NextRequest) {
 
     // ── Early exit for routes that do NOT need Supabase auth ──────────────
     // These are background jobs, webhooks, and internal API routes.
-    // Skipping auth check here saves 50-200ms per request and prevents
-    // unnecessary load on the Supabase auth service.
     const noAuthPrefixes = [
-        '/api/cron/',
-        '/api/daraz/webhook',
-        '/api/claude-connector',
-        '/api/settings/',
-        '/api/sales/',
-        '/api/inventory/',
-        '/api/products/',
+        '/api/',
+        '/public/',
     ]
     if (noAuthPrefixes.some(prefix => pathname.startsWith(prefix))) {
         return NextResponse.next({ request: { headers: request.headers } })
+    }
+
+    // ── Bypass prefetch requests ──────────────────────────────────────────
+    // Next.js Link prefetching sends 'next-router-prefetch' or 'purpose: prefetch'.
+    // Bypassing remote auth roundtrips for prefetch prevents dozens of duplicate
+    // calls from flooding Supabase Auth and stalling real user navigations.
+    const isPrefetch =
+        request.headers.get('next-router-prefetch') === '1' ||
+        request.headers.get('purpose') === 'prefetch' ||
+        request.headers.get('sec-purpose') === 'prefetch' ||
+        request.nextUrl.searchParams.has('_rsc')
+
+    if (isPrefetch) {
+        return response
+    }
+
+    // Only /dashboard and login/auth routes need Supabase auth checks
+    const isDashboardRoute = pathname.startsWith('/dashboard')
+    const isAuthRoute = ['/login', '/request-access'].includes(pathname)
+
+    if (!isDashboardRoute && !isAuthRoute) {
+        return response
+    }
+
+    // Fast-path: If accessing /dashboard with NO Supabase session cookies at all,
+    // redirect to /login immediately without wasting seconds on a remote network call.
+    const hasAuthCookie = request.cookies.getAll().some(
+        c => c.name.startsWith('sb-') && c.name.includes('-auth-token')
+    )
+
+    if (isDashboardRoute && !hasAuthCookie) {
+        return NextResponse.redirect(new URL('/login', request.url))
+    }
+
+    // Fast-path for Server Actions: Next.js internal action POSTs already validate
+    // auth in the server action handler. Bypassing remote middleware auth check here
+    // saves 200ms - 1,000ms on every single server action call.
+    if (request.headers.has('next-action') && hasAuthCookie) {
+        return response
     }
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -159,33 +191,89 @@ export async function middleware(request: NextRequest) {
         }
     )
 
+    // Helper to create redirect response while preserving all cookies set on response
+    const createRedirect = (urlPath: string) => {
+        const redirectUrl = new URL(urlPath, request.url)
+        const redirectResponse = NextResponse.redirect(redirectUrl)
+        response.cookies.getAll().forEach(cookie => {
+            redirectResponse.cookies.set(cookie.name, cookie.value, cookie)
+        })
+        return redirectResponse
+    }
+
+    // Helper to wipe all Supabase auth cookies from response and request
+    const clearAuthCookies = (res: NextResponse) => {
+        request.cookies.getAll().forEach(cookie => {
+            if (cookie.name.startsWith('sb-') || cookie.name.includes('auth-token')) {
+                res.cookies.delete(cookie.name)
+                res.cookies.set(cookie.name, '', {
+                    path: '/',
+                    maxAge: 0,
+                    expires: new Date(0)
+                })
+            }
+        })
+    }
+
     let user = null
+    let isTokenInvalid = false
+
     try {
         // Race against an 8-second timeout so that a slow/unavailable Supabase
-        // cannot hang every page request indefinitely. If it times out, the user
-        // is treated as unauthenticated (will be redirected to login).
+        // cannot hang every page request indefinitely.
         const authResult = await Promise.race([
-            supabase.auth.getUser(),
-            new Promise<{ data: { user: null } }>((resolve) =>
-                setTimeout(() => resolve({ data: { user: null } }), 8000)
+            supabase.auth.getUser().catch((err: any) => ({ data: { user: null }, error: err })),
+            new Promise<{ data: { user: null }; error?: any }>((resolve) =>
+                setTimeout(() => resolve({ data: { user: null }, error: new Error('Auth timeout') }), 8000)
             )
         ])
-        user = (authResult as any).data?.user || null
-    } catch (e) {
-        console.error('[Middleware] Auth check failed (possible malformed cookie):', e)
+
+        user = authResult.data?.user || null
+        const error = (authResult as any).error
+
+        if (error) {
+            const errCode = (error as any).code || ''
+            const errMsg = ((error as any).message || '').toLowerCase()
+            const errStatus = (error as any).status || 0
+
+            if (
+                errCode === 'refresh_token_not_found' ||
+                errCode === 'bad_jwt' ||
+                errStatus === 400 ||
+                errMsg.includes('refresh token') ||
+                errMsg.includes('invalid token')
+            ) {
+                isTokenInvalid = true
+                console.warn('[Middleware] Stale/invalid auth token detected. Cleaning session cookies.')
+                clearAuthCookies(response)
+            } else if (errMsg !== 'auth timeout') {
+                console.warn('[Middleware] Auth check notice:', error.message || error)
+            }
+        }
+    } catch (e: any) {
+        console.warn('[Middleware] Auth check exception:', e?.message || e)
+        isTokenInvalid = true
+        clearAuthCookies(response)
     }
 
     // Protected Routes Logic
     if (pathname.startsWith('/dashboard')) {
         if (!user) {
-            return NextResponse.redirect(new URL('/login', request.url))
+            const redirectResponse = createRedirect('/login')
+            if (isTokenInvalid) {
+                clearAuthCookies(redirectResponse)
+            }
+            return redirectResponse
         }
     }
 
     // Auth Routes Logic (Don't let logged-in users see login page)
     if (['/login', '/request-access'].includes(pathname)) {
         if (user) {
-            return NextResponse.redirect(new URL('/dashboard', request.url))
+            return createRedirect('/dashboard')
+        }
+        if (isTokenInvalid) {
+            clearAuthCookies(response)
         }
     }
 

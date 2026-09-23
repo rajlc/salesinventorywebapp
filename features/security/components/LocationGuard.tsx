@@ -35,26 +35,23 @@ export function LocationGuard({ children }: LocationGuardProps) {
     const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
     // Hardcoded for Phase 1 - In real app, fetch from `profile.assigned_store`
-    // We can simulate fetching user profile here
     useEffect(() => {
         async function checkLocation() {
+            // Mock Config: Admin didn't set location yet? Allow all.
+            const isLocationRestricted = false // Set to TRUE to test blocking
+
+            if (!isLocationRestricted) {
+                setLoading(false)
+                return
+            }
+
             try {
                 const { data: { user } } = await supabase.auth.getUser()
                 if (!user) return // Middleware handles this
 
-                // TODO: Fetch profile's assigned store location
-                // const { data: profile } = await supabase.from('profiles').select('...').eq('id', user.id).single()
-
-                // Mock Config: Admin didn't set location yet? Allow all.
                 const mockStoreLat = 27.7172 // Kathmandu
                 const mockStoreLng = 85.3240
                 const mockRadiusKm = 1.0
-                const isLocationRestricted = false // Set to TRUE to test blocking
-
-                if (!isLocationRestricted) {
-                    setLoading(false)
-                    return
-                }
 
                 if (!navigator.geolocation) {
                     setDenied(true)

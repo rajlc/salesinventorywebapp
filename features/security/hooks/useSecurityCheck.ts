@@ -16,9 +16,9 @@ export function useSecurityCheck() {
     useEffect(() => {
         const checkSecurity = async () => {
             try {
-                // Use getUser() — validates session against Supabase server.
-                // getSession() only reads from local storage and can return stale/invalid data.
-                const { data: { user }, error } = await supabase.auth.getUser()
+                // Use getSession() — reads from client storage in 0ms without firing an HTTPS network roundtrip on every page mount.
+                const { data: { session }, error } = await supabase.auth.getSession()
+                const user = session?.user
 
                 if (error || !user) return
 

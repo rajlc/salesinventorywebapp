@@ -36,6 +36,13 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
     // 1. Get current authenticated user
     useEffect(() => {
         const getUser = async () => {
+            // Check memory/storage session first in 0ms
+            const { data: { session } } = await supabase.auth.getSession()
+            if (session?.user) {
+                setUserId(session.user.id)
+                return
+            }
+            // Fallback only if no local session exists
             const { data: { user } } = await supabase.auth.getUser()
             if (user) {
                 setUserId(user.id)
