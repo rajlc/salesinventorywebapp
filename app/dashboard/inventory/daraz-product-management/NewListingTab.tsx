@@ -245,6 +245,13 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [editSelectedStores, setEditSelectedStores] = useState<string[]>([])
     const [storeModalSaving, setStoreModalSaving] = useState(false)
 
+    // Publish dropdown & Already Pushed modal states
+    const [publishDropdownId, setPublishDropdownId] = useState<string | null>(null)
+    const [alreadyPushedModalDraft, setAlreadyPushedModalDraft] = useState<DraftListing | null>(null)
+    const [alreadyPushedRawName, setAlreadyPushedRawName] = useState<string>('')
+    const [alreadyPushedMappings, setAlreadyPushedMappings] = useState<Array<{ sellerAccount: string; sellerSku: string }>>([])
+    const [alreadyPushedSubmitting, setAlreadyPushedSubmitting] = useState<boolean>(false)
+
     // Per-store titles: { storeId: title }
     const [titlesPerStore, setTitlesPerStore] = useState<Record<string, string>>({})
     // Which store tab is active in the title editor
@@ -834,12 +841,148 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
+    // Close publish & action dropdowns on outside click
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            const target = e.target as HTMLElement
+            if (!target.closest('[data-dropdown-container]')) {
+                setPublishDropdownId(null)
+                setActiveDropdownId(null)
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside)
+        return () => document.removeEventListener('mousedown', handleClickOutside)
+    }, [])
+
+    // ── Already Pushed Modal Handlers ───────────────────────────────────────
+    const openAlreadyPushedModal = (draft: DraftListing) => {
+        setAlreadyPushedModalDraft(draft)
+        setAlreadyPushedRawName(draft.raw_name || draft.title || '')
+        
+        let initialMappings: Array<{ sellerAccount: string; sellerSku: string }> = []
+        if (Array.isArray(draft.target_stores) && draft.target_stores.length > 0) {
+            initialMappings = draft.target_stores.map(stId => {
+                const stObj = stores.find(s => s.id === stId || s.seller_account?.toLowerCase() === stId.toLowerCase())
+                return {
+                    sellerAccount: stObj ? stObj.seller_account : (stores[0]?.seller_account || ''),
+                    sellerSku: ''
+                }
+            })
+        }
+        if (initialMappings.length === 0) {
+            initialMappings = [{ sellerAccount: stores[0]?.seller_account || '', sellerSku: '' }]
+        }
+        setAlreadyPushedMappings(initialMappings.slice(0, 4))
+    }
+
+    const handleAddMappingRow = () => {
+        if (alreadyPushedMappings.length >= 4) return
+        const usedAccounts = new Set(alreadyPushedMappings.map(m => m.sellerAccount))
+        const nextStore = stores.find(s => !usedAccounts.has(s.seller_account)) || stores[0]
+        setAlreadyPushedMappings(prev => [...prev, { sellerAccount: nextStore?.seller_account || '', sellerSku: '' }])
+    }
+
+    const handleRemoveMappingRow = (idx: number) => {
+        if (alreadyPushedMappings.length <= 1) return
+        setAlreadyPushedMappings(prev => prev.filter((_, i) => i !== idx))
+    }
+
+    const handleMappingAccountChange = (idx: number, newAccount: string) => {
+        setAlreadyPushedMappings(prev => prev.map((m, i) => i === idx ? { ...m, sellerAccount: newAccount } : m))
+    }
+
+    const handleMappingSkuChange = (idx: number, newSku: string) => {
+        setAlreadyPushedMappings(prev => prev.map((m, i) => i === idx ? { ...m, sellerSku: newSku } : m))
+    }
+
+    const handleSaveAlreadyPushed = async (skipInventory: boolean) => {
+        if (!alreadyPushedModalDraft) return
+
+        if (!skipInventory) {
+            if (!alreadyPushedRawName.trim()) {
+                return alert('Please provide the Product Raw Name to add to inventory')
+            }
+            const valid = alreadyPushedMappings.filter(m => m.sellerAccount && m.sellerSku.trim())
+            if (valid.length === 0) {
+                return alert('Please enter at least one Seller SKU, or click "Skip (Don\'t Add to Inventory)" if you do not want to add it to inventory.')
+            }
+        }
+
+        setAlreadyPushedSubmitting(true)
+        try {
+            const res = await fetch('/api/daraz/products/already-pushed', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    draftId: alreadyPushedModalDraft.id,
+                    skipInventory,
+                    rawName: alreadyPushedRawName.trim(),
+                    mappings: alreadyPushedMappings.filter(m => m.sellerAccount && m.sellerSku.trim())
+                })
+            })
+            const result = await res.json()
+            if (!res.ok || !result.success) {
+                throw new Error(result.error || 'Failed to update listing')
+            }
+
+            // Update local state: mark status as 'pushed'
+            setDrafts(prev => prev.map(d => d.id === alreadyPushedModalDraft.id ? {
+                ...d,
+                status: 'pushed',
+                error: undefined
+            } : d))
+
+            setAlreadyPushedModalDraft(null)
+
+            alert(skipInventory
+                ? 'Listing marked as Pushed (skipped adding to inventory list).'
+                : `Success! Product "${alreadyPushedRawName.trim()}" has been saved to your inventory list and marked as Pushed.`
+            )
+        } catch (err: any) {
+            alert('Error: ' + err.message)
+        } finally {
+            setAlreadyPushedSubmitting(false)
+        }
+    }
+
+    // ── Convert image file to genuine standard JPEG in browser ──────────────
+    const convertFileToJpeg = async (file: File): Promise<Blob> => {
+        if (file.type === 'image/jpeg' || file.type === 'image/jpg') {
+            return file
+        }
+        return new Promise((resolve) => {
+            const img = new Image()
+            const objectUrl = URL.createObjectURL(file)
+            img.onload = () => {
+                URL.revokeObjectURL(objectUrl)
+                const canvas = document.createElement('canvas')
+                canvas.width = img.naturalWidth || 800
+                canvas.height = img.naturalHeight || 800
+                const ctx = canvas.getContext('2d')
+                if (!ctx) return resolve(file)
+                // Fill clean white background for transparent PNG/WebP
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, canvas.width, canvas.height)
+                ctx.drawImage(img, 0, 0)
+                canvas.toBlob((blob) => {
+                    resolve(blob || file)
+                }, 'image/jpeg', 0.92)
+            }
+            img.onerror = () => {
+                URL.revokeObjectURL(objectUrl)
+                resolve(file)
+            }
+            img.src = objectUrl
+        })
+    }
+
     // ── Supabase image upload ────────────────────────────────────────────────
     const uploadImageToSupabase = async (file: File): Promise<string> => {
+        const jpegBlob = await convertFileToJpeg(file)
         const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`
         const { error } = await supabase.storage
             .from('mobile-captures')
-            .upload(fileName, file, { contentType: 'image/jpeg', upsert: false })
+            .upload(fileName, jpegBlob, { contentType: 'image/jpeg', upsert: false })
         if (error) throw new Error(error.message)
         const { data: { publicUrl } } = supabase.storage.from('mobile-captures').getPublicUrl(fileName)
         return publicUrl
@@ -2549,19 +2692,62 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 {/* 2. Ready (Generated) Status Action Group */}
                                                 {draft.status === 'generated' && (
                                                     <>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => handleQuickPush(draft)}
-                                                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-sm"
-                                                            title="Push to Daraz"
-                                                        >
-                                                            <Send size={12} />
-                                                            Push
-                                                        </button>
-                                                        <div className="relative w-full">
+                                                        <div className="relative" data-dropdown-container>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => setActiveDropdownId(activeDropdownId === draft.id ? null : draft.id)}
+                                                                onClick={() => {
+                                                                    setPublishDropdownId(publishDropdownId === draft.id ? null : draft.id)
+                                                                    setActiveDropdownId(null)
+                                                                }}
+                                                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-sm"
+                                                                title="Publish Options"
+                                                            >
+                                                                <Send size={12} />
+                                                                Publish
+                                                                <ChevronDown size={11} className={`transition-transform duration-150 ${publishDropdownId === draft.id ? 'rotate-180' : ''}`} />
+                                                            </button>
+
+                                                            {publishDropdownId === draft.id && (
+                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-44 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in zoom-in-95 duration-100">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            setPublishDropdownId(null)
+                                                                            handleQuickPush(draft)
+                                                                        }}
+                                                                        className="w-full text-left px-3 py-2 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 text-gray-800 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
+                                                                    >
+                                                                        <Send size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                                                        <div>
+                                                                            <span className="font-semibold block text-gray-900 dark:text-zinc-100">Push to Daraz</span>
+                                                                            <span className="text-[10px] text-gray-500 dark:text-zinc-400 block leading-tight">Direct push via API</span>
+                                                                        </div>
+                                                                    </button>
+                                                                    <div className="border-t border-gray-100 dark:border-zinc-700/60 my-0.5" />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            setPublishDropdownId(null)
+                                                                            openAlreadyPushedModal(draft)
+                                                                        }}
+                                                                        className="w-full text-left px-3 py-2 hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-800 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
+                                                                    >
+                                                                        <CheckCircle2 size={13} className="text-blue-600 dark:text-blue-400 shrink-0" />
+                                                                        <div>
+                                                                            <span className="font-semibold block text-gray-900 dark:text-zinc-100">Already Pushed</span>
+                                                                            <span className="text-[10px] text-gray-500 dark:text-zinc-400 block leading-tight">Directly listed on Daraz</span>
+                                                                        </div>
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="relative w-full" data-dropdown-container>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setActiveDropdownId(activeDropdownId === draft.id ? null : draft.id)
+                                                                    setPublishDropdownId(null)
+                                                                }}
                                                                 className={`w-full px-2.5 py-1.5 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-400 rounded transition-colors flex items-center gap-1.5 text-xs font-semibold justify-start ${activeDropdownId === draft.id ? 'bg-gray-100 text-gray-700 dark:bg-zinc-800' : ''}`}
                                                                 title="More Actions"
                                                             >
@@ -3220,6 +3406,194 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     {storeModalSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
                                     Save Accounts
                                 </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Already Pushed Modal */}
+                {alreadyPushedModalDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-lg w-full flex flex-col overflow-hidden max-h-[90vh]">
+                            {/* Modal Header */}
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-900">
+                                <div className="flex items-center gap-2.5">
+                                    <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-950/50 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
+                                        <CheckCircle2 size={18} />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-sm font-bold text-gray-900 dark:text-zinc-100">
+                                            Mark as Already Pushed
+                                        </h3>
+                                        <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                                            Manually listed on Daraz? Enter seller SKUs to sync with inventory.
+                                        </p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setAlreadyPushedModalDraft(null)}
+                                    className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </div>
+
+                            {/* Modal Body */}
+                            <div className="p-5 space-y-4 overflow-y-auto flex-1">
+                                {/* Product Glance */}
+                                <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-zinc-850/60 border border-gray-200/80 dark:border-zinc-800 rounded-lg">
+                                    {alreadyPushedModalDraft.images && alreadyPushedModalDraft.images[0] ? (
+                                        <img
+                                            src={alreadyPushedModalDraft.images[0]}
+                                            alt="Product"
+                                            className="w-12 h-12 rounded object-cover border border-gray-200 dark:border-zinc-700 shrink-0"
+                                        />
+                                    ) : (
+                                        <div className="w-12 h-12 rounded bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-gray-400 shrink-0">
+                                            <ImageIcon size={18} />
+                                        </div>
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-semibold text-gray-900 dark:text-zinc-100 truncate">
+                                            {alreadyPushedModalDraft.title || alreadyPushedModalDraft.raw_name}
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px] text-gray-500 dark:text-zinc-400">
+                                            {alreadyPushedModalDraft.price && <span>Price: NPR {alreadyPushedModalDraft.price}</span>}
+                                            {alreadyPushedModalDraft.special_price && (
+                                                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                                                    Sales Price: NPR {alreadyPushedModalDraft.special_price}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Product Raw Name */}
+                                <div className="space-y-1.5">
+                                    <label className="text-xs font-semibold text-gray-700 dark:text-zinc-300 flex items-center justify-between">
+                                        <span>Product Raw Name <span className="text-red-500">*</span></span>
+                                        <span className="text-[10px] text-gray-400 font-normal">Auto-filled</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={alreadyPushedRawName}
+                                        onChange={(e) => setAlreadyPushedRawName(e.target.value)}
+                                        placeholder="Product raw name for inventory list"
+                                        className="w-full h-9 px-3 text-xs bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-md text-gray-900 dark:text-white focus:outline-none focus:border-blue-500 font-medium"
+                                    />
+                                    <p className="text-[10px] text-gray-400">
+                                        This name will appear in your Inventory Product List.
+                                    </p>
+                                </div>
+
+                                {/* Seller Account & Seller SKU Mapping */}
+                                <div className="space-y-2 pt-1">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-xs font-semibold text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                            <Store size={13} className="text-blue-500" />
+                                            Seller Accounts & Seller SKUs
+                                        </label>
+                                        {alreadyPushedMappings.length < 4 && (
+                                            <button
+                                                type="button"
+                                                onClick={handleAddMappingRow}
+                                                className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                                            >
+                                                <Plus size={12} /> Add Store
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        {alreadyPushedMappings.map((mapping, idx) => (
+                                            <div key={idx} className="flex items-center gap-2 bg-gray-50 dark:bg-zinc-800/60 p-2.5 rounded-lg border border-gray-200 dark:border-zinc-700/60">
+                                                {/* Seller Account Dropdown */}
+                                                <div className="w-1/2">
+                                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400 block mb-0.5 font-medium">Seller Account</label>
+                                                    <select
+                                                        value={mapping.sellerAccount}
+                                                        onChange={(e) => handleMappingAccountChange(idx, e.target.value)}
+                                                        className="w-full h-8 px-2 text-xs bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded text-gray-900 dark:text-white focus:outline-none focus:border-blue-500 font-medium"
+                                                    >
+                                                        {stores.length === 0 && <option value="">No stores found</option>}
+                                                        {stores.map(s => (
+                                                            <option key={s.id} value={s.seller_account || s.id}>
+                                                                {s.seller_account || s.id}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+
+                                                {/* Seller SKU Input */}
+                                                <div className="flex-1">
+                                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400 block mb-0.5 font-medium">Seller SKU</label>
+                                                    <input
+                                                        type="text"
+                                                        value={mapping.sellerSku}
+                                                        onChange={(e) => handleMappingSkuChange(idx, e.target.value)}
+                                                        placeholder="e.g. DARAZ-SKU-001"
+                                                        className="w-full h-8 px-2 text-xs bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded text-gray-900 dark:text-white focus:outline-none focus:border-blue-500 font-medium"
+                                                    />
+                                                </div>
+
+                                                {/* Delete Row Button */}
+                                                {alreadyPushedMappings.length > 1 && (
+                                                    <div className="pt-3.5">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleRemoveMappingRow(idx)}
+                                                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded transition-colors"
+                                                            title="Remove store"
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Information / Skip Alert */}
+                                <div className="p-3 bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded-lg flex items-start gap-2 text-[11px] text-amber-800 dark:text-amber-300">
+                                    <Info size={14} className="shrink-0 mt-0.5" />
+                                    <span>
+                                        If you already listed this product directly in Daraz, enter the Seller SKU above and click <strong>Save to Inventory</strong>. If you skip, it will be marked as Pushed and the Publish button will disappear without adding it to the inventory list.
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Modal Footer */}
+                            <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/50">
+                                <button
+                                    type="button"
+                                    onClick={() => setAlreadyPushedModalDraft(null)}
+                                    disabled={alreadyPushedSubmitting}
+                                    className="px-3 py-1.5 text-xs font-semibold text-gray-600 dark:text-zinc-400 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleSaveAlreadyPushed(true)}
+                                        disabled={alreadyPushedSubmitting}
+                                        className="px-3 py-1.5 text-xs font-semibold border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
+                                        title="Mark as pushed without adding to inventory"
+                                    >
+                                        Skip (Don't Add to Inventory)
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleSaveAlreadyPushed(false)}
+                                        disabled={alreadyPushedSubmitting}
+                                        className="px-3.5 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                    >
+                                        {alreadyPushedSubmitting ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                                        Save to Inventory
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

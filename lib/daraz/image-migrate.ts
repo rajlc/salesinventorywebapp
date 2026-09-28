@@ -1,6 +1,8 @@
 import axios from 'axios'
 import FormData from 'form-data'
+import sharp from 'sharp'
 import { buildSignedParams, signRequest, API_URL, APP_KEY, APP_SECRET } from './client'
+import { createAdminClient } from '@/lib/supabase/server'
 
 /**
  * Strips webp transform extensions, resizing parameters (_720x720q80..., etc.)
@@ -65,7 +67,8 @@ export async function migrateImageToDaraz(
     })
 
     if (response.data?.code !== '0' && response.data?.code !== 0) {
-        throw new Error(`Daraz image migration failed: ${response.data?.message || response.data?.msg || 'Unknown error'}`)
+        const detailMsg = response.data?.detail?.[0]?.message || ''
+        throw new Error(`Daraz image migration failed: ${response.data?.message || response.data?.msg || 'Unknown error'}${detailMsg ? ` (${detailMsg})` : ''}`)
     }
 
     const darazUrl = response.data?.data?.image?.url
@@ -74,6 +77,42 @@ export async function migrateImageToDaraz(
     }
 
     return darazUrl
+}
+
+// Helper to convert any image (WebP, PNG, etc.) to standard Daraz-compatible JPEG and re-upload to Supabase
+async function convertAndReuploadAsJpeg(imageUrl: string): Promise<string> {
+    const downloadRes = await axios.get(imageUrl, {
+        responseType: 'arraybuffer',
+        timeout: 15000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+    })
+
+    const jpegBuffer = await sharp(downloadRes.data)
+        .flatten({ background: { r: 255, g: 255, b: 255 } }) // Replace transparent backgrounds with white
+        .jpeg({ quality: 90, mozjpeg: true })
+        .toBuffer()
+
+    const supabase = await createAdminClient()
+    const fileName = `daraz-compat-${Date.now()}-${Math.random().toString(36).substring(2, 7)}.jpg`
+
+    const { error: uploadError } = await supabase.storage
+        .from('mobile-captures')
+        .upload(fileName, jpegBuffer, {
+            contentType: 'image/jpeg',
+            upsert: true
+        })
+
+    if (uploadError) {
+        throw new Error(`Failed to upload converted JPEG to Supabase: ${uploadError.message}`)
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+        .from('mobile-captures')
+        .getPublicUrl(fileName)
+
+    return publicUrl
 }
 
 // Migrate multiple images at once (up to 8 per Daraz limit).
@@ -102,10 +141,22 @@ export async function migrateImagesToDaraz(
             results.push(darazUrl)
             continue
         } catch (migrateErr: any) {
-            console.warn(`[ImageMigrate] /image/migrate failed for ${cleanUrl} (${migrateErr.message}), attempting fallback to binary /image/upload...`)
+            console.warn(`[ImageMigrate] /image/migrate failed for ${cleanUrl} (${migrateErr.message}). Attempting automatic JPEG conversion...`)
         }
 
-        // 3. Fallback: Download image and upload directly via /image/upload
+        // 3. Fallback A: Convert image to genuine JPEG and retry /image/migrate
+        try {
+            console.log(`[ImageMigrate] Converting ${cleanUrl} to standard JPEG format...`)
+            const convertedJpegUrl = await convertAndReuploadAsJpeg(cleanUrl)
+            const darazUrl = await migrateImageToDaraz(convertedJpegUrl, accessToken)
+            results.push(darazUrl)
+            console.log(`[ImageMigrate] Successfully migrated converted JPEG to Daraz CDN: ${darazUrl}`)
+            continue
+        } catch (convErr: any) {
+            console.warn(`[ImageMigrate] Converted JPEG migration also failed:`, convErr.message)
+        }
+
+        // 4. Fallback B: Direct binary upload via /image/upload
         try {
             const downloadRes = await axios.get(cleanUrl, {
                 responseType: 'arraybuffer',
@@ -114,13 +165,17 @@ export async function migrateImagesToDaraz(
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             })
-            const buffer = Buffer.from(downloadRes.data)
-            const ext = cleanUrl.includes('.png') ? 'png' : 'jpg'
-            const filename = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`
-            const uploadedUrl = await uploadImageToDaraz(buffer, filename, accessToken)
+            const jpegBuffer = await sharp(downloadRes.data)
+                .flatten({ background: { r: 255, g: 255, b: 255 } })
+                .jpeg({ quality: 90 })
+                .toBuffer()
+
+            const filename = `img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.jpg`
+            const uploadedUrl = await uploadImageToDaraz(jpegBuffer, filename, accessToken)
             results.push(uploadedUrl)
+            console.log(`[ImageMigrate] Successfully uploaded via /image/upload: ${uploadedUrl}`)
         } catch (uploadErr: any) {
-            console.warn(`[ImageMigrate] Binary upload also failed for ${cleanUrl}:`, uploadErr.message)
+            console.warn(`[ImageMigrate] Direct binary upload failed for ${cleanUrl}:`, uploadErr.message)
             // If binary upload failed, but cleanUrl is a valid URL, keep cleanUrl as last resort
             if (cleanUrl.startsWith('http')) {
                 results.push(cleanUrl)
@@ -146,21 +201,18 @@ export async function uploadImageToDaraz(
     const params = buildSignedParams(apiPath, accessToken)
 
     const form = new FormData()
-    // Add query params as form fields
-    Object.entries(params).forEach(([key, value]) => {
-        form.append(key, String(value))
-    })
     form.append('image', imageBuffer, {
         filename: filename,
-        contentType: filename.endsWith('.png') ? 'image/png' : 'image/jpeg',
+        contentType: 'image/jpeg',
     })
 
     const response = await axios.post(`${API_URL}${apiPath}`, form, {
+        params,
         headers: { ...form.getHeaders() }
     })
 
     if (response.data?.code !== '0' && response.data?.code !== 0) {
-        throw new Error(`Daraz image upload failed: ${response.data?.message || 'Unknown error'}`)
+        throw new Error(`Daraz image upload failed: ${response.data?.message || response.data?.msg || 'Unknown error'}`)
     }
 
     const darazUrl = response.data?.data?.image?.url
