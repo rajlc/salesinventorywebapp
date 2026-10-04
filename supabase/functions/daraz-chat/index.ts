@@ -659,9 +659,10 @@ Deno.serve(async (req) => {
     // 4. Forward chat event to Next.js backend for AI auto-reply & real-time AI summary analysis
     let nextJsHandledChat = false;
     if (appUrl) {
-        console.log(`[EdgeFunction] Forwarding chat event message_type: ${message_type} to Next.js at ${appUrl}/api/daraz/webhook...`);
+        const cleanAppUrl = appUrl.replace(/\/+$/, '');
+        console.log(`[EdgeFunction] Forwarding chat event message_type: ${message_type} to Next.js at ${cleanAppUrl}/api/daraz/webhook...`);
         try {
-            const response = await fetch(`${appUrl}/api/daraz/webhook`, {
+            const response = await fetch(`${cleanAppUrl}/api/daraz/webhook`, {
                 method: 'POST',
                 headers: {
                     'content-type': 'application/json',

@@ -109,17 +109,24 @@ async function callGeminiApi(apiKey: string, promptText: string, preferredModel 
             if (isJson) {
                 body.generationConfig = { responseMimeType: 'application/json' }
             }
-            const res = await axios.post(url, body, {
+            const res = await fetch(url, {
+                method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'x-goog-api-key': apiKey
                 },
-                timeout: 12000
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(12000)
             })
-            const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}))
+                throw new Error(errData?.error?.message || `HTTP ${res.status}`)
+            }
+            const data = await res.json()
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
             if (text) return text
         } catch (err: any) {
-            lastError = err?.response?.data?.error?.message || err?.message || 'Gemini request failed'
+            lastError = err?.message || 'Gemini request failed'
             console.warn(`[GeminiCall] Model ${m} failed: ${lastError}. Trying next candidate...`)
         }
     }
@@ -910,19 +917,32 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
         let prioritizedOrder: any = null
         if (session.buyer_id) {
             const safeTitle = (session.title || '').replace(/[,()]/g, ' ').trim()
+            const isGenericBuyer = !safeTitle || /^buyer\s*\d*$/i.test(safeTitle)
+            const cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+
             let orderQuery = supabase
                 .from('daraz_orders')
                 .select('id, order_number, order_status, order_date, customer_name, price, daraz_order_items(id, product_name, seller_sku, quantity, amount)')
+                .gte('order_date', cutoffDate)
                 .order('order_date', { ascending: false })
                 .limit(5)
 
-            if (safeTitle) {
+            if (!isGenericBuyer && safeTitle.length >= 3) {
                 orderQuery = orderQuery.or(`customer_name.ilike.%${safeTitle}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
             } else {
                 orderQuery = orderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
             }
 
-            const { data: orders } = await orderQuery
+            let orders: any[] | null = null
+            try {
+                const res: any = await Promise.race([
+                    orderQuery,
+                    new Promise((resolve) => setTimeout(() => resolve({ data: null }), 3500))
+                ])
+                orders = res?.data || null
+            } catch {
+                orders = null
+            }
 
             if (orders && orders.length > 0) {
                 const statusWeight: Record<string, number> = {
@@ -1225,19 +1245,32 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             let buyerOrdersContext = 'No active order records found for this buyer.'
             if (session?.buyer_id) {
                 const safeTitle = (session?.title || '').replace(/[,()]/g, ' ').trim()
+                const isGenericBuyer = !safeTitle || /^buyer\s*\d*$/i.test(safeTitle)
+                const cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+
                 let buyerOrderQuery = supabase
                     .from('daraz_orders')
                     .select('order_number, order_status, order_date, price, daraz_order_items(product_name, seller_sku, quantity, amount)')
+                    .gte('order_date', cutoffDate)
                     .order('order_date', { ascending: false })
                     .limit(3)
 
-                if (safeTitle) {
+                if (!isGenericBuyer && safeTitle.length >= 3) {
                     buyerOrderQuery = buyerOrderQuery.or(`customer_name.ilike.%${safeTitle}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
                 } else {
                     buyerOrderQuery = buyerOrderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
                 }
 
-                const { data: buyerOrders } = await buyerOrderQuery
+                let buyerOrders: any[] | null = null
+                try {
+                    const res: any = await Promise.race([
+                        buyerOrderQuery,
+                        new Promise((resolve) => setTimeout(() => resolve({ data: null }), 3500))
+                    ])
+                    buyerOrders = res?.data || null
+                } catch {
+                    buyerOrders = null
+                }
 
                 if (buyerOrders && buyerOrders.length > 0) {
                     buyerOrdersContext = buyerOrders.map(bo => {

@@ -325,22 +325,25 @@ export async function POST(request: NextRequest) {
                 }
                 const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
 
-                // Check if seller already sent an auto-reply in the last 15 seconds to prevent double replies
-                const { data: recentSellerMsg } = await supabase
+                // Check if our AI already sent an auto-reply in the last 15 seconds to prevent double replies
+                // Note: We MUST only check auto_reply = true and ignore Daraz's built-in welcome greetings (template 10015)
+                const { data: recentAiMsg } = await supabase
                     .from('daraz_chat_messages')
                     .select('message_id, send_time')
                     .eq('session_id', sessionId)
-                    .eq('from_account_type', '2')
+                    .eq('auto_reply', true)
+                    .neq('template_id', '10015')
+                    .neq('template_id', '10010')
                     .order('send_time', { ascending: false })
                     .limit(1)
                     .maybeSingle()
 
                 let alreadyReplied = false
-                if (recentSellerMsg?.send_time) {
-                    const diffMs = Date.now() - new Date(recentSellerMsg.send_time).getTime()
+                if (recentAiMsg?.send_time) {
+                    const diffMs = Date.now() - new Date(recentAiMsg.send_time).getTime()
                     if (diffMs < 15000) {
                         alreadyReplied = true
-                        console.log(`[Webhook] Auto-reply already sent recently (${diffMs}ms ago), skipping duplicate reply.`)
+                        console.log(`[Webhook] AI auto-reply already sent recently (${diffMs}ms ago), skipping duplicate reply.`)
                     }
                 }
 
