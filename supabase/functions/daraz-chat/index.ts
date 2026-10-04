@@ -298,7 +298,7 @@ Response:`;
                 return;
             }
             console.log('[EdgeFunction] Calling Gemini API...');
-            const geminiCandidates = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+            const geminiCandidates = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
             for (const gm of geminiCandidates) {
                 try {
                     const response = await fetch(
@@ -337,7 +337,7 @@ Response:`;
         // Fallback to Gemini if OpenAI call failed and we have Gemini Key
         if (aiProvider === 'openai' && geminiApiKey) {
             console.log('[EdgeFunction] Attempting fallback to Gemini API after OpenAI failure...');
-            const geminiCandidates = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+            const geminiCandidates = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
             for (const gm of geminiCandidates) {
                 try {
                     const response = await fetch(

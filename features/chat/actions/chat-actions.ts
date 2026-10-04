@@ -43,13 +43,13 @@ export async function getEffectiveAiCredentials(storeSettings?: Partial<ChatSett
             source = (globalVal.geminiApiKey || (globalVal.provider === 'gemini' && globalVal.apiKey)) ? 'global_settings' : 'env_variable'
         }
         // Normalize model to active Google AI Studio generation endpoints
-        const rawModel = globalVal.model || 'gemini-3.6-flash'
-        if (rawModel.includes('3.6') || rawModel.includes('3.8') || rawModel.includes('3.7') || rawModel.includes('flash-latest')) {
+        const rawModel = globalVal.model || 'gemini-3.5-flash'
+        if (rawModel.includes('3.5') || rawModel.includes('3.1') || rawModel.includes('3.6') || rawModel.includes('3.8') || rawModel.includes('3.7') || rawModel.includes('flash-latest') || rawModel.includes('3-flash')) {
             model = rawModel
         } else if (rawModel.includes('pro')) {
             model = 'gemini-2.5-pro'
         } else {
-            model = 'gemini-3.6-flash'
+            model = 'gemini-3.5-flash'
         }
     } else {
         // OpenAI
@@ -90,9 +90,13 @@ export async function getGlobalAiIntegrationInfo() {
 }
 
 // Robust Google Gemini caller with candidate fallback
-async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-3.6-flash', isJson = false): Promise<string> {
+async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-3.5-flash', isJson = false): Promise<string> {
     const candidates = Array.from(new Set([
         preferredModel,
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemini-3-flash-preview',
         'gemini-3.6-flash',
         'gemini-3.8-flash',
         'gemini-3.7-flash',
@@ -1120,14 +1124,38 @@ export interface DarazMessage {
 // Daraz fires several webhook events at once (text + order card + welcome message) or the
 // manual sync runs in parallel. Uses an atomic insert on app_settings(key) as a cross-instance lock.
 export async function processIncomingMessageAutoReply(storeId: string, sessionId: string, msg: DarazMessage) {
-    // 1. Ignore non-text events (order cards / product cards / follow cards) as reply triggers
+    // 1. Ignore non-text events (order cards / product cards / follow cards / greetings) as reply triggers
+    let extractedUserText = ''
     try {
         const parsed = JSON.parse(msg.content)
-        if (parsed && typeof parsed === 'object' && (parsed.orderId || parsed.itemId || parsed.item_id || parsed.cardType || parsed.sellerId) && !parsed.txt) {
-            console.log(`[AutoReply] Skipping card/non-text event for session ${sessionId}`)
-            return
+        if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.txt === 'string' && parsed.txt.trim()) {
+                // Check if it's a Daraz automatic greeting template (contains nested JSON with en/ne)
+                try {
+                    const inner = JSON.parse(parsed.txt)
+                    if (inner && (inner.en || inner.ne)) {
+                        console.log(`[AutoReply] Skipping auto-greeting template for session ${sessionId}`)
+                        return
+                    }
+                } catch {}
+                extractedUserText = parsed.txt.trim()
+            } else if (typeof parsed.message === 'string' && parsed.message.trim()) {
+                extractedUserText = parsed.message.trim()
+            } else {
+                console.log(`[AutoReply] Skipping non-text/card event for session ${sessionId}`)
+                return
+            }
+        } else {
+            extractedUserText = String(msg.content || '').trim()
         }
-    } catch {}
+    } catch {
+        extractedUserText = String(msg.content || '').trim()
+    }
+
+    if (!extractedUserText) {
+        console.log(`[AutoReply] Empty text message for session ${sessionId}, skipping.`)
+        return
+    }
 
     const supabase = await createAdminClient()
     const lockKey = `ai_reply_lock_${sessionId}`
@@ -1151,24 +1179,17 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
     }
 
     try {
-        // 3. Skip if our AI already answered after this buyer message
-        let msgTimeMs = Date.now()
-        const num = Number(msg.send_time)
-        if (!isNaN(num) && num > 1000000000) msgTimeMs = num < 10000000000 ? num * 1000 : num
-        else if (msg.send_time) { const d = new Date(String(msg.send_time)).getTime(); if (!isNaN(d)) msgTimeMs = d }
-
-        const { data: lastAi } = await supabase
+        // 3. Prevent duplicate replies: check if the latest message in this session is already an AI auto-reply
+        const { data: latestMsgs } = await supabase
             .from('daraz_chat_messages')
-            .select('send_time')
+            .select('message_id, from_account_type, auto_reply, template_id, send_time')
             .eq('session_id', sessionId)
-            .eq('auto_reply', true)
-            .neq('template_id', '10015')
-            .neq('template_id', '10010')
             .order('send_time', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-        if (lastAi?.send_time && new Date(lastAi.send_time).getTime() >= msgTimeMs - 1000) {
-            console.log(`[AutoReply] Buyer message already answered for session ${sessionId}, skipping.`)
+            .limit(2)
+
+        const topMsg = latestMsgs?.[0]
+        if (topMsg && topMsg.auto_reply === true && String(topMsg.from_account_type) === '2') {
+            console.log(`[AutoReply] Latest message in session ${sessionId} is already an AI auto-reply, skipping duplicate.`)
             return
         }
 
@@ -1195,13 +1216,17 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
             return
         }
 
-        // Parse incoming message content
+        // Parse incoming message content safely (never treat card JSON as plain text)
         let userText = ''
         try {
             const parsed = JSON.parse(msg.content)
-            userText = parsed.txt || parsed.content || msg.content || ''
+            if (parsed && typeof parsed === 'object') {
+                userText = typeof parsed.txt === 'string' ? parsed.txt : (typeof parsed.message === 'string' ? parsed.message : '')
+            } else {
+                userText = typeof msg.content === 'string' ? msg.content : ''
+            }
         } catch {
-            userText = msg.content || ''
+            userText = typeof msg.content === 'string' ? msg.content : ''
         }
 
         const cleanText = userText.toLowerCase().trim()
@@ -1210,12 +1235,14 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
         const cooldownHours = Number(settings.ai_cooldown_hours) || 2
 
         // A. Urgent Order Modification Detection (Color, Address, Phone, Cancel)
-        const isColorRequest = /(send|want|need|change|chahiyo|pathaunu|dinus).*(blue|black|red|green|white|yellow|gold|silver|pink|size|xl|xxl|medium|large)/i.test(cleanText) ||
-                               /(blue|black|red|green|white|yellow|gold|silver)\s+(color|colour|ko)/i.test(cleanText)
+        // Must specifically match an intent to CHANGE or MODIFY an existing order
+        const isColorRequest = /(change|modify|arkai|fernu|sattnu).*(color|colour|size|variant)/i.test(cleanText) ||
+                               /(order|parcel|item).*(change|arkai).*(color|size)/i.test(cleanText) ||
+                               /(pack|send|pathaunu|dinus).*(black|blue|red|green|white|yellow|gold|silver|pink)\s+(color|colour|ko|size|ma)/i.test(cleanText)
         const isAddressRequest = /(change|update|naya|arkai).*(address|thikana|location|ghar)/i.test(cleanText)
         const isPhoneRequest = /(change|update|naya|arkai).*(phone|number|mobile|call)/i.test(cleanText) ||
-                              /(call|phone).*(this number|\d{10})/i.test(cleanText)
-        const isCancelRequest = /(cancel|cancellation|order radd)/i.test(cleanText)
+                              /(call|contact).*(this number|\d{10})/i.test(cleanText)
+        const isCancelRequest = /(cancel|cancellation|order radd|cancel garnu)/i.test(cleanText)
 
         if (isColorRequest || isAddressRequest || isPhoneRequest || isCancelRequest) {
             let reason = 'Urgent customer order modification'

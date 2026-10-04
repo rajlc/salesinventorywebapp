@@ -260,7 +260,13 @@ export async function POST(request: NextRequest) {
                 }
             } catch {}
 
-            // 3. Upsert incoming message
+            // 3. Upsert incoming message (preserve auto_reply flag if it was already marked true)
+            const { data: existingMsg } = await supabase
+                .from('daraz_chat_messages')
+                .select('auto_reply')
+                .eq('message_id', messageId)
+                .maybeSingle()
+
             await supabase.from('daraz_chat_messages').upsert({
                 message_id: messageId,
                 session_id: sessionId,
@@ -271,7 +277,7 @@ export async function POST(request: NextRequest) {
                 content: msgContent,
                 template_id: templateId,
                 send_time: sendTimeISO,
-                auto_reply: false,
+                auto_reply: existingMsg?.auto_reply === true,
                 tags: []
             }, { onConflict: 'message_id' })
 
@@ -327,36 +333,24 @@ export async function POST(request: NextRequest) {
                 }
                 const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
 
-                // Check if our AI already sent an auto-reply in the last 15 seconds to prevent double replies
-                // Note: We MUST only check auto_reply = true and ignore Daraz's built-in welcome greetings (template 10015)
-                const { data: recentAiMsg } = await supabase
-                    .from('daraz_chat_messages')
-                    .select('message_id, send_time')
-                    .eq('session_id', sessionId)
-                    .eq('auto_reply', true)
-                    .neq('template_id', '10015')
-                    .neq('template_id', '10010')
-                    .order('send_time', { ascending: false })
-                    .limit(1)
-                    .maybeSingle()
+                // Only trigger auto-reply on text messages (template '1' or containing text)
+                let isTextMsg = String(templateId) === '1'
+                if (!isTextMsg) {
+                    try {
+                        const p = JSON.parse(msgContent)
+                        if (p && typeof p.txt === 'string' && p.txt.trim()) isTextMsg = true
+                    } catch {}
+                }
 
-                let alreadyReplied = false
-                if (recentAiMsg?.send_time) {
-                    const diffMs = Date.now() - new Date(recentAiMsg.send_time).getTime()
-                    if (diffMs < 15000) {
-                        alreadyReplied = true
-                        console.log(`[Webhook] AI auto-reply already sent recently (${diffMs}ms ago), skipping duplicate reply.`)
-                    }
+                const shouldAutoReply = isRecent && isTextMsg
+                if (!isRecent) {
+                    console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
                 }
 
                 // Use after() so the work continues after the HTTP response is sent.
                 // (Plain un-awaited promises are killed by serverless once the response returns.)
-                const runAutoReply = isRecent && !alreadyReplied
-                if (!isRecent) {
-                    console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
-                }
                 after(async () => {
-                    if (runAutoReply) {
+                    if (shouldAutoReply) {
                         try {
                             await processIncomingMessageAutoReply(storeId, sessionId, {
                                 content: msgContent,
@@ -370,8 +364,8 @@ export async function POST(request: NextRequest) {
                     // Always refresh AI customer & order analysis with the new message
                     try {
                         await generateSessionAiAnalysisAction(storeId, sessionId)
-                    } catch (err: any) {
-                        console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err?.message)
+                    } catch (analysisErr) {
+                        console.warn('[Webhook] Real-time AI analysis error:', analysisErr)
                     }
                 })
             }

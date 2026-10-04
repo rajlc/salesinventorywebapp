@@ -18,7 +18,7 @@ const TEMPLATE_VARIABLES = [
 export default function AiIntegrationPage() {
     const [loading, setLoading] = useState(false)
     const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini')
-    const [model, setModel] = useState('gemini-3.6-flash')
+    const [model, setModel] = useState('gemini-3.5-flash')
     const [geminiApiKey, setGeminiApiKey] = useState('')
     const [openaiApiKey, setOpenaiApiKey] = useState('')
     const [listingPrompt, setListingPrompt] = useState('')
@@ -36,7 +36,7 @@ export default function AiIntegrationPage() {
             if (data.model) {
                 // Normalize legacy model names
                 const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(data.model)
-                    ? 'gemini-3.6-flash'
+                    ? 'gemini-3.5-flash'
                     : data.model
                 setModel(normalized)
                 setProvider(normalized.startsWith('gemini') ? 'gemini' : 'openai')
@@ -85,7 +85,7 @@ export default function AiIntegrationPage() {
         setTestingKey(true)
         try {
             if (provider === 'gemini') {
-                const targetModel = model.startsWith('gemini') && !model.includes('1.5') ? model : 'gemini-3.6-flash'
+                const targetModel = model.startsWith('gemini') && !model.includes('1.5') ? model : 'gemini-3.5-flash'
                 const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`, {
                     method: 'POST',
                     headers: { 
@@ -187,9 +187,11 @@ export default function AiIntegrationPage() {
                         >
                             {provider === 'gemini' ? (
                                 <>
-                                    <option value="gemini-3.6-flash">Gemini 3.6 Flash (100% Free Tier — Fast Multimodal Vision)</option>
+                                    <option value="gemini-3.5-flash">Gemini 3.5 Flash (100% Free Tier — Recommended, Fast &amp; Reliable)</option>
                                     <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite (100% Free Tier — Ultra-Fast &amp; High Volume)</option>
-                                    <option value="gemini-3.7-flash">Gemini 3.7 Flash (100% Free Tier — Advanced Reasoning &amp; Vision)</option>
+                                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (High Availability Free Tier)</option>
+                                    <option value="gemini-3.6-flash">Gemini 3.6 Flash (Fast Multimodal Vision)</option>
+                                    <option value="gemini-3.7-flash">Gemini 3.7 Flash (Advanced Reasoning &amp; Vision)</option>
                                     <option value="gemini-flash-latest">Gemini Flash Latest (Auto-Updating Latest Free Flash)</option>
                                 </>
                             ) : (

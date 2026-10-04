@@ -196,20 +196,25 @@ Reply:`
             return replyText ? replyText.trim() : null
         } else {
             console.log('[ReviewAutoReply] Calling Gemini API...')
-            const response = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
-                {
-                    contents: [{
-                        parts: [{ text: systemPrompt }]
-                    }]
-                },
-                {
-                    headers: { 'Content-Type': 'application/json' },
-                    timeout: 10000
+            const candidates = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.6-flash', 'gemini-flash-latest']
+            let replyText: string | null = null
+            for (const m of candidates) {
+                try {
+                    const response = await axios.post(
+                        `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`,
+                        { contents: [{ parts: [{ text: systemPrompt }] }] },
+                        { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+                    )
+                    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
+                    if (text && text.trim()) {
+                        replyText = text.trim()
+                        break
+                    }
+                } catch (gErr: any) {
+                    console.warn(`[ReviewAutoReply] Gemini model ${m} failed:`, gErr?.message)
                 }
-            )
-            const replyText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
-            return replyText ? replyText.trim() : null
+            }
+            return replyText
         }
     } catch (err: any) {
         console.error(`[ReviewAutoReply] AI API call failed (${settings.ai_provider}):`, err.message)
