@@ -160,6 +160,7 @@ function DashboardLayout({
                                                 subItems={[
                                                     { label: 'Chat', href: '/dashboard/chat-ai?tab=chat' },
                                                     { label: 'AI & Automation', href: '/dashboard/chat-ai?tab=settings' },
+                                                    { label: 'Product Q&A', href: '/dashboard/chat-ai/products' },
                                                     { label: 'Reviews', href: '/dashboard/chat-ai/reviews' }
                                                 ]}
                                             >

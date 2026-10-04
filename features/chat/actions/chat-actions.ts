@@ -4,6 +4,147 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import crypto from 'crypto'
 import axios from 'axios'
+import { getProductQAs, type ProductQA } from './product-qa-actions'
+
+import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, type EffectiveAiConfig } from '../constants'
+
+function stripHtml(html: string | null | undefined): string {
+    if (!html) return ''
+    return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+// Seamlessly resolve AI credentials configured in Settings > AI Integration (/dashboard/settings/ai-integration)
+export async function getEffectiveAiCredentials(storeSettings?: Partial<ChatSettings> | null): Promise<EffectiveAiConfig> {
+    const supabase = await createAdminClient()
+
+    // 1. Fetch Global AI integration settings from app_settings
+    const { data: aiRow } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'daraz_ai_settings')
+        .maybeSingle()
+
+    const globalVal = aiRow?.value || {}
+    const globalGeminiKey = String(globalVal.geminiApiKey || (globalVal.provider === 'gemini' ? globalVal.apiKey : '') || process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY || '').trim()
+    const globalOpenAiKey = String(globalVal.openaiApiKey || (globalVal.provider === 'openai' ? globalVal.apiKey : '') || process.env.OPENAI_API_KEY || '').trim()
+
+    // 2. Determine provider: store-specific choice takes precedence, then global choice, default to 'gemini'
+    const provider: 'gemini' | 'openai' = (storeSettings?.ai_provider === 'openai' || (!storeSettings?.ai_provider && globalVal.provider === 'openai'))
+        ? 'openai'
+        : 'gemini'
+
+    let apiKey = ''
+    let model = ''
+    let source: EffectiveAiConfig['source'] = 'none'
+
+    if (provider === 'gemini') {
+        apiKey = globalGeminiKey
+        if (apiKey) {
+            source = (globalVal.geminiApiKey || (globalVal.provider === 'gemini' && globalVal.apiKey)) ? 'global_settings' : 'env_variable'
+        }
+        // Normalize model to active Google AI Studio generation endpoints
+        const rawModel = globalVal.model || 'gemini-2.5-flash'
+        if (rawModel.includes('2.5') || rawModel.includes('flash-latest') || rawModel.includes('3.6') || rawModel.includes('1.5')) {
+            model = 'gemini-2.5-flash'
+        } else if (rawModel.includes('pro')) {
+            model = 'gemini-2.5-pro'
+        } else {
+            model = 'gemini-2.5-flash'
+        }
+    } else {
+        // OpenAI
+        const storeKey = storeSettings?.openai_api_key?.trim()
+        if (storeKey) {
+            apiKey = storeKey
+            source = 'store_override'
+        } else if (globalOpenAiKey) {
+            apiKey = globalOpenAiKey
+            source = (globalVal.openaiApiKey || (globalVal.provider === 'openai' && globalVal.apiKey)) ? 'global_settings' : 'env_variable'
+        }
+        model = storeSettings?.openai_model || globalVal.model || 'gpt-4o-mini'
+    }
+
+    return {
+        provider,
+        apiKey,
+        model,
+        geminiApiKey: globalGeminiKey,
+        openaiApiKey: globalOpenAiKey,
+        source,
+        hasGeminiKey: Boolean(globalGeminiKey),
+        hasOpenAiKey: Boolean(globalOpenAiKey)
+    }
+}
+
+// Action for client UI to display active AI Integration status
+export async function getGlobalAiIntegrationInfo() {
+    const config = await getEffectiveAiCredentials()
+    return {
+        hasGeminiKey: config.hasGeminiKey,
+        hasOpenAiKey: config.hasOpenAiKey,
+        globalGeminiApiKeyMasked: config.geminiApiKey ? `${config.geminiApiKey.substring(0, 4)}••••••••${config.geminiApiKey.slice(-4)}` : '',
+        globalOpenAiApiKeyMasked: config.openaiApiKey ? `${config.openaiApiKey.substring(0, 4)}••••••••${config.openaiApiKey.slice(-4)}` : '',
+        globalProvider: config.provider,
+        globalModel: config.model
+    }
+}
+
+// Robust Google Gemini caller with candidate fallback
+async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-2.5-flash', isJson = false): Promise<string> {
+    const candidates = Array.from(new Set([
+        preferredModel,
+        'gemini-2.5-flash',
+        'gemini-1.5-flash',
+        'gemini-2.0-flash',
+        'gemini-flash-latest'
+    ]))
+
+    let lastError = ''
+    for (const m of candidates) {
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`
+            const body: any = {
+                contents: [{ parts: [{ text: promptText }] }]
+            }
+            if (isJson) {
+                body.generationConfig = { responseMimeType: 'application/json' }
+            }
+            const res = await axios.post(url, body, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': apiKey
+                },
+                timeout: 12000
+            })
+            const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text
+            if (text) return text
+        } catch (err: any) {
+            lastError = err?.response?.data?.error?.message || err?.message || 'Gemini request failed'
+            console.warn(`[GeminiCall] Model ${m} failed: ${lastError}. Trying next candidate...`)
+        }
+    }
+    throw new Error(lastError || 'All Gemini model candidates failed')
+}
+
+// Robust OpenAI caller
+async function callOpenAiApi(apiKey: string, promptText: string, model = 'gpt-4o-mini', isJson = false): Promise<string> {
+    const body: any = {
+        model,
+        messages: [{ role: 'user', content: promptText }],
+        temperature: 0.6
+    }
+    if (isJson) {
+        body.response_format = { type: 'json_object' }
+    }
+    const res = await axios.post('https://api.openai.com/v1/chat/completions', body, {
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        timeout: 12000
+    })
+    return res.data?.choices?.[0]?.message?.content || ''
+}
 
 export interface ChatSettings {
     store_id: string
@@ -16,6 +157,9 @@ export interface ChatSettings {
     openai_api_key: string | null
     openai_model: string
     app_url?: string
+    ai_analysis_enabled?: boolean
+    ai_agent_instructions?: string
+    ai_cooldown_hours?: number
     created_at?: string
     updated_at?: string
 }
@@ -580,7 +724,10 @@ export async function getChatSettings(storeId: string) {
             ai_provider: 'gemini',
             openai_api_key: null,
             openai_model: 'gpt-4o-mini',
-            app_url: currentAppUrl
+            app_url: currentAppUrl,
+            ai_analysis_enabled: false,
+            ai_agent_instructions: DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS,
+            ai_cooldown_hours: 2
         }
         const { data: inserted } = await supabase
             .from('daraz_chat_settings')
@@ -588,6 +735,11 @@ export async function getChatSettings(storeId: string) {
             .select()
             .single()
         return inserted || defaultSettings
+    }
+
+    // Dynamic self-heal default instructions if empty
+    if (!data.ai_agent_instructions || !data.ai_agent_instructions.trim()) {
+        data.ai_agent_instructions = DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS
     }
 
     // If local app_url is out of sync or missing in DB, update it dynamically
@@ -673,7 +825,184 @@ export async function deleteChatRule(ruleId: string) {
     return { success: true }
 }
 
-// 9. Auto Reply processing (AI & Keyword Matching rules)
+// 9. Session Urgency & AI Analysis Actions
+export async function toggleSessionUrgent(sessionId: string, isUrgent: boolean, reason?: string) {
+    try {
+        const supabase = await createAdminClient()
+        const { error } = await supabase
+            .from('daraz_chat_sessions')
+            .update({
+                is_urgent: isUrgent,
+                urgent_reason: isUrgent ? (reason || 'Marked as urgent by staff') : null,
+                updated_at: new Date().toISOString()
+            })
+            .eq('session_id', sessionId)
+
+        if (error) throw error
+        try { revalidatePath('/dashboard/chat-ai') } catch {}
+        return { success: true }
+    } catch (err: any) {
+        console.error('[SessionUrgent] Error updating session:', err.message)
+        return { success: false, error: err.message }
+    }
+}
+
+export async function generateSessionAiAnalysisAction(storeId: string, sessionId: string) {
+    try {
+        const supabase = await createAdminClient()
+        const settings = await getChatSettings(storeId)
+
+        // 1. Fetch Session details
+        const { data: session } = await supabase
+            .from('daraz_chat_sessions')
+            .select('*')
+            .eq('session_id', sessionId)
+            .maybeSingle()
+
+        if (!session) throw new Error('Session not found')
+
+        // 2. Fetch Buyer Orders (prioritize Pending > Ready to Ship > Shipped > Delivered > Cancel)
+        let ordersSummary = 'No recent orders found for this buyer.'
+        let prioritizedOrder: any = null
+        if (session.buyer_id) {
+            const { data: orders } = await supabase
+                .from('daraz_orders')
+                .select('id, order_number, order_status, order_date, customer_name, total_amount, daraz_order_items(id, product_name, sku, quantity, item_price)')
+                .or(`customer_name.ilike.%${session.title}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                .order('order_date', { ascending: false })
+                .limit(5)
+
+            if (orders && orders.length > 0) {
+                const statusWeight: Record<string, number> = {
+                    'pending': 10,
+                    'ready to ship': 8,
+                    'shipped': 6,
+                    'delivered': 4,
+                    'cancel': 1,
+                    'cancelled': 1
+                }
+                const sortedOrders = [...orders].sort((a, b) => {
+                    const wa = statusWeight[String(a.order_status).toLowerCase()] || 3
+                    const wb = statusWeight[String(b.order_status).toLowerCase()] || 3
+                    return wb - wa
+                })
+                prioritizedOrder = sortedOrders[0]
+
+                ordersSummary = sortedOrders.map(o => {
+                    const items = (o.daraz_order_items || []).map((i: any) => `${i.product_name} (Qty: ${i.quantity})`).join(', ')
+                    return `Order #${o.order_number} | Status: ${o.order_status} | Date: ${o.order_date ? new Date(o.order_date).toLocaleDateString() : 'N/A'} | Items: ${items || 'N/A'}`
+                }).join('\n')
+            }
+        }
+
+        // 3. Fetch Recent Messages
+        const { data: messages } = await supabase
+            .from('daraz_chat_messages')
+            .select('from_account_type, content, send_time, template_id')
+            .eq('session_id', sessionId)
+            .order('send_time', { ascending: false })
+            .limit(8)
+
+        let chatHistory = ''
+        if (messages && messages.length > 0) {
+            chatHistory = [...messages].reverse().map(m => {
+                let text = m.content
+                try {
+                    const parsed = JSON.parse(m.content)
+                    if (parsed.txt) text = parsed.txt
+                    else if (m.template_id === '10006' || parsed.itemId) text = `[Product Inquiry Card: ${parsed.title || ''}]`
+                    else if (m.template_id === '10007' || parsed.orderId) text = `[Order Card: #${parsed.orderId}]`
+                } catch {}
+                const sender = String(m.from_account_type) === '1' ? 'Buyer' : 'Seller'
+                return `[${sender}]: ${text}`
+            }).join('\n')
+        }
+
+        // 4. Generate AI Analysis
+        const prompt = `You are an expert E-Commerce Customer & Order Intelligence Analyst.
+Analyze the following buyer conversation and order records for a seller on Daraz:
+
+Buyer Name / Title: ${session.title} (Buyer ID: ${session.buyer_id})
+Recent Orders (Prioritized):
+${ordersSummary}
+
+Recent Conversation Thread:
+${chatHistory || 'No messages yet.'}
+
+Instructions:
+1. Provide a concise 2-3 sentence summary of:
+   - The customer's primary inquiry or intent.
+   - The current order situation (highlighting pending/active orders first).
+2. Check if the customer made any urgent requests (e.g. wants different color, change address, change phone, cancel order, or angry complaint).
+3. Output your response as a valid JSON object matching this structure:
+{
+  "summary": "Concise 2-3 sentence summary here",
+  "is_urgent": true or false,
+  "urgent_reason": "Specific reason if urgent, otherwise null"
+}`
+
+        // 4. Generate AI Analysis using effective credentials from Settings > AI Integration
+        const effectiveAi = await getEffectiveAiCredentials(settings)
+        if (!effectiveAi.apiKey) {
+            throw new Error(`API key not configured for ${effectiveAi.provider === 'openai' ? 'OpenAI' : 'Google Gemini'}. Please configure your API key in Settings > AI Integration (/dashboard/settings/ai-integration).`)
+        }
+
+        let aiJson: { summary: string; is_urgent: boolean; urgent_reason?: string | null } = {
+            summary: `Customer ${session.title} active thread. Prioritized Order: ${prioritizedOrder?.order_number || 'None'} (${prioritizedOrder?.order_status || 'N/A'}).`,
+            is_urgent: false,
+            urgent_reason: null
+        }
+
+        try {
+            let rawContent = ''
+            if (effectiveAi.provider === 'openai') {
+                rawContent = await callOpenAiApi(effectiveAi.apiKey, prompt, effectiveAi.model, true)
+            } else {
+                rawContent = await callGeminiApi(effectiveAi.apiKey, prompt, effectiveAi.model, true)
+            }
+            if (rawContent) {
+                const cleanJson = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim()
+                aiJson = JSON.parse(cleanJson)
+            }
+        } catch (apiErr: any) {
+            console.error('[SessionAiAnalysis] AI Provider API error:', apiErr.message)
+            throw new Error(`AI Analysis failed: ${apiErr.message}`)
+        }
+
+        // 5. Update session in database
+        const updatePayload: Record<string, any> = {
+            ai_summary: aiJson.summary,
+            ai_summary_updated_at: new Date().toISOString()
+        }
+        if (aiJson.is_urgent) {
+            updatePayload.is_urgent = true
+            updatePayload.urgent_reason = aiJson.urgent_reason || 'Urgent request detected by AI analysis'
+        }
+
+        await supabase
+            .from('daraz_chat_sessions')
+            .update(updatePayload)
+            .eq('session_id', sessionId)
+
+        try { revalidatePath('/dashboard/chat-ai') } catch {}
+
+        return {
+            success: true,
+            analysis: {
+                summary: aiJson.summary,
+                is_urgent: aiJson.is_urgent,
+                urgent_reason: aiJson.urgent_reason,
+                prioritized_order: prioritizedOrder,
+                updated_at: new Date().toISOString()
+            }
+        }
+    } catch (err: any) {
+        console.error('[SessionAiAnalysis] Error:', err.message)
+        return { success: false, error: err.message }
+    }
+}
+
+// 10. Auto Reply processing (AI, RAG Knowledge Base & Keyword Matching rules)
 export interface DarazMessage {
     content: string
     from_account_type: string | number
@@ -684,6 +1013,18 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
     try {
         const supabase = await createAdminClient()
         const settings = await getChatSettings(storeId)
+
+        // 0. Check Cooldown / Handover Mute
+        const { data: session } = await supabase
+            .from('daraz_chat_sessions')
+            .select('ai_paused_until, buyer_id, title')
+            .eq('session_id', sessionId)
+            .maybeSingle()
+
+        if (session?.ai_paused_until && new Date(session.ai_paused_until).getTime() > Date.now()) {
+            console.log(`[AutoReply] AI is paused/muted for session ${sessionId} until ${session.ai_paused_until} (human handover active). Skipping auto-reply.`)
+            return
+        }
 
         // Parse incoming message content
         let userText = ''
@@ -697,7 +1038,41 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
         const cleanText = userText.toLowerCase().trim()
         if (!cleanText) return
 
-        // A. Check Exact Matches
+        const cooldownHours = Number(settings.ai_cooldown_hours) || 2
+
+        // A. Urgent Order Modification Detection (Color, Address, Phone, Cancel)
+        const isColorRequest = /(send|want|need|change|chahiyo|pathaunu|dinus).*(blue|black|red|green|white|yellow|gold|silver|pink|size|xl|xxl|medium|large)/i.test(cleanText) ||
+                               /(blue|black|red|green|white|yellow|gold|silver)\s+(color|colour|ko)/i.test(cleanText)
+        const isAddressRequest = /(change|update|naya|arkai).*(address|thikana|location|ghar)/i.test(cleanText)
+        const isPhoneRequest = /(change|update|naya|arkai).*(phone|number|mobile|call)/i.test(cleanText) ||
+                              /(call|phone).*(this number|\d{10})/i.test(cleanText)
+        const isCancelRequest = /(cancel|cancellation|order radd)/i.test(cleanText)
+
+        if (isColorRequest || isAddressRequest || isPhoneRequest || isCancelRequest) {
+            let reason = 'Urgent customer order modification'
+            if (isColorRequest) reason = `Customer requested color/variant change: "${userText.substring(0, 50)}"`
+            else if (isAddressRequest) reason = `Customer requested address change: "${userText.substring(0, 50)}"`
+            else if (isPhoneRequest) reason = `Customer requested phone change: "${userText.substring(0, 50)}"`
+            else if (isCancelRequest) reason = `Customer requested order cancellation: "${userText.substring(0, 50)}"`
+
+            const pausedUntil = new Date(Date.now() + cooldownHours * 60 * 60 * 1000).toISOString()
+            await supabase
+                .from('daraz_chat_sessions')
+                .update({
+                    is_urgent: true,
+                    urgent_reason: reason,
+                    ai_paused_until: pausedUntil,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('session_id', sessionId)
+
+            const ackReply = "Hajur, tapai ko request hami le note gareka xau. Hamro team le parcel dispatch garnu aghi tapailai direct call/contact garnecha. / Thank you, we have noted your request. Our support team will review and contact you before dispatch."
+            await sendChatMessage(storeId, sessionId, '1', ackReply, undefined, undefined, true)
+            try { revalidatePath('/dashboard/chat-ai') } catch {}
+            return
+        }
+
+        // B. Check Exact Matches from Rules
         const rules = await getChatRules(storeId)
         const exactMatch = rules.find(r => r.match_type === 'exact' && cleanText === r.pattern.toLowerCase().trim())
         if (exactMatch) {
@@ -706,7 +1081,7 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             return
         }
 
-        // B. Check Keyword Matches
+        // C. Check Keyword Matches from Rules
         const keywordMatch = rules.find(r => r.match_type === 'keyword' && cleanText.includes(r.pattern.toLowerCase().trim()))
         if (keywordMatch) {
             console.log(`[AutoReply] Keyword match found in: "${userText}" -> replying: "${keywordMatch.reply_content}"`)
@@ -714,41 +1089,102 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             return
         }
 
-        // C. AI Auto-Reply (Supports Gemini and OpenAI)
+        // D. AI Auto-Reply (RAG Knowledge Base & Smart Handover)
         if (settings.ai_enabled) {
-            const isOpenAi = settings.ai_provider === 'openai'
-            const apiKey = isOpenAi 
-                ? settings.openai_api_key 
-                : (process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY)
+            const effectiveAi = await getEffectiveAiCredentials(settings)
 
-            if (!apiKey) {
-                console.warn(`[AutoReply] AI enabled but API key for provider ${settings.ai_provider || 'gemini'} is missing.`)
+            if (!effectiveAi.apiKey) {
+                console.warn(`[AutoReply] AI enabled but API key for provider ${effectiveAi.provider} is missing. Please configure it in Settings > AI Integration.`)
                 return
             }
 
-            console.log(`[AutoReply] Triggering AI (${settings.ai_provider || 'gemini'}) for message: "${userText}"`)
+            console.log(`[AutoReply] Triggering AI (${effectiveAi.provider}, model: ${effectiveAi.model}) for message: "${userText}"`)
 
-            // Context gathering: Fetch some active products to give stock context
-            const { data: products } = await supabase
-                .from('products')
-                .select('product_name, seller_sku1, seller_sku2, is_deleted')
-                .eq('is_deleted', false)
-                .limit(15)
+            // 1. Check Product Card or Active Order Item for Product Context
+            const { data: sessionMsgs } = await supabase
+                .from('daraz_chat_messages')
+                .select('template_id, content')
+                .eq('session_id', sessionId)
+                .order('send_time', { ascending: false })
+                .limit(10)
 
-            let productsContext = 'Here is a list of some items we have in stock:\n'
-            if (products && products.length > 0) {
-                productsContext += products.map(p => `- ${p.product_name} (SKU: ${p.seller_sku1 || 'N/A'})`).join('\n')
-            } else {
-                productsContext += 'No products inventory loaded.'
+            let targetItemId: string | null = null
+            let targetProductTitle: string | null = null
+
+            if (sessionMsgs) {
+                for (const sm of sessionMsgs) {
+                    if (String(sm.template_id) === '10006' && sm.content) {
+                        try {
+                            const p = JSON.parse(sm.content)
+                            if (p.itemId || p.item_id) {
+                                targetItemId = String(p.itemId || p.item_id)
+                                targetProductTitle = p.title || null
+                                break
+                            }
+                        } catch {}
+                    }
+                }
             }
 
-            // Fetch last 5 messages in this session for conversation memory
+            // 2. Fetch Buyer's Orders (Prioritizing Pending orders)
+            let buyerOrdersContext = 'No active order records found for this buyer.'
+            if (session?.buyer_id) {
+                const { data: buyerOrders } = await supabase
+                    .from('daraz_orders')
+                    .select('order_number, order_status, order_date, total_amount, daraz_order_items(product_name, sku, quantity)')
+                    .or(`customer_name.ilike.%${session.title || ''}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                    .order('order_date', { ascending: false })
+                    .limit(3)
+
+                if (buyerOrders && buyerOrders.length > 0) {
+                    buyerOrdersContext = buyerOrders.map(bo => {
+                        const items = (bo.daraz_order_items || []).map((i: any) => `${i.product_name} (Qty: ${i.quantity})`).join(', ')
+                        return `Order #${bo.order_number}: Status is "${bo.order_status}", Placed on ${bo.order_date ? new Date(bo.order_date).toLocaleDateString() : 'N/A'}. Items: ${items}`
+                    }).join('\n')
+                }
+            }
+
+            // 3. Product Details & Q&A Knowledge Base
+            let targetProductData: any = null
+            let targetProductQAs: ProductQA[] = []
+
+            if (targetItemId) {
+                const { data: prod } = await supabase
+                    .from('products')
+                    .select('id, product_name, product_title, highlights, description, special_price, regular_price, daraz_product_url, seller_sku1')
+                    .or(`daraz_product_url.ilike.%-i${targetItemId}-%,seller_sku1.ilike.${targetItemId}%`)
+                    .maybeSingle()
+
+                targetProductData = prod
+                targetProductQAs = await getProductQAs({ darazItemId: targetItemId, productId: prod?.id })
+            }
+
+            let productKnowledgeContext = ''
+            if (targetProductData || targetItemId) {
+                const cleanH = stripHtml(targetProductData?.highlights)
+                const cleanD = stripHtml(targetProductData?.description).substring(0, 400)
+                productKnowledgeContext = `
+Product Under Inquiry: ${targetProductData?.product_title || targetProductData?.product_name || targetProductTitle || 'Item ' + targetItemId}
+Price: Rs. ${targetProductData?.special_price || targetProductData?.regular_price || 'N/A'}
+Specifications & Highlights:
+${cleanH || 'No specific highlights listed.'}
+Description Summary:
+${cleanD || 'No description listed.'}
+
+Verified Product Q&A Knowledge Base:
+${targetProductQAs.length > 0 
+    ? targetProductQAs.map(q => `• Q: "${q.question}" -> A: "${q.answer}"`).join('\n') 
+    : 'No verified Q&As added for this product yet.'}
+`
+            }
+
+            // 4. Conversation History (last 6 messages)
             const { data: recentMsgs } = await supabase
                 .from('daraz_chat_messages')
                 .select('from_account_type, content, send_time')
                 .eq('session_id', sessionId)
                 .order('send_time', { ascending: false })
-                .limit(5)
+                .limit(6)
 
             let historyContext = ''
             if (recentMsgs && recentMsgs.length > 0) {
@@ -759,67 +1195,71 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
                         const p = JSON.parse(m.content)
                         text = p.txt || m.content
                     } catch {}
-                    const sender = m.from_account_type === '1' ? 'Seller (You)' : 'Buyer (Customer)'
+                    const sender = String(m.from_account_type) === '1' ? 'Buyer (Customer)' : 'Seller (You)'
                     return `[${sender}]: ${text}`
                 }).join('\n')
             }
 
-            const systemPrompt = `You are an automated AI Customer Service Assistant for our online store on Daraz.
-Your goal is to answer the customer's questions politely, accurately, and concisely. Keep responses short (under 2-3 sentences) because customers read them on mobile chat.
+            const agentCustomInstructions = settings.ai_agent_instructions?.trim() || DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS
 
-Store Inventory Context:
-${productsContext}
+            const systemPrompt = `${agentCustomInstructions}
+
+Store & Customer Context:
+Buyer: ${session?.title || 'Customer'} (Buyer ID: ${session?.buyer_id || 'N/A'})
+
+Buyer Order Status:
+${buyerOrdersContext}
+
+${productKnowledgeContext}
 
 Recent Conversation History:
 ${historyContext}
 [Buyer (Customer)]: ${userText}
 
-Generate a friendly response in English or Nepali based on the customer's language. Do not make up facts. If you do not know the answer (e.g. tracking code details not in context), politely tell the customer that a human support agent will review and reply shortly.
+Strict Guidelines for Response:
+1. Talk like a friendly human customer service agent. Keep responses short (under 2-3 sentences).
+2. If customer asks about order status or delivery date, check the Buyer Order Status above.
+3. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
+4. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
+   Reply with:
+   "Hamro team le yo barema check garera xittai tapailai jankari garaunecha. / Our team will check this specific detail and update you shortly."
+   and append "[ACTION:HANDOVER_TO_HUMAN]" at the very end.
 Response:`
 
-            let replyText = null
-            if (isOpenAi) {
-                console.log(`[AutoReply] Calling OpenAI API (${settings.openai_model || 'gpt-4o-mini'})...`)
-                const response = await axios.post(
-                    'https://api.openai.com/v1/chat/completions',
-                    {
-                        model: settings.openai_model || 'gpt-4o-mini',
-                        messages: [
-                            { role: 'user', content: systemPrompt }
-                        ],
-                        max_tokens: 150,
-                        temperature: 0.7
-                    },
-                    {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${apiKey}`
-                        },
-                        timeout: 10000
-                    }
-                )
-                replyText = response.data?.choices?.[0]?.message?.content
-            } else {
-                console.log('[AutoReply] Calling Gemini API...')
-                const response = await axios.post(
-                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-                    {
-                        contents: [{
-                            parts: [{ text: systemPrompt }]
-                        }]
-                    },
-                    {
-                        headers: { 'Content-Type': 'application/json' }
-                    }
-                )
-                replyText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
+            let replyText: string | null = null
+            try {
+                if (effectiveAi.provider === 'openai') {
+                    replyText = await callOpenAiApi(effectiveAi.apiKey, systemPrompt, effectiveAi.model, false)
+                } else {
+                    replyText = await callGeminiApi(effectiveAi.apiKey, systemPrompt, effectiveAi.model, false)
+                }
+            } catch (err: any) {
+                console.error(`[AutoReply] AI provider ${effectiveAi.provider} call failed:`, err.message)
             }
 
             if (replyText && replyText.trim()) {
-                const cleanReply = replyText.replace(/AI Assistant:/gi, '').trim()
-                console.log(`[AutoReply] AI response generated: "${cleanReply}"`)
-                
+                const isHandover = replyText.includes('[ACTION:HANDOVER_TO_HUMAN]')
+                const cleanReply = replyText
+                    .replace(/\[ACTION:HANDOVER_TO_HUMAN\]/gi, '')
+                    .replace(/AI Assistant:/gi, '')
+                    .trim()
+
+                if (isHandover) {
+                    const pausedUntil = new Date(Date.now() + cooldownHours * 60 * 60 * 1000).toISOString()
+                    await supabase
+                        .from('daraz_chat_sessions')
+                        .update({
+                            is_urgent: true,
+                            urgent_reason: `Unanswered product query: "${userText.substring(0, 50)}"`,
+                            ai_paused_until: pausedUntil,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('session_id', sessionId)
+                }
+
+                console.log(`[AutoReply] AI response generated (Handover: ${isHandover}): "${cleanReply}"`)
                 await sendChatMessage(storeId, sessionId, '1', cleanReply, undefined, undefined, true)
+                try { revalidatePath('/dashboard/chat-ai') } catch {}
             }
         }
     } catch (error) {

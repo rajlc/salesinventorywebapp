@@ -13,8 +13,19 @@ import {
     addChatRule,
     deleteChatRule,
     processPendingDelayedMessagesAction,
+    toggleSessionUrgent,
+    generateSessionAiAnalysisAction,
+    getGlobalAiIntegrationInfo,
     type ChatSettings
 } from '@/features/chat/actions/chat-actions'
+import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, extractDarazItemId } from '@/features/chat/constants'
+import {
+    getProductQAs,
+    addProductQA,
+    updateProductQA,
+    deleteProductQA,
+    type ProductQA
+} from '@/features/chat/actions/product-qa-actions'
 import {
     getReviewSettings,
     updateReviewSettings,
@@ -42,7 +53,14 @@ import {
     Maximize2,
     Minimize2,
     Loader2,
-    Check
+    Check,
+    Sparkles,
+    AlertCircle,
+    HelpCircle,
+    Edit2,
+    ChevronDown,
+    ChevronUp,
+    BookOpen
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui-shim'
@@ -65,6 +83,11 @@ interface ChatSession {
     is_follower?: boolean
     followed_at?: string | null
     updated_at: string
+    ai_summary?: string | null
+    ai_summary_updated_at?: string | null
+    is_urgent?: boolean
+    urgent_reason?: string | null
+    ai_paused_until?: string | null
 }
 
 interface ChatMessage {
@@ -235,6 +258,21 @@ function ChatAiDashboardContent() {
     const [stores, setStores] = useState<Store[]>([])
     const [activeStoreId, setActiveStoreId] = useState<string>('')
     const [storeSettings, setStoreSettings] = useState<Record<string, ChatSettings>>({})
+    const [globalAiInfo, setGlobalAiInfo] = useState<{
+        hasGeminiKey: boolean
+        hasOpenAiKey: boolean
+        globalGeminiApiKeyMasked: string
+        globalOpenAiApiKeyMasked: string
+        globalProvider: string
+        globalModel: string
+    } | null>(null)
+
+    useEffect(() => {
+        getGlobalAiIntegrationInfo().then(info => {
+            setGlobalAiInfo(info)
+        }).catch(console.error)
+    }, [])
+
     const [reviewSettings, setReviewSettings] = useState<Record<string, ReviewSettings>>({})
     const [sessions, setSessions] = useState<ChatSession[]>([])
     const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -255,7 +293,7 @@ function ChatAiDashboardContent() {
     
     // UI filters
     const [searchQuery, setSearchQuery] = useState('')
-    const [sessionFilter, setSessionFilter] = useState<'all' | 'unread'>('all')
+    const [sessionFilter, setSessionFilter] = useState<'all' | 'unread' | 'urgent'>('all')
     
     // Settings state
     const [rules, setRules] = useState<ChatRule[]>([])
@@ -275,7 +313,27 @@ function ChatAiDashboardContent() {
     const [customerOrders, setCustomerOrders] = useState<any[]>([])
     const [loadingOrders, setLoadingOrders] = useState(false)
     const [ordersSearchQuery, setOrdersSearchQuery] = useState('')
-    const [activeRightTab, setActiveRightTab] = useState<'order' | 'product' | 'voucher'>('order')
+    const [activeRightTab, setActiveRightTab] = useState<'order' | 'product' | 'voucher' | 'analysis'>('order')
+
+    // Contextual Product Details & Verified Q&A in Right Drawer
+    const [selectedProduct, setSelectedProduct] = useState<any | null>(null)
+    const [loadingProductDetails, setLoadingProductDetails] = useState(false)
+    const [productQAs, setProductQAs] = useState<ProductQA[]>([])
+    const [loadingQAs, setLoadingQAs] = useState(false)
+    const [qaModalOpen, setQaModalOpen] = useState(false)
+    const [editingQA, setEditingQA] = useState<ProductQA | null>(null)
+    const [qaQuestion, setQaQuestion] = useState('')
+    const [qaAnswer, setQaAnswer] = useState('')
+    const [savingQA, setSavingQA] = useState(false)
+    const [expandedHighlights, setExpandedHighlights] = useState(false)
+    const [expandedDescription, setExpandedDescription] = useState(false)
+    const [productSearchQuery, setProductSearchQuery] = useState('')
+    const [searchResults, setSearchResults] = useState<any[]>([])
+    const [searchingProducts, setSearchingProducts] = useState(false)
+    const [showProductSearch, setShowProductSearch] = useState(false)
+
+    // AI Analysis state
+    const [analyzingSession, setAnalyzingSession] = useState(false)
 
     // States for order notes / remarks
     const [isNoteModalOpen, setIsNoteModalOpen] = useState(false)
@@ -560,6 +618,10 @@ function ChatAiDashboardContent() {
             return session.unread_count > 0
         }
 
+        if (sessionFilter === 'urgent') {
+            return Boolean(session.is_urgent)
+        }
+
         return true
     })
 
@@ -841,67 +903,362 @@ function ChatAiDashboardContent() {
     const currentReviewSettings = reviewSettings[activeStoreId] || {}
 
     // Filter customer orders based on active session's title (username), buyer_id, or manual search query
-    const filteredOrders = customerOrders.filter(order => {
-        if (!activeSession) return false
+    const filteredOrders = React.useMemo(() => {
+        if (!activeSession) return []
 
         const title = activeSession.title?.toLowerCase() || ''
         const buyerId = activeSession.buyer_id ? String(activeSession.buyer_id) : ''
-        
-        const custName = order.customer_name?.toLowerCase() || ''
-        const shipName = order.shipping_name?.toLowerCase() || ''
-        const firstName = order.customer_first_name?.toLowerCase() || ''
-        const lastName = order.customer_last_name?.toLowerCase() || ''
-        const fullName = `${firstName} ${lastName}`.trim()
-        const orderNum = order.order_number?.toLowerCase() || ''
-        const orderId = order.order_id?.toLowerCase() || ''
+        const query = ordersSearchQuery.toLowerCase().trim()
 
-        // Check if buyer_id matches inside the items_detail list of the order
-        let matchesBuyerId = false
-        let hasBuyerIdInOrder = false
-        if (buyerId && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
-            hasBuyerIdInOrder = order.items_detail.some((item: any) => 
-                item && (item.buyer_id !== undefined && item.buyer_id !== null)
-            )
-            matchesBuyerId = order.items_detail.some((item: any) => 
-                item && String(item.buyer_id) === buyerId
-            )
-        }
+        return customerOrders.filter(order => {
+            const custName = order.customer_name?.toLowerCase() || ''
+            const shipName = order.shipping_name?.toLowerCase() || ''
+            const firstName = order.customer_first_name?.toLowerCase() || ''
+            const lastName = order.customer_last_name?.toLowerCase() || ''
+            const fullName = `${firstName} ${lastName}`.trim()
+            const orderNum = order.order_number?.toLowerCase() || ''
+            const orderId = order.order_id?.toLowerCase() || ''
 
-        // If the order has items with a valid buyer_id, we MUST match strictly by buyer_id
-        // to prevent false positives for common customer names (like "Shanti").
-        let matchesAuto = false
-        if (hasBuyerIdInOrder) {
-            matchesAuto = matchesBuyerId
-        } else {
-            // Fallback to name matching ONLY if the order has no buyer_id info
-            matchesAuto = !!(title && (
-                custName.includes(title) || 
-                shipName.includes(title) || 
-                title.includes(custName) ||
-                firstName.includes(title) ||
-                lastName.includes(title) ||
-                title.includes(firstName) ||
-                fullName.includes(title) ||
-                title.includes(fullName)
-            ))
-        }
-
-        if (ordersSearchQuery.trim() !== '') {
-            const query = ordersSearchQuery.toLowerCase().trim()
-            return custName.includes(query) || 
-                shipName.includes(query) || 
-                orderNum.includes(query) || 
-                orderId.includes(query) ||
-                firstName.includes(query) ||
-                lastName.includes(query) ||
-                order.daraz_order_items?.some((item: any) => 
-                    item.product_name?.toLowerCase().includes(query) || 
-                    item.seller_sku?.toLowerCase().includes(query)
+            // Check if buyer_id matches inside the items_detail list of the order
+            let matchesBuyerId = false
+            let hasBuyerIdInOrder = false
+            if (buyerId && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
+                hasBuyerIdInOrder = order.items_detail.some((item: any) => 
+                    item && (item.buyer_id !== undefined && item.buyer_id !== null)
                 )
+                matchesBuyerId = order.items_detail.some((item: any) => 
+                    item && String(item.buyer_id) === buyerId
+                )
+            }
+
+            // If the order has items with a valid buyer_id, we MUST match strictly by buyer_id
+            let matchesAuto = false
+            if (hasBuyerIdInOrder) {
+                matchesAuto = matchesBuyerId
+            } else {
+                matchesAuto = !!(title && (
+                    custName.includes(title) || 
+                    shipName.includes(title) || 
+                    title.includes(custName) ||
+                    firstName.includes(title) ||
+                    lastName.includes(title) ||
+                    title.includes(firstName) ||
+                    fullName.includes(title) ||
+                    title.includes(fullName)
+                ))
+            }
+
+            if (query !== '') {
+                return custName.includes(query) || 
+                    shipName.includes(query) || 
+                    orderNum.includes(query) || 
+                    orderId.includes(query) ||
+                    firstName.includes(query) ||
+                    lastName.includes(query) ||
+                    order.daraz_order_items?.some((item: any) => 
+                        item.product_name?.toLowerCase().includes(query) || 
+                        item.seller_sku?.toLowerCase().includes(query)
+                    )
+            }
+
+            return matchesAuto
+        })
+    }, [customerOrders, activeSession?.title, activeSession?.buyer_id, ordersSearchQuery])
+
+    // Prioritize active pending/processing orders over canceled ones
+    const prioritizedOrder = React.useMemo(() => {
+        if (!filteredOrders || filteredOrders.length === 0) return null
+        const statusWeight: Record<string, number> = {
+            'pending': 10,
+            'ready to ship': 8,
+            'ready_to_ship': 8,
+            'packed': 8,
+            'shipped': 6,
+            'delivered': 4,
+            'completed': 4,
+            'canceled': 1,
+            'cancelled': 1,
+            'cancel': 1,
+            'failed': 1
+        }
+        return [...filteredOrders].sort((a, b) => {
+            const wa = statusWeight[String(a.order_status).toLowerCase()] || 3
+            const wb = statusWeight[String(b.order_status).toLowerCase()] || 3
+            return wb - wa
+        })[0]
+    }, [filteredOrders])
+
+    // Load verified Q&As for a product
+    const loadProductQAs = React.useCallback(async (productId?: string, darazItemId?: string) => {
+        if (!productId && !darazItemId) {
+            setProductQAs([])
+            return
+        }
+        setLoadingQAs(true)
+        try {
+            const qas = await getProductQAs({ productId, darazItemId })
+            setProductQAs(qas)
+        } catch (err) {
+            console.error('Error loading product Q&As:', err)
+        } finally {
+            setLoadingQAs(false)
+        }
+    }, [])
+
+    // Extract product card item id if buyer sent one in this conversation
+    const productCardItemId = React.useMemo(() => {
+        for (const msg of messages) {
+            if (msg.template_id === '10006') {
+                const parsed = parseMsgContent(msg.content)
+                if (parsed.itemId || parsed.item_id) {
+                    return String(parsed.itemId || parsed.item_id)
+                }
+            }
+        }
+        return null
+    }, [messages])
+
+    // Extract fallback order item identifier
+    const fallbackOrderItem = prioritizedOrder?.daraz_order_items?.[0] || filteredOrders[0]?.daraz_order_items?.[0]
+    const fallbackProductKey = fallbackOrderItem ? `${fallbackOrderItem.seller_sku || ''}_${fallbackOrderItem.product_name || ''}` : ''
+
+    // Contextual product detection for the active chat thread
+    useEffect(() => {
+        if (!activeSessionId) {
+            setSelectedProduct((prev: any) => prev !== null ? null : prev)
+            setProductQAs((prev: ProductQA[]) => prev.length > 0 ? [] : prev)
+            return
         }
 
-        return matchesAuto
-    })
+        let isMounted = true
+
+        async function detectChatProduct() {
+            setLoadingProductDetails(true)
+            try {
+                let foundProduct: any = null
+
+                if (productCardItemId) {
+                    const { data } = await supabase
+                        .from('products')
+                        .select('id, product_name, product_title, seller_sku1, daraz_product_url, regular_price, special_price, image_url, highlights, description')
+                        .or(`daraz_product_url.ilike.%-i${productCardItemId}-%,seller_sku1.ilike.${productCardItemId}%`)
+                        .maybeSingle()
+
+                    if (data) {
+                        foundProduct = {
+                            ...data,
+                            name: data.product_title || data.product_name,
+                            daraz_item_id: extractDarazItemId(data.daraz_product_url, data.seller_sku1) || productCardItemId
+                        }
+                    } else {
+                        const cardMsg = messages.find(m => m.template_id === '10006')
+                        const parsed = cardMsg ? parseMsgContent(cardMsg.content) : {}
+                        foundProduct = {
+                            daraz_item_id: productCardItemId,
+                            name: parsed.title || `Daraz Item #${productCardItemId}`,
+                            image_url: parsed.picUrl || null,
+                            special_price: parsed.price ? Number(parsed.price) : null,
+                            highlights: 'Shared via customer inquiry card. Direct database sync in progress.',
+                            description: ''
+                        }
+                    }
+                } else if (fallbackOrderItem) {
+                    const sku = fallbackOrderItem.seller_sku
+                    const pName = fallbackOrderItem.product_name
+                    if (sku || pName) {
+                        let query = supabase
+                            .from('products')
+                            .select('id, product_name, product_title, seller_sku1, daraz_product_url, regular_price, special_price, image_url, highlights, description')
+
+                        if (sku) query = query.eq('seller_sku1', sku)
+                        else query = query.ilike('product_name', `%${pName}%`)
+
+                        const { data } = await query.maybeSingle()
+                        if (data) {
+                            foundProduct = {
+                                ...data,
+                                name: data.product_title || data.product_name,
+                                daraz_item_id: extractDarazItemId(data.daraz_product_url, data.seller_sku1) || data.id
+                            }
+                        } else {
+                            foundProduct = {
+                                name: fallbackOrderItem.product_name,
+                                seller_sku1: fallbackOrderItem.seller_sku,
+                                image_url: fallbackOrderItem.products?.image_url,
+                                special_price: fallbackOrderItem.amount
+                            }
+                        }
+                    }
+                }
+
+                if (isMounted) {
+                    setSelectedProduct(foundProduct)
+                    if (foundProduct?.id || foundProduct?.daraz_item_id) {
+                        loadProductQAs(foundProduct.id, foundProduct.daraz_item_id)
+                    } else {
+                        setProductQAs([])
+                    }
+                }
+            } catch (err) {
+                console.error('Error detecting product:', err)
+            } finally {
+                if (isMounted) setLoadingProductDetails(false)
+            }
+        }
+
+        detectChatProduct()
+
+        return () => {
+            isMounted = false
+        }
+    }, [activeSessionId, productCardItemId, fallbackProductKey, loadProductQAs])
+
+    // Save Q&A from Drawer
+    const handleSaveQA = async () => {
+        if (!qaQuestion.trim() || !qaAnswer.trim()) {
+            toast.error('Both Question and Answer are required.')
+            return
+        }
+        setSavingQA(true)
+        try {
+            if (editingQA) {
+                const res = await updateProductQA(editingQA.id, {
+                    question: qaQuestion.trim(),
+                    answer: qaAnswer.trim()
+                })
+                if (res.success) {
+                    toast.success('Product Q&A updated successfully!')
+                    setQaModalOpen(false)
+                    setEditingQA(null)
+                    setQaQuestion('')
+                    setQaAnswer('')
+                    if (selectedProduct) {
+                        loadProductQAs(selectedProduct.id, selectedProduct.daraz_item_id)
+                    }
+                } else {
+                    toast.error(res.error || 'Failed to update Q&A')
+                }
+            } else {
+                const res = await addProductQA({
+                    store_id: activeStoreId || null,
+                    product_id: selectedProduct?.id || null,
+                    daraz_item_id: String(selectedProduct?.daraz_item_id || selectedProduct?.id || ''),
+                    seller_sku: selectedProduct?.seller_sku1 || null,
+                    question: qaQuestion.trim(),
+                    answer: qaAnswer.trim()
+                })
+                if (res.success) {
+                    toast.success('Verified Q&A saved to knowledge base!')
+                    setQaModalOpen(false)
+                    setQaQuestion('')
+                    setQaAnswer('')
+                    if (selectedProduct) {
+                        loadProductQAs(selectedProduct.id, selectedProduct.daraz_item_id)
+                    }
+                } else {
+                    toast.error(res.error || 'Failed to add Q&A')
+                }
+            }
+        } catch (e: any) {
+            toast.error(e.message || 'Error saving Q&A')
+        } finally {
+            setSavingQA(false)
+        }
+    }
+
+    const handleDeleteQA = async (id: string) => {
+        if (!confirm('Are you sure you want to delete this verified Q&A?')) return
+        try {
+            const res = await deleteProductQA(id)
+            if (res.success) {
+                toast.success('Q&A deleted')
+                setProductQAs(prev => prev.filter(q => q.id !== id))
+            } else {
+                toast.error(res.error || 'Failed to delete Q&A')
+            }
+        } catch (err: any) {
+            toast.error(err.message || 'Error deleting Q&A')
+        }
+    }
+
+    // Toggle session urgency
+    const handleToggleUrgent = async () => {
+        if (!activeSession) return
+        const newUrgent = !activeSession.is_urgent
+        try {
+            const res = await toggleSessionUrgent(
+                activeSession.session_id, 
+                newUrgent, 
+                newUrgent ? 'Marked urgent manually by staff' : undefined
+            )
+            if (res.success) {
+                toast.success(newUrgent ? 'Chat marked as Urgent / Human Priority' : 'Urgent status cleared')
+                setSessions(prev => prev.map(s => s.session_id === activeSession.session_id ? {
+                    ...s,
+                    is_urgent: newUrgent,
+                    urgent_reason: newUrgent ? 'Marked urgent manually by staff' : null
+                } : s))
+            } else {
+                toast.error(res.error || 'Failed to update urgent status')
+            }
+        } catch (e: any) {
+            toast.error(e.message || 'Error toggling urgent status')
+        }
+    }
+
+    // Run AI Analysis for active session
+    const handleRunAiAnalysis = async () => {
+        if (!activeSession || !activeStoreId) return
+        setAnalyzingSession(true)
+        toast.info('Generating AI conversation & order analysis...')
+        try {
+            const res = await generateSessionAiAnalysisAction(activeStoreId, activeSession.session_id)
+            if (res.success && res.analysis) {
+                toast.success('AI Analysis updated successfully!')
+                setSessions(prev => prev.map(s => s.session_id === activeSession.session_id ? {
+                    ...s,
+                    ai_summary: res.analysis?.summary,
+                    is_urgent: res.analysis?.is_urgent,
+                    urgent_reason: res.analysis?.urgent_reason,
+                    ai_summary_updated_at: new Date().toISOString()
+                } : s))
+            } else {
+                toast.error(res.error || 'Failed to generate AI analysis')
+            }
+        } catch (e: any) {
+            toast.error(e.message || 'Error running AI analysis')
+        } finally {
+            setAnalyzingSession(false)
+        }
+    }
+
+    // Product search helper for drawer
+    const handleSearchProducts = async (q: string) => {
+        setProductSearchQuery(q)
+        if (!q.trim() || q.length < 2) {
+            setSearchResults([])
+            return
+        }
+        setSearchingProducts(true)
+        try {
+            const { data } = await supabase
+                .from('products')
+                .select('id, product_name, product_title, seller_sku1, daraz_product_url, regular_price, special_price, image_url, highlights, description')
+                .or(`product_name.ilike.%${q}%,product_title.ilike.%${q}%,seller_sku1.ilike.%${q}%`)
+                .limit(8)
+
+            const mapped = (data || []).map(d => ({
+                ...d,
+                name: d.product_title || d.product_name,
+                daraz_item_id: extractDarazItemId(d.daraz_product_url, d.seller_sku1) || d.id
+            }))
+            setSearchResults(mapped)
+        } catch (e) {
+            console.error('Search error:', e)
+        } finally {
+            setSearchingProducts(false)
+        }
+    }
 
     // Handler to send order card to the conversation
     const handleSendOrderCard = async (orderId: string) => {
@@ -1143,10 +1500,10 @@ function ChatAiDashboardContent() {
                             </div>
 
                             {/* Filter Pills */}
-                            <div className="flex gap-2 text-xs">
+                            <div className="flex gap-1.5 text-xs">
                                 <button
                                     onClick={() => setSessionFilter('all')}
-                                    className={`px-3 py-1 rounded-full font-semibold transition-all ${
+                                    className={`px-2.5 py-1 rounded-full font-semibold transition-all ${
                                         sessionFilter === 'all'
                                             ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 shadow-sm'
                                             : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700'
@@ -1156,13 +1513,24 @@ function ChatAiDashboardContent() {
                                 </button>
                                 <button
                                     onClick={() => setSessionFilter('unread')}
-                                    className={`px-3 py-1 rounded-full font-semibold transition-all flex items-center gap-1.5 ${
+                                    className={`px-2.5 py-1 rounded-full font-semibold transition-all flex items-center gap-1 ${
                                         sessionFilter === 'unread'
                                             ? 'bg-red-600 text-white shadow-sm'
                                             : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700'
                                     }`}
                                 >
                                     Unread ({sessions.filter(s => isStoreConnected(s.store_id) && s.unread_count > 0).length})
+                                </button>
+                                <button
+                                    onClick={() => setSessionFilter('urgent')}
+                                    className={`px-2.5 py-1 rounded-full font-semibold transition-all flex items-center gap-1 ${
+                                        sessionFilter === 'urgent'
+                                            ? 'bg-amber-600 text-white shadow-sm'
+                                            : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700'
+                                    }`}
+                                >
+                                    <AlertCircle size={11} className={sessionFilter === 'urgent' ? 'text-white' : 'text-amber-500'} />
+                                    Urgent ({sessions.filter(s => isStoreConnected(s.store_id) && s.is_urgent).length})
                                 </button>
                             </div>
                         </div>
@@ -1234,9 +1602,19 @@ function ChatAiDashboardContent() {
 
                                             {/* Details */}
                                             <div className="flex-1 min-w-0">
-                                                <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate mb-1">
-                                                    {session.title}
-                                                </h3>
+                                                <div className="flex items-center gap-1.5 mb-1">
+                                                    <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">
+                                                        {session.title}
+                                                    </h3>
+                                                    {session.is_urgent && (
+                                                        <span 
+                                                            className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500 text-white shrink-0 uppercase tracking-wider"
+                                                            title={session.urgent_reason || 'Urgent inquiry'}
+                                                        >
+                                                            Urgent
+                                                        </span>
+                                                    )}
+                                                </div>
                                                 <p className="text-xs text-zinc-555 truncate">
                                                     {parseSummaryDisplay(session.last_message_summary)}
                                                 </p>
@@ -1508,34 +1886,52 @@ function ChatAiDashboardContent() {
                     {/* Right Column: Customer Info & Orders Sidebar (Daraz-like) */}
                     {activeSession && (
                         <div className="w-80 border-l border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex flex-col shrink-0 h-full overflow-hidden">
-                            {/* Profile details */}
-                            <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex flex-col items-center text-center space-y-2 shrink-0">
-                                <div className="h-16 w-16 rounded-full flex items-center justify-center bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 font-bold text-xl shadow-inner border border-blue-200/50 dark:border-blue-800/50">
-                                    {activeSession.title.substring(0, 2).toUpperCase()}
+                            {/* Profile details - Clean, compact header without bulky image icon */}
+                            <div className="p-3.5 border-b border-zinc-200 dark:border-zinc-800 space-y-2.5 shrink-0 bg-white dark:bg-zinc-900">
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                        <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-100 flex items-center gap-1.5 truncate">
+                                            <User size={15} className="text-blue-600 shrink-0" />
+                                            <span className="truncate">{activeSession.title}</span>
+                                        </h3>
+                                        <p className="text-[10px] text-zinc-400 font-mono mt-0.5">Buyer ID: {activeSession.buyer_id}</p>
+                                    </div>
+                                    
+                                    {/* Urgent toggle badge button */}
+                                    <button
+                                        onClick={handleToggleUrgent}
+                                        title={activeSession.is_urgent ? "Click to resolve urgent status" : "Click to mark as urgent / human priority"}
+                                        className={`px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 border transition-all ${
+                                            activeSession.is_urgent 
+                                                ? 'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800 hover:bg-amber-100'
+                                                : 'bg-zinc-50 text-zinc-500 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700 hover:bg-zinc-100'
+                                        }`}
+                                    >
+                                        <AlertCircle size={11} className={activeSession.is_urgent ? 'text-amber-600' : 'text-zinc-400'} />
+                                        {activeSession.is_urgent ? 'Urgent' : 'Mark Urgent'}
+                                    </button>
                                 </div>
-                                <div className="space-y-0.5">
-                                    <h3 className="text-sm font-bold text-zinc-800 dark:text-zinc-100 flex items-center gap-1.5 justify-center">
-                                        <User size={14} className="text-zinc-400" />
-                                        {activeSession.title}
-                                    </h3>
-                                    <p className="text-[10px] text-zinc-400">Buyer ID: {activeSession.buyer_id}</p>
-                                </div>
+
+                                {activeSession.is_urgent && activeSession.urgent_reason && (
+                                    <div className="p-2 rounded bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 text-[11px] text-amber-800 dark:text-amber-300 flex items-start gap-1.5">
+                                        <AlertCircle size={13} className="shrink-0 mt-0.5 text-amber-600" />
+                                        <span className="line-clamp-2 leading-tight font-medium">{activeSession.urgent_reason}</span>
+                                    </div>
+                                )}
                                 
                                 {/* Follow Invitation button */}
-                                <div className="w-full pt-1.5">
-                                    {/* is_follower from DB (persists past message deletion) OR live scan of current messages */}
+                                <div className="w-full pt-0.5">
                                     {(activeSession.is_follower || messages.some(m => (m.content || '').toLowerCase().includes('store follower') || (m.content || '').toLowerCase().includes('now your store'))) ? (
-                                        // Buyer already follows — locked state
-                                        <div className="w-full py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-xs font-bold text-white shadow rounded-lg flex items-center justify-center gap-1.5 cursor-not-allowed opacity-90 select-none">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                        <div className="w-full py-1.5 bg-gradient-to-r from-green-500 to-emerald-600 text-xs font-bold text-white shadow rounded-lg flex items-center justify-center gap-1.5 cursor-not-allowed opacity-90 select-none">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                             Buyer is Already a Follower
                                         </div>
                                     ) : (
                                         <button 
                                             onClick={handleSendFollowInvitation}
-                                            className="w-full py-2 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 active:scale-95 text-xs font-bold text-white shadow rounded-lg transition-all flex items-center justify-center gap-1.5"
+                                            className="w-full py-1.5 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 active:scale-95 text-xs font-bold text-white shadow rounded-lg transition-all flex items-center justify-center gap-1.5"
                                         >
-                                            <User size={14} />
+                                            <User size={13} />
                                             Send Follow Invitation
                                         </button>
                                     )}
@@ -1544,17 +1940,21 @@ function ChatAiDashboardContent() {
 
                             {/* Tab Switcher */}
                             <div className="flex border-b border-zinc-200 dark:border-zinc-800 text-center text-xs font-semibold shrink-0 bg-zinc-50/50 dark:bg-zinc-900/30">
-                                {(['order', 'product', 'voucher'] as const).map((tab) => (
+                                {(['order', 'product', 'voucher', 'analysis'] as const).map((tab) => (
                                     <button
                                         key={tab}
                                         onClick={() => setActiveRightTab(tab)}
                                         className={`flex-1 py-2.5 border-b-2 capitalize transition-all ${
                                             activeRightTab === tab
                                                 ? 'border-orange-500 text-orange-500 font-bold bg-white dark:bg-zinc-900'
-                                                : 'border-transparent text-zinc-550 hover:text-zinc-700 dark:hover:text-zinc-300'
+                                                : 'border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
                                         }`}
                                     >
-                                        {tab === 'order' ? `Order (${filteredOrders.length})` : tab}
+                                        {tab === 'order' 
+                                            ? `Order (${filteredOrders.length})` 
+                                            : tab === 'analysis' 
+                                                ? 'AI Analysis' 
+                                                : tab}
                                     </button>
                                 ))}
                             </div>
@@ -1751,9 +2151,260 @@ function ChatAiDashboardContent() {
                                 )}
 
                                 {activeRightTab === 'product' && (
-                                    <div className="py-12 text-center text-zinc-400 text-xs">
-                                        <ShoppingBag size={24} className="mx-auto mb-2 text-zinc-300 dark:text-zinc-700" />
-                                        <span>No products shared yet.</span>
+                                    <div className="space-y-3.5">
+                                        {/* Switch / Search product header */}
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                                <ShoppingBag size={13} className="text-zinc-500" />
+                                                Active Inquiry Product
+                                            </span>
+                                            <button
+                                                onClick={() => setShowProductSearch(!showProductSearch)}
+                                                className="text-[10px] text-blue-600 dark:text-blue-400 font-bold hover:underline"
+                                            >
+                                                {showProductSearch ? 'Close Search' : 'Change Product'}
+                                            </button>
+                                        </div>
+
+                                        {/* Product Search Box */}
+                                        {showProductSearch && (
+                                            <div className="p-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 space-y-2">
+                                                <div className="relative">
+                                                    <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-400" />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Search SKU, Item ID or Name..."
+                                                        value={productSearchQuery}
+                                                        onChange={(e) => handleSearchProducts(e.target.value)}
+                                                        className="pl-8 pr-3 py-1.5 w-full text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-200"
+                                                    />
+                                                </div>
+                                                {searchingProducts && (
+                                                    <div className="text-center py-2 text-[10px] text-zinc-400 flex items-center justify-center gap-1">
+                                                        <RefreshCw size={10} className="animate-spin" /> Searching...
+                                                    </div>
+                                                )}
+                                                {searchResults.length > 0 && (
+                                                    <div className="max-h-40 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-100 dark:border-zinc-800 rounded">
+                                                        {searchResults.map((p) => (
+                                                            <button
+                                                                key={p.id || p.daraz_item_id}
+                                                                onClick={() => {
+                                                                    setSelectedProduct(p)
+                                                                    setShowProductSearch(false)
+                                                                    setSearchResults([])
+                                                                    setProductSearchQuery('')
+                                                                    loadProductQAs(p.id, p.daraz_item_id)
+                                                                }}
+                                                                className="w-full text-left p-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60 flex items-center gap-2 text-xs"
+                                                            >
+                                                                <div className="h-7 w-7 rounded bg-zinc-100 dark:bg-zinc-800 shrink-0 overflow-hidden">
+                                                                    {p.image_url ? (
+                                                                        <img src={p.image_url} alt="" className="h-full w-full object-cover" />
+                                                                    ) : (
+                                                                        <ShoppingBag size={12} className="m-auto text-zinc-400" />
+                                                                    )}
+                                                                </div>
+                                                                <div className="min-w-0 flex-1">
+                                                                    <p className="text-[11px] font-medium text-zinc-800 dark:text-zinc-200 truncate">{p.name}</p>
+                                                                    <p className="text-[9px] text-zinc-400 font-mono">SKU: {p.seller_sku1 || 'N/A'}</p>
+                                                                </div>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Selected Product Card */}
+                                        {loadingProductDetails ? (
+                                            <div className="py-8 text-center text-zinc-500 text-xs">
+                                                <RefreshCw className="animate-spin h-4 w-4 mx-auto mb-1.5 text-zinc-400" />
+                                                Detecting product details...
+                                            </div>
+                                        ) : selectedProduct ? (
+                                            <div className="space-y-3">
+                                                {/* Product Header Card */}
+                                                <div className="p-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-sm space-y-2.5">
+                                                    <div className="flex gap-2.5">
+                                                        <div className="h-14 w-14 bg-zinc-100 dark:bg-zinc-800 rounded-md border border-zinc-200/50 dark:border-zinc-700 shrink-0 overflow-hidden flex items-center justify-center">
+                                                            {selectedProduct.image_url ? (
+                                                                <img src={selectedProduct.image_url} alt="" className="h-full w-full object-cover" />
+                                                            ) : (
+                                                                <ShoppingBag size={20} className="text-zinc-400" />
+                                                            )}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <h4 className="font-bold text-zinc-800 dark:text-zinc-100 text-xs leading-snug line-clamp-2">
+                                                                {selectedProduct.name}
+                                                            </h4>
+                                                            <div className="mt-1 flex items-baseline justify-between">
+                                                                <span className="text-xs font-bold text-orange-600 dark:text-orange-400">
+                                                                    NPR {selectedProduct.special_price || selectedProduct.regular_price || '—'}
+                                                                </span>
+                                                                {selectedProduct.seller_sku1 && (
+                                                                    <span className="text-[10px] text-zinc-400 font-mono">
+                                                                        SKU: {selectedProduct.seller_sku1}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Highlights Preview */}
+                                                    {selectedProduct.highlights && (
+                                                        <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800">
+                                                            <button
+                                                                onClick={() => setExpandedHighlights(!expandedHighlights)}
+                                                                className="w-full flex items-center justify-between text-[11px] font-bold text-zinc-700 dark:text-zinc-300 py-0.5"
+                                                            >
+                                                                <span>Product Highlights</span>
+                                                                {expandedHighlights ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                            </button>
+                                                            {expandedHighlights && (
+                                                                <div 
+                                                                    className="mt-1.5 p-2 bg-zinc-50 dark:bg-zinc-950 rounded text-[11px] text-zinc-600 dark:text-zinc-400 max-h-36 overflow-y-auto leading-relaxed"
+                                                                    dangerouslySetInnerHTML={{ __html: selectedProduct.highlights }}
+                                                                />
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Description Preview */}
+                                                    {selectedProduct.description && (
+                                                        <div className="pt-1.5 border-t border-zinc-100 dark:border-zinc-800">
+                                                            <button
+                                                                onClick={() => setExpandedDescription(!expandedDescription)}
+                                                                className="w-full flex items-center justify-between text-[11px] font-bold text-zinc-700 dark:text-zinc-300 py-0.5"
+                                                            >
+                                                                <span>Product Description</span>
+                                                                {expandedDescription ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                            </button>
+                                                            {expandedDescription && (
+                                                                <div 
+                                                                    className="mt-1.5 p-2 bg-zinc-50 dark:bg-zinc-950 rounded text-[11px] text-zinc-600 dark:text-zinc-400 max-h-36 overflow-y-auto leading-relaxed"
+                                                                    dangerouslySetInnerHTML={{ __html: selectedProduct.description }}
+                                                                />
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Verified Q&A Knowledge Base */}
+                                                <div className="p-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-sm space-y-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <h4 className="text-xs font-bold text-zinc-800 dark:text-zinc-100 flex items-center gap-1.5">
+                                                                <BookOpen size={13} className="text-blue-600" />
+                                                                Verified Q&A Knowledge ({productQAs.length})
+                                                            </h4>
+                                                            <p className="text-[10px] text-zinc-400">AI uses these answers to auto-reply</p>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => {
+                                                                setEditingQA(null)
+                                                                const lastBuyerMsg = [...messages].reverse().find(m => String(m.from_account_type) === '1')
+                                                                if (lastBuyerMsg) {
+                                                                    const parsed = parseMsgContent(lastBuyerMsg.content)
+                                                                    setQaQuestion(parsed.txt || '')
+                                                                } else {
+                                                                    setQaQuestion('')
+                                                                }
+                                                                setQaAnswer('')
+                                                                setQaModalOpen(true)
+                                                            }}
+                                                            className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold flex items-center gap-1 shadow-sm transition-all"
+                                                        >
+                                                            <Plus size={11} />
+                                                            Add Q&A
+                                                        </button>
+                                                    </div>
+
+                                                    {loadingQAs ? (
+                                                        <div className="py-4 text-center text-zinc-400 text-[11px] flex items-center justify-center gap-1.5">
+                                                            <RefreshCw size={11} className="animate-spin" />
+                                                            Loading Q&As...
+                                                        </div>
+                                                    ) : productQAs.length === 0 ? (
+                                                        <div className="py-4 px-2 text-center text-zinc-400 text-[11px] bg-zinc-50 dark:bg-zinc-950/40 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800">
+                                                            <HelpCircle size={16} className="mx-auto mb-1 text-zinc-400" />
+                                                            <span>No verified Q&As added for this product yet.</span>
+                                                            <div className="mt-1.5">
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setEditingQA(null)
+                                                                        const lastBuyerMsg = [...messages].reverse().find(m => String(m.from_account_type) === '1')
+                                                                        if (lastBuyerMsg) {
+                                                                            const parsed = parseMsgContent(lastBuyerMsg.content)
+                                                                            setQaQuestion(parsed.txt || '')
+                                                                        } else {
+                                                                            setQaQuestion('')
+                                                                        }
+                                                                        setQaAnswer('')
+                                                                        setQaModalOpen(true)
+                                                                    }}
+                                                                    className="text-blue-600 dark:text-blue-400 font-bold hover:underline"
+                                                                >
+                                                                    + Add first verified answer
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+                                                            {productQAs.map((qa) => (
+                                                                <div
+                                                                    key={qa.id}
+                                                                    className="p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950/60 border border-zinc-200/70 dark:border-zinc-800 space-y-1.5 text-xs group"
+                                                                >
+                                                                    <div className="flex justify-between items-start gap-1">
+                                                                        <p className="font-bold text-zinc-800 dark:text-zinc-200 text-[11px] leading-snug">
+                                                                            <span className="text-blue-600 mr-1">Q:</span>{qa.question}
+                                                                        </p>
+                                                                        <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 shrink-0">
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    setEditingQA(qa)
+                                                                                    setQaQuestion(qa.question || '')
+                                                                                    setQaAnswer(qa.answer || '')
+                                                                                    setQaModalOpen(true)
+                                                                                }}
+                                                                                className="p-0.5 text-zinc-400 hover:text-blue-600 transition-colors"
+                                                                                title="Edit Q&A"
+                                                                            >
+                                                                                <Edit2 size={11} />
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => handleDeleteQA(qa.id)}
+                                                                                className="p-0.5 text-zinc-400 hover:text-red-600 transition-colors"
+                                                                                title="Delete Q&A"
+                                                                            >
+                                                                                <Trash2 size={11} />
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                    <p className="text-[11px] text-zinc-600 dark:text-zinc-400 leading-snug pl-2.5 border-l-2 border-green-500">
+                                                                        {qa.answer}
+                                                                    </p>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="py-12 text-center text-zinc-400 text-xs">
+                                                <ShoppingBag size={24} className="mx-auto mb-2 text-zinc-300 dark:text-zinc-700" />
+                                                <span>No product detected from chat or active orders.</span>
+                                                <div className="mt-2">
+                                                    <button
+                                                        onClick={() => setShowProductSearch(true)}
+                                                        className="text-blue-600 dark:text-blue-400 font-bold hover:underline"
+                                                    >
+                                                        Search & Select a Product
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -1761,6 +2412,147 @@ function ChatAiDashboardContent() {
                                     <div className="py-12 text-center text-zinc-400 text-xs">
                                         <Tag size={24} className="mx-auto mb-2 text-zinc-300 dark:text-zinc-700" />
                                         <span>No vouchers available for this store.</span>
+                                    </div>
+                                )}
+
+                                {activeRightTab === 'analysis' && (
+                                    <div className="space-y-3.5">
+                                        {!currentStoreSettings.ai_analysis_enabled ? (
+                                            <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/30 text-center space-y-2">
+                                                <Cpu size={24} className="mx-auto text-amber-500" />
+                                                <h4 className="text-xs font-bold text-amber-800 dark:text-amber-300">AI Analysis is Inactive</h4>
+                                                <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
+                                                    AI Analysis is currently disabled for this store. Enable it in the AI & Automation settings tab to see real-time customer and order intelligence.
+                                                </p>
+                                                <button
+                                                    onClick={() => handleSaveSettings({ ai_analysis_enabled: true })}
+                                                    className="mt-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+                                                >
+                                                    Enable AI Analysis for Store
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                {/* AI Summary Card */}
+                                                <div className="p-3.5 rounded-xl bg-gradient-to-br from-indigo-50/70 via-white to-blue-50/40 dark:from-indigo-950/20 dark:via-zinc-900 dark:to-blue-950/20 border border-indigo-200/60 dark:border-indigo-900/40 shadow-sm space-y-2.5">
+                                                    <div className="flex items-center justify-between border-b border-indigo-100 dark:border-indigo-900/30 pb-2">
+                                                        <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-700 dark:text-indigo-300">
+                                                            <Sparkles size={14} className="text-indigo-500" />
+                                                            <span>AI Customer & Order Summary</span>
+                                                        </div>
+                                                        <button
+                                                            onClick={handleRunAiAnalysis}
+                                                            disabled={analyzingSession}
+                                                            className="p-1 text-zinc-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                                                            title="Refresh Analysis"
+                                                        >
+                                                            <RefreshCw size={13} className={analyzingSession ? 'animate-spin text-indigo-600' : ''} />
+                                                        </button>
+                                                    </div>
+
+                                                    {activeSession.ai_summary ? (
+                                                        <p className="text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed font-normal">
+                                                            {activeSession.ai_summary}
+                                                        </p>
+                                                    ) : (
+                                                        <div className="py-3 text-center text-[11px] text-zinc-400">
+                                                            No AI summary generated yet for this conversation thread.
+                                                        </div>
+                                                    )}
+
+                                                    <div className="pt-1 flex items-center justify-between text-[10px] text-zinc-400 border-t border-indigo-100/60 dark:border-indigo-900/20">
+                                                        <span>Updated: {activeSession.ai_summary_updated_at ? new Date(activeSession.ai_summary_updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Never'}</span>
+                                                        <button
+                                                            onClick={handleRunAiAnalysis}
+                                                            disabled={analyzingSession}
+                                                            className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline flex items-center gap-1"
+                                                        >
+                                                            {analyzingSession ? (
+                                                                <>
+                                                                    <Loader2 size={11} className="animate-spin" />
+                                                                    Analyzing...
+                                                                </>
+                                                            ) : (
+                                                                'Re-Analyze Now'
+                                                            )}
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {/* Prioritized Order Situation */}
+                                                <div className="p-3 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 space-y-2">
+                                                    <div className="flex items-center justify-between text-xs font-bold text-zinc-800 dark:text-zinc-200">
+                                                        <span className="flex items-center gap-1.5">
+                                                            <ShoppingBag size={13} className="text-zinc-500" />
+                                                            Active Order Situation
+                                                        </span>
+                                                        {prioritizedOrder && (
+                                                            <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                                                                {prioritizedOrder.order_status}
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    {prioritizedOrder ? (
+                                                        <div className="space-y-1.5 text-xs">
+                                                            <div className="flex justify-between text-[11px]">
+                                                                <span className="text-zinc-400">Order ID:</span>
+                                                                <span className="font-mono font-medium text-zinc-700 dark:text-zinc-300">#{prioritizedOrder.order_number}</span>
+                                                            </div>
+                                                            <div className="flex justify-between text-[11px]">
+                                                                <span className="text-zinc-400">Created:</span>
+                                                                <span className="text-zinc-700 dark:text-zinc-300">
+                                                                    {prioritizedOrder.order_date ? new Date(prioritizedOrder.order_date).toLocaleDateString() : 'N/A'}
+                                                                </span>
+                                                            </div>
+                                                            {prioritizedOrder.tracking_number && (
+                                                                <div className="flex justify-between text-[11px]">
+                                                                    <span className="text-zinc-400">Tracking:</span>
+                                                                    <span className="text-blue-600 dark:text-blue-400 font-mono">
+                                                                        {prioritizedOrder.tracking_number.split(',')[0]}
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                            <div className="text-[11px] text-zinc-500 dark:text-zinc-400 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+                                                                <span className="font-medium">Items: </span>
+                                                                {(prioritizedOrder.daraz_order_items || []).map((i: any) => `${i.product_name} (x${i.quantity})`).join(', ') || 'N/A'}
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <p className="text-[11px] text-zinc-400 py-1">No orders found for this customer.</p>
+                                                    )}
+                                                </div>
+
+                                                {/* AI Handover & Cooldown Status */}
+                                                <div className="p-3 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 space-y-2">
+                                                    <div className="flex items-center justify-between text-xs font-bold text-zinc-800 dark:text-zinc-200">
+                                                        <span className="flex items-center gap-1.5">
+                                                            <Shield size={13} className="text-zinc-500" />
+                                                            AI Cooldown & Priority
+                                                        </span>
+                                                        {activeSession.is_urgent ? (
+                                                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                                                                Human Priority
+                                                            </span>
+                                                        ) : (
+                                                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-50 text-green-700 dark:bg-green-950/40 dark:text-green-300 border border-green-200 dark:border-green-800">
+                                                                AI Active
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    {activeSession.ai_paused_until && new Date(activeSession.ai_paused_until) > new Date() ? (
+                                                        <div className="text-[11px] text-amber-700 dark:text-amber-400 flex items-center gap-1">
+                                                            <Clock size={12} />
+                                                            <span>AI Muted until {new Date(activeSession.ai_paused_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                        </div>
+                                                    ) : (
+                                                        <p className="text-[11px] text-zinc-400">
+                                                            AI auto-replies are active for this conversation when auto-reply is on.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -1822,24 +2614,89 @@ function ChatAiDashboardContent() {
                                 {currentStoreSettings.ai_enabled && (
                                     <div className="space-y-3.5 pt-3.5 border-t border-zinc-100 dark:border-zinc-800 animate-fadeIn">
                                         <div className="flex justify-between items-center">
-                                            <label className="text-xs font-bold text-zinc-550 uppercase tracking-wider flex items-center gap-1">AI Model Provider</label>
+                                            <div>
+                                                <label className="text-xs font-bold text-zinc-550 uppercase tracking-wider flex items-center gap-1">AI Model Provider</label>
+                                                <p className="text-[11px] text-zinc-400">Used by both AI Auto-Reply and AI Customer &amp; Order Analysis.</p>
+                                            </div>
                                             <select
                                                 value={currentStoreSettings.ai_provider || 'gemini'}
                                                 onChange={(e) => handleSaveSettings({ ai_provider: e.target.value })}
-                                                className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                                className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500 font-medium"
                                             >
-                                                <option value="gemini">Google Gemini</option>
+                                                <option value="gemini">Google Gemini (Recommended)</option>
                                                 <option value="openai">OpenAI GPT</option>
                                             </select>
                                         </div>
 
+                                        {/* Gemini Global Integration Status Card */}
+                                        {(currentStoreSettings.ai_provider || 'gemini') === 'gemini' && (
+                                            <div className="p-3 bg-blue-50/70 dark:bg-blue-950/20 border border-blue-200/80 dark:border-blue-900/40 rounded-lg text-xs space-y-2">
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`w-2 h-2 rounded-full ${globalAiInfo?.hasGeminiKey ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+                                                        <span className="font-semibold text-blue-900 dark:text-blue-200">
+                                                            {globalAiInfo?.hasGeminiKey ? 'Google Gemini Key Linked' : 'Gemini Key Not Configured'}
+                                                        </span>
+                                                        <span className="text-[10px] bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 font-bold px-1.5 py-0.5 rounded">
+                                                            Settings &gt; AI Integration
+                                                        </span>
+                                                    </div>
+                                                    <a
+                                                        href="/dashboard/settings/ai-integration"
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                                                    >
+                                                        Manage Key <ExternalLink size={11} />
+                                                    </a>
+                                                </div>
+                                                <p className="text-[11px] text-blue-700 dark:text-blue-300 leading-relaxed">
+                                                    {globalAiInfo?.hasGeminiKey
+                                                        ? `Active: Using your global Google Gemini key (${globalAiInfo.globalGeminiApiKeyMasked || 'Configured'}) configured in Settings > AI Integration. Both AI Chat Auto-Reply and AI Customer & Order Analysis will automatically use this key.`
+                                                        : '⚠️ Google Gemini API key is missing. Click "Manage Key" above to configure your free Gemini API key in Settings > AI Integration.'}
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        {/* OpenAI Global Integration Status & Optional Override */}
                                         {currentStoreSettings.ai_provider === 'openai' && (
                                             <div className="space-y-3 animate-fadeIn">
+                                                <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-900/40 rounded-lg text-xs space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={`w-2 h-2 rounded-full ${currentStoreSettings.openai_api_key || globalAiInfo?.hasOpenAiKey ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+                                                            <span className="font-semibold text-emerald-900 dark:text-emerald-200">
+                                                                {currentStoreSettings.openai_api_key ? 'Store Custom Key Active' : (globalAiInfo?.hasOpenAiKey ? 'OpenAI Key Linked from AI Integration' : 'OpenAI Key Missing')}
+                                                            </span>
+                                                        </div>
+                                                        <a
+                                                            href="/dashboard/settings/ai-integration"
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                                                        >
+                                                            Settings &gt; AI Integration <ExternalLink size={11} />
+                                                        </a>
+                                                    </div>
+                                                    <p className="text-[11px] text-emerald-700 dark:text-emerald-300 leading-relaxed">
+                                                        {currentStoreSettings.openai_api_key
+                                                            ? 'Using store-specific custom OpenAI API key.'
+                                                            : (globalAiInfo?.hasOpenAiKey
+                                                                ? `Active: Using your global OpenAI API key (${globalAiInfo.globalOpenAiApiKeyMasked}) saved in Settings > AI Integration for both auto-reply and analysis.`
+                                                                : '⚠️ No OpenAI API key configured. Enter a custom key below or configure it globally in Settings > AI Integration.')}
+                                                    </p>
+                                                </div>
+
                                                 <div className="space-y-1.5">
-                                                    <label className="text-xs font-bold text-zinc-550 uppercase tracking-wider">OpenAI API Key</label>
+                                                    <div className="flex justify-between items-center">
+                                                        <label className="text-xs font-bold text-zinc-550 uppercase tracking-wider">Custom OpenAI API Key (Optional Override)</label>
+                                                        {globalAiInfo?.hasOpenAiKey && !currentStoreSettings.openai_api_key && (
+                                                            <span className="text-[10px] text-zinc-400">Defaulting to Global AI Integration key</span>
+                                                        )}
+                                                    </div>
                                                     <input
                                                         type="password"
-                                                        placeholder="sk-..."
+                                                        placeholder={globalAiInfo?.hasOpenAiKey ? `Using global key: ${globalAiInfo.globalOpenAiApiKeyMasked}` : 'sk-...'}
                                                         value={currentStoreSettings.openai_api_key || ''}
                                                         onChange={(e) => setStoreSettings(prev => ({
                                                             ...prev,
@@ -1865,6 +2722,118 @@ function ChatAiDashboardContent() {
                                         )}
                                     </div>
                                 )}
+
+                                {/* AI Customer & Order Analysis Toggle */}
+                                <div className="flex justify-between items-center p-3.5 bg-zinc-50 dark:bg-zinc-800/30 rounded-lg border border-zinc-200/50 dark:border-zinc-700/30">
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">AI Customer &amp; Order Analysis</h3>
+                                        <p className="text-[11px] text-zinc-500">Enable real-time AI analysis of customer messages, active orders, and sentiment in the chat drawer.</p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleSaveSettings({ ai_analysis_enabled: !currentStoreSettings.ai_analysis_enabled })}
+                                        disabled={savingSettings || currentStoreSettings.messaging_enabled === false}
+                                        className={`px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all border ${
+                                            currentStoreSettings.ai_analysis_enabled
+                                                ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700'
+                                                : 'bg-zinc-100 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200'
+                                        }`}
+                                    >
+                                        {currentStoreSettings.ai_analysis_enabled ? 'ANALYSIS ACTIVE' : 'ANALYSIS INACTIVE'}
+                                    </button>
+                                </div>
+
+                                {/* Human Handover Cooldown Duration */}
+                                <div className="p-3.5 bg-zinc-50 dark:bg-zinc-800/30 rounded-lg border border-zinc-200/50 dark:border-zinc-700/30 space-y-1.5">
+                                    <div className="flex justify-between items-center">
+                                        <div>
+                                            <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 flex items-center gap-1.5">
+                                                <Clock size={14} className="text-zinc-500" />
+                                                Human Handover Cooldown (Hours)
+                                            </h3>
+                                            <p className="text-[11px] text-zinc-500">
+                                                When AI cannot answer or detects an urgent inquiry, it pauses AI auto-replies for this duration to allow manual staff replies.
+                                            </p>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="48"
+                                            value={currentStoreSettings.ai_cooldown_hours ?? 2}
+                                            onChange={(e) => handleSaveSettings({ ai_cooldown_hours: parseInt(e.target.value) || 0 })}
+                                            className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-1.5 text-xs w-20 text-center font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* AI Agent System Instructions */}
+                                <div className="p-4 bg-zinc-50 dark:bg-zinc-800/30 rounded-lg border border-zinc-200/50 dark:border-zinc-700/30 space-y-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div>
+                                            <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
+                                                <Sparkles size={14} className="text-blue-500" />
+                                                AI Agent System Instructions
+                                            </label>
+                                            <p className="text-[11px] text-zinc-500 mt-0.5">
+                                                Configures AI personality, strict holding response for unknown specs, human handover, and delivery timelines.
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setStoreSettings(prev => ({
+                                                    ...prev,
+                                                    [activeStoreId]: { ...prev[activeStoreId], ai_agent_instructions: DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS } as any
+                                                }))
+                                                handleSaveSettings({ ai_agent_instructions: DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS })
+                                                toast.success('✨ Loaded recommended AI Agent instructions!')
+                                            }}
+                                            className="px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-100/80 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-900/60 rounded-lg border border-blue-300 dark:border-blue-700/60 flex items-center gap-1.5 shadow-sm transition-all active:scale-95 cursor-pointer"
+                                        >
+                                            <Sparkles size={13} className="text-blue-600 dark:text-blue-400" />
+                                            Load Recommended Instructions
+                                        </button>
+                                    </div>
+
+                                    <textarea
+                                        rows={10}
+                                        value={currentStoreSettings.ai_agent_instructions || ''}
+                                        onChange={(e) => setStoreSettings(prev => ({
+                                            ...prev,
+                                            [activeStoreId]: { ...prev[activeStoreId], ai_agent_instructions: e.target.value } as any
+                                        }))}
+                                        onBlur={() => handleSaveSettings({ ai_agent_instructions: currentStoreSettings.ai_agent_instructions })}
+                                        className="w-full font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg p-3 text-xs leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100 resize-y"
+                                        placeholder={DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS}
+                                    />
+
+                                    {/* Feature capabilities tags */}
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1">
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>Product Highlights &amp; Q&amp;A First</span>
+                                        </div>
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>Safe Holding (No Guessing)</span>
+                                        </div>
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>Human Handover Flagging</span>
+                                        </div>
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>Urgent Intent Interception</span>
+                                        </div>
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>KTM 1-2d / Outside 3-5d</span>
+                                        </div>
+                                        <div className="px-2.5 py-1.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-700 dark:text-zinc-300 rounded-md border border-zinc-200 dark:border-zinc-800 flex items-center gap-1.5 font-medium shadow-2xs">
+                                            <Check size={12} className="text-emerald-500 shrink-0" />
+                                            <span>English &amp; Romanized Nepali</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -2449,6 +3418,95 @@ function ChatAiDashboardContent() {
                                 className="px-4 py-1.5 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-300 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
                             >
                                 {isSubmittingNote ? 'Saving...' : 'Save Note'}
+                            </button>
+                        </div>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* Add / Edit Verified Product Q&A Modal */}
+            <Dialog open={qaModalOpen} onOpenChange={setQaModalOpen}>
+                <DialogContent className="max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-xl">
+                    <DialogHeader>
+                        <DialogTitle className="text-zinc-900 dark:text-zinc-100 flex items-center gap-2 text-base font-bold">
+                            <BookOpen className="text-blue-600" size={18} /> 
+                            {editingQA ? 'Edit Verified Product Q&A' : 'Add Verified Product Q&A'}
+                        </DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3.5 pt-2">
+                        {selectedProduct && (
+                            <div className="p-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-xs">
+                                <p className="font-bold text-zinc-800 dark:text-zinc-200 truncate">{selectedProduct.name}</p>
+                                <p className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                                    SKU: {selectedProduct.seller_sku1 || 'N/A'} {selectedProduct.daraz_item_id ? `| Item ID: ${selectedProduct.daraz_item_id}` : ''}
+                                </p>
+                            </div>
+                        )}
+
+                        <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">Customer Question</label>
+                                {!editingQA && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const lastBuyerMsg = [...messages].reverse().find(m => String(m.from_account_type) === '1')
+                                            if (lastBuyerMsg) {
+                                                const parsed = parseMsgContent(lastBuyerMsg.content)
+                                                if (parsed.txt) setQaQuestion(parsed.txt)
+                                            }
+                                        }}
+                                        className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold hover:underline"
+                                    >
+                                        Use latest customer message
+                                    </button>
+                                )}
+                            </div>
+                            <textarea
+                                value={qaQuestion || ''}
+                                onChange={(e) => setQaQuestion(e.target.value)}
+                                placeholder="e.g. Is this bracelet gold plated or pure copper?"
+                                rows={2}
+                                className="w-full p-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
+                            />
+                        </div>
+
+                        <div className="space-y-1.5">
+                            <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300">Verified Answer</label>
+                            <textarea
+                                value={qaAnswer || ''}
+                                onChange={(e) => setQaAnswer(e.target.value)}
+                                placeholder="e.g. Yes, this bracelet has 24k micron gold plating over brass with anti-tarnish coating."
+                                rows={3}
+                                className="w-full p-2.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
+                            />
+                            <p className="text-[10px] text-zinc-400">
+                                This answer will be used by the AI auto-reply system whenever any customer asks a similar question for this product.
+                            </p>
+                        </div>
+
+                        <div className="flex gap-2 justify-end pt-2">
+                            <button
+                                type="button"
+                                onClick={() => setQaModalOpen(false)}
+                                className="px-3 py-1.5 border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800 rounded-lg text-xs font-bold transition-all text-zinc-700 dark:text-zinc-300"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                disabled={savingQA}
+                                onClick={handleSaveQA}
+                                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5"
+                            >
+                                {savingQA ? (
+                                    <>
+                                        <Loader2 size={12} className="animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    'Save Verified Q&A'
+                                )}
                             </button>
                         </div>
                     </div>

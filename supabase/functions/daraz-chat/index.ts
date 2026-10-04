@@ -454,6 +454,22 @@ Deno.serve(async (req) => {
         .eq('store_id', store.id)
         .maybeSingle();
 
+    // Fetch Global AI settings configured in Settings > AI Integration
+    let effectiveGeminiKey = geminiApiKey;
+    const { data: globalAiRow } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'daraz_ai_settings')
+        .maybeSingle();
+
+    if (!effectiveGeminiKey && (globalAiRow?.value?.geminiApiKey || globalAiRow?.value?.apiKey)) {
+        effectiveGeminiKey = globalAiRow.value.geminiApiKey || globalAiRow.value.apiKey;
+    }
+
+    if (settings && !settings.openai_api_key && globalAiRow?.value?.openaiApiKey) {
+        settings.openai_api_key = globalAiRow.value.openaiApiKey;
+    }
+
     // We only process message_type 2 (Instant Messaging/Chat) here.
     // Non-messaging events (e.g. trade orders, returns) are routed to the Next.js backend.
     if (message_type !== 2 || !data) {
@@ -657,10 +673,10 @@ Deno.serve(async (req) => {
 
             // C. Check AI Auto-Reply
             if (settings?.ai_enabled) {
-                const hasGemini = !!geminiApiKey;
+                const hasGemini = !!effectiveGeminiKey;
                 const hasOpenAi = settings?.ai_provider === 'openai' && !!settings?.openai_api_key;
                 if (hasGemini || hasOpenAi) {
-                    await handleAiAutoReply(store.id, data.session_id, userText, supabase, appKey, appSecret, geminiApiKey, settings);
+                    await handleAiAutoReply(store.id, data.session_id, userText, supabase, appKey, appSecret, effectiveGeminiKey, settings);
                 }
             }
         }
