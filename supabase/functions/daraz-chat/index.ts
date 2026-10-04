@@ -495,32 +495,40 @@ Deno.serve(async (req) => {
         appUrl = appUrl.slice(0, -1);
     }
 
-    // Forward ALL incoming webhook events to Next.js backend for unified processing
-    // (Next.js handles verified Product Q&As, rich order intelligence, real-time AI summary analysis, and automated chat replies)
-    if (appUrl) {
-        console.log(`[EdgeFunction] Forwarding webhook message_type: ${message_type} to Next.js backend at ${appUrl}/api/daraz/webhook...`);
-        try {
-            const response = await fetch(`${appUrl}/api/daraz/webhook`, {
-                method: 'POST',
-                headers: {
-                    'content-type': 'application/json',
-                    'authorization': authorization || ''
-                },
-                body: rawBody
-            });
-            const resText = await response.text();
-            console.log(`[EdgeFunction] Next.js backend response status: ${response.status}. Response: ${resText}`);
-            if (response.ok) {
+    const msgType = Number(message_type);
+    const isTradeOrder = (msgType === 4 || msgType === 10 || msgType === 14) && !data?.session_id && !data?.sessionId;
+    const isChatEvent = msgType === 2 || msgType === 5 || msgType === 6 || Boolean(data?.session_id || data?.sessionId);
+
+    // 1. Trade Orders: Forward directly to Next.js backend (handles syncSingleDarazOrderAction and delayed messages)
+    if (isTradeOrder) {
+        if (appUrl) {
+            console.log(`[EdgeFunction] Forwarding trade order webhook (type: ${message_type}) to Next.js at ${appUrl}/api/daraz/webhook...`);
+            try {
+                const response = await fetch(`${appUrl}/api/daraz/webhook`, {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'authorization': authorization || ''
+                    },
+                    body: rawBody
+                });
+                const resText = await response.text();
                 return new Response(resText, {
                     status: response.status,
                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
-            } else {
-                console.warn(`[EdgeFunction] Next.js returned HTTP ${response.status}, proceeding with local edge fallback...`);
+            } catch (err: any) {
+                console.error('[EdgeFunction] Failed routing trade order to Next.js backend:', err);
+                return new Response(JSON.stringify({ error: err.message }), {
+                    status: 500,
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
             }
-        } catch (routingErr) {
-            console.error('[EdgeFunction] Failed routing to Next.js backend, proceeding with local edge fallback:', routingErr);
         }
+        return new Response(JSON.stringify({ success: true, message: 'Trade order acknowledged (no app_url configured)' }), {
+            status: 200,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
     }
 
     if (settings && settings.messaging_enabled === false) {
@@ -532,19 +540,18 @@ Deno.serve(async (req) => {
     }
 
     // Determine sender roles
-    const fromAccountType = String(data.from_account_type); // '2' = seller, '1' = buyer
+    const fromAccountType = String(data?.from_account_type || data?.sender_type || '1'); // '2' = seller, '1' = buyer
     const isBuyer = fromAccountType === '1' || fromAccountType === 'buyer';
     
-    let buyerId = isBuyer ? String(data.from_account_id) : String(data.to_account_id);
-    let sellerId = isBuyer ? String(data.to_account_id) : String(data.from_account_id);
+    let buyerId = isBuyer ? String(data?.from_account_id || data?.sender_id || '') : String(data?.to_account_id || data?.receiver_id || '');
+    let sellerId = isBuyer ? String(data?.to_account_id || data?.receiver_id || '') : String(data?.from_account_id || data?.sender_id || '');
     
     // Parse session_id for self-healing of buyerId and sellerId if they are undefined/wrong
     // Session format: {account_id}_{account_type}_{account_id}_{account_type}_{platform}
     // Example: 900151167013_2_900260032246_1_103 -> seller=900151167013, buyer=900260032246
+    const sessionId = data?.session_id || data?.sessionId || '';
     if (!buyerId || buyerId === 'undefined') {
-        const parts = String(data.session_id || '').split('_');
-        // Handle both 4-part and 5-part session IDs
-        // Find the part with type '1' (buyer) 
+        const parts = String(sessionId).split('_');
         for (let pi = 0; pi < parts.length - 1; pi++) {
             if (parts[pi + 1] === '1') {
                 buyerId = parts[pi];
@@ -555,98 +562,115 @@ Deno.serve(async (req) => {
         }
     }
 
-    // Retrieve or create session
-    const { data: existingSession } = await supabase
-        .from('daraz_chat_sessions')
-        .select('title, unread_count, buyer_id')
-        .eq('session_id', data.session_id)
-        .maybeSingle();
-
-    // Preserve existing good title — only re-resolve if currently generic/missing
-    let sessionTitle = existingSession?.title || '';
-    const isGenericTitle = !sessionTitle 
-        || sessionTitle === 'undefined' 
-        || sessionTitle === 'Buyer undefined' 
-        || /^Buyer\s+\d+$/.test(sessionTitle)
-        || sessionTitle.startsWith('Buyer ');
-    
-    // Use existing buyer_id from DB as fallback if current extraction failed
-    const resolvedBuyerId = (buyerId && buyerId !== 'undefined') ? buyerId : (existingSession?.buyer_id || buyerId);
-    
-    if (isGenericTitle && resolvedBuyerId && resolvedBuyerId !== 'undefined') {
-        // Attempt 1: contains() query with buyer_id as number
-        const { data: orderData } = await supabase
-            .from('daraz_orders')
-            .select('customer_name, shipping_name, customer_first_name, customer_last_name')
-            .contains('items_detail', JSON.stringify([{ buyer_id: Number(resolvedBuyerId) }]))
-            .limit(1)
+    if (msgType === 6) {
+        // Read receipt — update unread count to 0 for this session
+        await supabase
+            .from('daraz_chat_sessions')
+            .update({ unread_count: 0 })
+            .eq('session_id', sessionId);
+        console.log(`[EdgeFunction] Read receipt processed for session: ${sessionId}`);
+    } else if (sessionId) {
+        // Retrieve or create session
+        const { data: existingSession } = await supabase
+            .from('daraz_chat_sessions')
+            .select('title, unread_count, buyer_id')
+            .eq('session_id', sessionId)
             .maybeSingle();
 
-        if (orderData) {
-            const resolvedName = orderData.customer_name || orderData.shipping_name || `${orderData.customer_first_name} ${orderData.customer_last_name}`.trim();
-            if (resolvedName && resolvedName.trim()) {
-                sessionTitle = resolvedName.trim();
-            }
-        }
-
-        // Attempt 2: If still generic, try text search in items_detail JSON column
-        if (!sessionTitle || isGenericTitle || /^Buyer\s+\d+$/.test(sessionTitle)) {
-            const { data: orderData2 } = await supabase
+        // Preserve existing good title — only re-resolve if currently generic/missing
+        let sessionTitle = existingSession?.title || '';
+        const isGenericTitle = !sessionTitle 
+            || sessionTitle === 'undefined' 
+            || sessionTitle === 'Buyer undefined' 
+            || /^Buyer\s+\d+$/.test(sessionTitle)
+            || sessionTitle.startsWith('Buyer ');
+        
+        const resolvedBuyerId = (buyerId && buyerId !== 'undefined') ? buyerId : (existingSession?.buyer_id || buyerId);
+        
+        if (isGenericTitle && resolvedBuyerId && resolvedBuyerId !== 'undefined') {
+            const { data: orderData } = await supabase
                 .from('daraz_orders')
-                .select('customer_name, shipping_name')
-                .filter('items_detail', 'cs', `[{"buyer_id":${resolvedBuyerId}}]`)
+                .select('customer_name, shipping_name, customer_first_name, customer_last_name')
+                .contains('items_detail', JSON.stringify([{ buyer_id: Number(resolvedBuyerId) }]))
                 .limit(1)
                 .maybeSingle();
-            if (orderData2) {
-                const resolvedName2 = orderData2.customer_name || orderData2.shipping_name;
-                if (resolvedName2 && resolvedName2.trim()) {
-                    sessionTitle = resolvedName2.trim();
+
+            if (orderData) {
+                const resolvedName = orderData.customer_name || orderData.shipping_name || `${orderData.customer_first_name} ${orderData.customer_last_name}`.trim();
+                if (resolvedName && resolvedName.trim()) {
+                    sessionTitle = resolvedName.trim();
                 }
             }
         }
+
+        if (!sessionTitle || sessionTitle === 'undefined' || sessionTitle.trim() === '') {
+            sessionTitle = `Buyer ${resolvedBuyerId}`;
+        }
+
+        const finalTitle = (existingSession?.title && !isGenericTitle) ? existingSession.title : sessionTitle;
+
+        // 2. IMMEDIATE SAVE: Upsert into daraz_chat_sessions so UI renders instantly
+        const sessionPayload = {
+            session_id: sessionId,
+            store_id: store.id,
+            buyer_id: resolvedBuyerId,
+            title: finalTitle,
+            unread_count: isBuyer ? (existingSession?.unread_count || 0) + 1 : 0,
+            last_message_id: data.message_id || data.msgId,
+            last_message_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
+            last_message_summary: data.content ? parseSummary(data.content) : null,
+            updated_at: new Date().toISOString()
+        };
+
+        await supabase.from('daraz_chat_sessions').upsert(sessionPayload, { onConflict: 'session_id' });
+
+        // 3. IMMEDIATE SAVE: Upsert incoming message into daraz_chat_messages
+        const msgId = data.message_id || data.msgId || `msg_${Date.now()}`;
+        const msgPayload = {
+            message_id: msgId,
+            session_id: sessionId,
+            from_account_id: fromAccountType === '1' ? buyerId : sellerId,
+            from_account_type: fromAccountType,
+            to_account_id: fromAccountType === '1' ? sellerId : buyerId,
+            to_account_type: String(data.to_account_type || (isBuyer ? '2' : '1')),
+            content: data.content || data.message || data.txt || '',
+            template_id: String(data.template_id || '1'),
+            send_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
+            auto_reply: false,
+            tags: []
+        };
+
+        await supabase.from('daraz_chat_messages').upsert(msgPayload, { onConflict: 'message_id' });
+        console.log(`[EdgeFunction] ✅ Saved incoming message ${msgId} for session ${sessionId} to database.`);
     }
 
-    if (!sessionTitle || sessionTitle === 'undefined' || sessionTitle.trim() === '') {
-        sessionTitle = `Buyer ${resolvedBuyerId}`;
+    // 4. Forward chat event to Next.js backend for AI auto-reply & real-time AI summary analysis
+    let nextJsHandledChat = false;
+    if (appUrl) {
+        console.log(`[EdgeFunction] Forwarding chat event message_type: ${message_type} to Next.js at ${appUrl}/api/daraz/webhook...`);
+        try {
+            const response = await fetch(`${appUrl}/api/daraz/webhook`, {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'authorization': authorization || ''
+                },
+                body: rawBody
+            });
+            const resText = await response.text();
+            console.log(`[EdgeFunction] Next.js chat backend response: HTTP ${response.status} - ${resText}`);
+            if (response.ok) {
+                nextJsHandledChat = true;
+            } else {
+                console.warn(`[EdgeFunction] Next.js returned HTTP ${response.status}, proceeding with local edge fallback...`);
+            }
+        } catch (routingErr) {
+            console.error('[EdgeFunction] Failed routing chat event to Next.js backend, proceeding with local edge fallback:', routingErr);
+        }
     }
 
-    // Build upsert payload — only include title in update if it was improved (never downgrade good title to generic)
-    const finalTitle = (existingSession?.title && !isGenericTitle) ? existingSession.title : sessionTitle;
-
-    const sessionPayload = {
-        session_id: data.session_id,
-        store_id: store.id,
-        buyer_id: resolvedBuyerId,
-        title: finalTitle,
-        unread_count: isBuyer ? (existingSession?.unread_count || 0) + 1 : 0,
-        last_message_id: data.message_id,
-        last_message_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
-        last_message_summary: data.content ? parseSummary(data.content) : null,
-        updated_at: new Date().toISOString()
-    };
-
-    await supabase.from('daraz_chat_sessions').upsert(sessionPayload, { onConflict: 'session_id' });
-
-    // Store Message details
-    const msgPayload = {
-        message_id: data.message_id,
-        session_id: data.session_id,
-        from_account_id: fromAccountType === '1' ? buyerId : sellerId,
-        from_account_type: fromAccountType,
-        to_account_id: fromAccountType === '1' ? sellerId : buyerId,
-        to_account_type: String(data.to_account_type),
-        content: data.content,
-        template_id: String(data.template_id || '1'),
-        send_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
-        auto_reply: false,
-        tags: []
-    };
-
-    await supabase.from('daraz_chat_messages').upsert(msgPayload, { onConflict: 'message_id' });
-    console.log(`[EdgeFunction] Saved incoming message: ${data.message_id}`);
-
-    // If buyer sent the message, run automation check
-    if (isBuyer) {
+    // 5. Local Edge Fallback (if Next.js is not configured, down, or failed)
+    if (!nextJsHandledChat && isBuyer && sessionId) {
         const { data: rules } = await supabase
             .from('daraz_chat_rules')
             .select('*')
@@ -665,9 +689,9 @@ Deno.serve(async (req) => {
             // A. Check exact matches
             const exactMatch = rules?.find(r => r.match_type === 'exact' && cleanText === r.pattern.toLowerCase().trim());
             if (exactMatch) {
-                console.log(`[EdgeFunction] Exact keyword rule matched: "${userText}"`);
-                await sendDarazMessage(store.id, data.session_id, exactMatch.reply_content, supabase, appKey, appSecret);
-                return new Response(JSON.stringify({ success: true, message: 'Exact rule triggered' }), {
+                console.log(`[EdgeFunction Fallback] Exact keyword rule matched: "${userText}"`);
+                await sendDarazMessage(store.id, sessionId, exactMatch.reply_content, supabase, appKey, appSecret);
+                return new Response(JSON.stringify({ success: true, message: 'Exact rule triggered (edge fallback)' }), {
                     status: 200,
                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
@@ -676,9 +700,9 @@ Deno.serve(async (req) => {
             // B. Check keyword sub-string matches
             const keywordMatch = rules?.find(r => r.match_type === 'keyword' && cleanText.includes(r.pattern.toLowerCase().trim()));
             if (keywordMatch) {
-                console.log(`[EdgeFunction] Substring keyword rule matched: "${userText}"`);
-                await sendDarazMessage(store.id, data.session_id, keywordMatch.reply_content, supabase, appKey, appSecret);
-                return new Response(JSON.stringify({ success: true, message: 'Keyword rule triggered' }), {
+                console.log(`[EdgeFunction Fallback] Substring keyword rule matched: "${userText}"`);
+                await sendDarazMessage(store.id, sessionId, keywordMatch.reply_content, supabase, appKey, appSecret);
+                return new Response(JSON.stringify({ success: true, message: 'Keyword rule triggered (edge fallback)' }), {
                     status: 200,
                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
@@ -689,7 +713,7 @@ Deno.serve(async (req) => {
                 const hasGemini = !!effectiveGeminiKey;
                 const hasOpenAi = settings?.ai_provider === 'openai' && !!settings?.openai_api_key;
                 if (hasGemini || hasOpenAi) {
-                    await handleAiAutoReply(store.id, data.session_id, userText, supabase, appKey, appSecret, effectiveGeminiKey, settings);
+                    await handleAiAutoReply(store.id, sessionId, userText, supabase, appKey, appSecret, effectiveGeminiKey, settings);
                 }
             }
         }

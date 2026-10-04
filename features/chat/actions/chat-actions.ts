@@ -410,15 +410,14 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
         const supabase = await createAdminClient()
 
         const timestamp = Date.now().toString()
-        // Fetch messages from the last 30 days for this session
-        const thirtyDaysAgo = (Date.now() - 30 * 24 * 60 * 60 * 1000).toString()
+        // According to Daraz IM API documentation: when requesting the first page, start_time must be the current timestamp
         const params: Record<string, unknown> = {
             app_key: appKey,
             access_token: accessToken,
             timestamp,
             sign_method: 'sha256',
             session_id: sessionId,
-            start_time: thirtyDaysAgo,
+            start_time: timestamp,
             page_size: '50'
         }
 
@@ -530,6 +529,23 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
                     })
                 }
             }
+        }
+
+        // Update session last message metadata to reflect latest message from Daraz
+        if (messageList.length > 0) {
+            const sortedByTime = [...messageList].sort((a: any, b: any) => Number(b.send_time || 0) - Number(a.send_time || 0))
+            const latestMsg = sortedByTime[0]
+            const latestSendTime = latestMsg.send_time ? new Date(parseInt(String(latestMsg.send_time))).toISOString() : new Date().toISOString()
+            const summary = parseSummary(latestMsg.content)
+            await supabase
+                .from('daraz_chat_sessions')
+                .update({
+                    last_message_id: latestMsg.message_id,
+                    last_message_time: latestSendTime,
+                    last_message_summary: summary,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('session_id', sessionId)
         }
 
         // If new messages were cached and AI analysis is enabled, update analysis

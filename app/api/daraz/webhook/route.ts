@@ -71,11 +71,13 @@ export async function POST(request: NextRequest) {
         await new Promise(resolve => setTimeout(resolve, Math.random() * 500))
 
         const { message_type, data, seller_id } = payload
+        const msgType = Number(message_type)
 
         // Type 4: Trade Order (New/Updated Order)
         // Type 10: Reverse Order (Returns/Refunds) - needed for "Customer Return Delivered"
         // Type 14: Order Fulfillment Status Update
-        if ((message_type === 4 || message_type === 10 || message_type === 14) && data) {
+        const isTradeOrder = (msgType === 4 || msgType === 10 || msgType === 14) && !data?.session_id && !data?.sessionId
+        if (isTradeOrder && data) {
             const tradeOrderId = data.trade_order_id || data.order_id || data.reverse_order_id
 
             if (!tradeOrderId) {
@@ -180,7 +182,9 @@ export async function POST(request: NextRequest) {
 
         // Type 2 / Type 5: New IM Message from Buyer
         // Type 6: Message Read Notification (session-level update)
-        if ((message_type === 2 || message_type === 5 || message_type === 6) && data) {
+        // Any payload that carries session_id is a chat event
+        const isChatEvent = (msgType === 2 || msgType === 5 || msgType === 6 || Boolean(data?.session_id || data?.sessionId)) && Boolean(data)
+        if (isChatEvent) {
             const sessionId = data.session_id || data.sessionId
             const msgContent = data.content || data.message || data.txt || ''
             const fromAccountType = String(data.from_account_type || data.sender_type || '1')
@@ -193,26 +197,38 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ success: true, message: 'Missing session_id' })
             }
 
-            console.log(`[Webhook] Processing chat message_type: ${message_type}, session: ${sessionId}`)
+            console.log(`[Webhook] Processing chat message_type: ${message_type} (msgType: ${msgType}), session: ${sessionId}`)
 
             const supabase = await createAdminClient()
 
             // 1. Find the store matching the seller_id from the webhook payload
-            const { data: store } = await supabase
-                .from('online_stores')
-                .select('id')
-                .eq('seller_id', String(seller_id))
-                .maybeSingle()
+            let storeId = ''
+            if (seller_id) {
+                const { data: store } = await supabase
+                    .from('online_stores')
+                    .select('id')
+                    .eq('seller_id', String(seller_id))
+                    .maybeSingle()
+                if (store) storeId = store.id
+            }
 
-            if (!store) {
-                console.error(`[Webhook] Store not found for seller_id: ${seller_id}`)
+            // Fallback: resolve store from existing session
+            if (!storeId) {
+                const { data: existingSession } = await supabase
+                    .from('daraz_chat_sessions')
+                    .select('store_id')
+                    .eq('session_id', sessionId)
+                    .maybeSingle()
+                if (existingSession?.store_id) storeId = existingSession.store_id
+            }
+
+            if (!storeId) {
+                console.error(`[Webhook] Store not found for seller_id: ${seller_id} and session: ${sessionId}`)
                 return NextResponse.json({ success: true, message: 'Store not found' })
             }
 
-            const storeId = store.id
-
-            if (message_type === 6) {
-                // Read receipt — just update unread count to 0 for this session
+            if (msgType === 6) {
+                // Read receipt — update unread count to 0 for this session
                 await supabase
                     .from('daraz_chat_sessions')
                     .update({ unread_count: 0 })
@@ -220,52 +236,55 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ success: true, message: 'Read receipt processed' })
             }
 
-            // 2. Check if message already cached
-            const { data: existing } = await supabase
-                .from('daraz_chat_messages')
-                .select('message_id')
-                .eq('message_id', messageId)
-                .maybeSingle()
+            // 2. Parse timestamp safely
+            let sendTimeISO = new Date().toISOString()
+            try {
+                const parsedNum = Number(sendTime)
+                if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                    sendTimeISO = new Date(parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum).toISOString()
+                } else if (sendTime) {
+                    const parsedDate = new Date(sendTime).getTime()
+                    if (!isNaN(parsedDate)) sendTimeISO = new Date(parsedDate).toISOString()
+                }
+            } catch {}
 
-            if (!existing) {
-                // 3. Save the incoming message
-                let sendTimeISO = new Date().toISOString()
-                try {
-                    const parsedNum = Number(sendTime)
-                    if (!isNaN(parsedNum) && parsedNum > 1000000000) {
-                        sendTimeISO = new Date(parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum).toISOString()
-                    } else if (sendTime) {
-                        const parsedDate = new Date(sendTime).getTime()
-                        if (!isNaN(parsedDate)) sendTimeISO = new Date(parsedDate).toISOString()
-                    }
-                } catch {}
+            // 3. Upsert incoming message
+            await supabase.from('daraz_chat_messages').upsert({
+                message_id: messageId,
+                session_id: sessionId,
+                from_account_id: String(data.from_account_id || data.sender_id || ''),
+                from_account_type: fromAccountType,
+                to_account_id: String(data.to_account_id || data.receiver_id || ''),
+                to_account_type: String(data.to_account_type || data.receiver_type || '2'),
+                content: msgContent,
+                template_id: templateId,
+                send_time: sendTimeISO,
+                auto_reply: false,
+                tags: []
+            }, { onConflict: 'message_id' })
 
-                await supabase.from('daraz_chat_messages').insert({
-                    message_id: messageId,
-                    session_id: sessionId,
-                    from_account_id: String(data.from_account_id || data.sender_id || ''),
-                    from_account_type: fromAccountType,
-                    to_account_id: String(data.to_account_id || data.receiver_id || ''),
-                    to_account_type: String(data.to_account_type || data.receiver_type || '2'),
-                    content: msgContent,
-                    template_id: templateId,
-                    send_time: sendTimeISO,
-                    auto_reply: false,
-                    tags: []
+            // 4. Update session last message summary & time
+            let summaryText = msgContent.substring(0, 100)
+            try {
+                const p = JSON.parse(msgContent)
+                if (p.txt) summaryText = p.txt.substring(0, 100)
+                else if (p.cardType === 10006 || p.itemId) summaryText = 'Product Card'
+                else if (p.cardType === 10007 || p.orderId) summaryText = 'Order Card'
+                else if (p.cardType === 10010 || p.sellerId) summaryText = 'Follow Invitation'
+            } catch {}
+
+            await supabase
+                .from('daraz_chat_sessions')
+                .update({
+                    last_message_id: messageId,
+                    last_message_time: sendTimeISO,
+                    last_message_summary: summaryText,
+                    updated_at: new Date().toISOString()
                 })
+                .eq('session_id', sessionId)
 
-                // 4. Update session last message & unread count
-                await supabase
-                    .from('daraz_chat_sessions')
-                    .update({
-                        last_message_id: messageId,
-                        last_message_time: new Date(parseInt(String(sendTime)) || Date.now()).toISOString(),
-                        last_message_summary: msgContent.substring(0, 100),
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('session_id', sessionId)
-
-                // Increment unread count — try RPC first, fallback to manual read-then-update
+            // Increment unread count for buyer messages
+            if (fromAccountType === '1') {
                 const { error: rpcError } = await supabase.rpc('increment_unread_count', { p_session_id: sessionId })
                 if (rpcError) {
                     const { data: sessionRow } = await supabase
@@ -280,37 +299,55 @@ export async function POST(request: NextRequest) {
                             .eq('session_id', sessionId)
                     }
                 }
+            }
 
-                // 5. Trigger auto-reply and real-time AI analysis if message is from buyer
-                if (fromAccountType === '1') {
-                    let msgTimeMs = Date.now()
-                    if (sendTime) {
-                        const parsedNum = Number(sendTime)
-                        if (!isNaN(parsedNum) && parsedNum > 1000000000) {
-                            msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
-                        } else {
-                            const parsedDate = new Date(sendTime).getTime()
-                            if (!isNaN(parsedDate)) msgTimeMs = parsedDate
-                        }
-                    }
-                    const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
-                    if (isRecent) {
-                        processIncomingMessageAutoReply(storeId, sessionId, {
-                            content: msgContent,
-                            from_account_type: fromAccountType,
-                            send_time: String(sendTime)
-                        }).catch(err => console.error('[Webhook] Auto-reply error:', err))
+            // 5. Trigger auto-reply and real-time AI analysis if message is from buyer
+            if (fromAccountType === '1') {
+                let msgTimeMs = Date.now()
+                if (sendTime) {
+                    const parsedNum = Number(sendTime)
+                    if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                        msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
                     } else {
-                        console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
+                        const parsedDate = new Date(sendTime).getTime()
+                        if (!isNaN(parsedDate)) msgTimeMs = parsedDate
                     }
-
-                    // Always trigger background AI customer & order analysis update
-                    generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
-                        console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err.message)
-                    })
                 }
-            } else {
-                console.log(`[Webhook] Chat message ${messageId} already cached, skipping.`)
+                const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
+
+                // Check if seller already sent an auto-reply in the last 15 seconds to prevent double replies
+                const { data: recentSellerMsg } = await supabase
+                    .from('daraz_chat_messages')
+                    .select('message_id, send_time')
+                    .eq('session_id', sessionId)
+                    .eq('from_account_type', '2')
+                    .order('send_time', { ascending: false })
+                    .limit(1)
+                    .maybeSingle()
+
+                let alreadyReplied = false
+                if (recentSellerMsg?.send_time) {
+                    const diffMs = Date.now() - new Date(recentSellerMsg.send_time).getTime()
+                    if (diffMs < 15000) {
+                        alreadyReplied = true
+                        console.log(`[Webhook] Auto-reply already sent recently (${diffMs}ms ago), skipping duplicate reply.`)
+                    }
+                }
+
+                if (isRecent && !alreadyReplied) {
+                    processIncomingMessageAutoReply(storeId, sessionId, {
+                        content: msgContent,
+                        from_account_type: fromAccountType,
+                        send_time: String(sendTime)
+                    }).catch(err => console.error('[Webhook] Auto-reply error:', err))
+                } else if (!isRecent) {
+                    console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
+                }
+
+                // Always trigger background AI customer & order analysis update with new message priority
+                generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
+                    console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err.message)
+                })
             }
 
             return NextResponse.json({ success: true, message: 'Chat message processed' })
