@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse, after } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import { syncSingleDarazOrderAction } from '@/features/sales/actions/daraz-sync-order'
@@ -13,6 +13,8 @@ function verifySignature(appKey: string, body: string, appSecret: string, receiv
 
     return expectedSignature === receivedSignature.toLowerCase()
 }
+
+export const maxDuration = 60 // keep function alive for AI reply + analysis (after())
 
 export async function POST(request: NextRequest) {
     const startTime = Date.now()
@@ -347,19 +349,30 @@ export async function POST(request: NextRequest) {
                     }
                 }
 
-                if (isRecent && !alreadyReplied) {
-                    processIncomingMessageAutoReply(storeId, sessionId, {
-                        content: msgContent,
-                        from_account_type: fromAccountType,
-                        send_time: String(sendTime)
-                    }).catch(err => console.error('[Webhook] Auto-reply error:', err))
-                } else if (!isRecent) {
+                // Use after() so the work continues after the HTTP response is sent.
+                // (Plain un-awaited promises are killed by serverless once the response returns.)
+                const runAutoReply = isRecent && !alreadyReplied
+                if (!isRecent) {
                     console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
                 }
-
-                // Always trigger background AI customer & order analysis update with new message priority
-                generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
-                    console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err.message)
+                after(async () => {
+                    if (runAutoReply) {
+                        try {
+                            await processIncomingMessageAutoReply(storeId, sessionId, {
+                                content: msgContent,
+                                from_account_type: fromAccountType,
+                                send_time: String(sendTime)
+                            })
+                        } catch (err) {
+                            console.error('[Webhook] Auto-reply error:', err)
+                        }
+                    }
+                    // Always refresh AI customer & order analysis with the new message
+                    try {
+                        await generateSessionAiAnalysisAction(storeId, sessionId)
+                    } catch (err: any) {
+                        console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err?.message)
+                    }
                 })
             }
 
