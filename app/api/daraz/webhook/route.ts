@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import { syncSingleDarazOrderAction } from '@/features/sales/actions/daraz-sync-order'
-import { processIncomingMessageAutoReply } from '@/features/chat/actions/chat-actions'
+import { processIncomingMessageAutoReply, generateSessionAiAnalysisAction } from '@/features/chat/actions/chat-actions'
 
 // Signature verification using HMAC-SHA256
 function verifySignature(appKey: string, body: string, appSecret: string, receivedSignature: string): boolean {
@@ -274,16 +274,33 @@ export async function POST(request: NextRequest) {
                     }
                 }
 
-                // 5. Trigger auto-reply if message is from buyer
+                // 5. Trigger auto-reply and real-time AI analysis if message is from buyer
                 if (fromAccountType === '1') {
-                    const isRecent = (Date.now() - parseInt(String(sendTime))) < 10 * 60 * 1000
+                    let msgTimeMs = Date.now()
+                    if (sendTime) {
+                        const parsedNum = Number(sendTime)
+                        if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                            msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
+                        } else {
+                            const parsedDate = new Date(sendTime).getTime()
+                            if (!isNaN(parsedDate)) msgTimeMs = parsedDate
+                        }
+                    }
+                    const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
                     if (isRecent) {
                         processIncomingMessageAutoReply(storeId, sessionId, {
                             content: msgContent,
                             from_account_type: fromAccountType,
                             send_time: String(sendTime)
                         }).catch(err => console.error('[Webhook] Auto-reply error:', err))
+                    } else {
+                        console.log(`[Webhook] Skipping auto-reply for session ${sessionId} - message time older than 15 mins.`)
                     }
+
+                    // Always trigger background AI customer & order analysis update
+                    generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
+                        console.warn(`[Webhook] Real-time AI analysis update failed for session ${sessionId}:`, err.message)
+                    })
                 }
             } else {
                 console.log(`[Webhook] Chat message ${messageId} already cached, skipping.`)

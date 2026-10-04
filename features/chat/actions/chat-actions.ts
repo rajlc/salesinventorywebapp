@@ -43,13 +43,13 @@ export async function getEffectiveAiCredentials(storeSettings?: Partial<ChatSett
             source = (globalVal.geminiApiKey || (globalVal.provider === 'gemini' && globalVal.apiKey)) ? 'global_settings' : 'env_variable'
         }
         // Normalize model to active Google AI Studio generation endpoints
-        const rawModel = globalVal.model || 'gemini-2.5-flash'
-        if (rawModel.includes('2.5') || rawModel.includes('flash-latest') || rawModel.includes('3.6') || rawModel.includes('1.5')) {
-            model = 'gemini-2.5-flash'
+        const rawModel = globalVal.model || 'gemini-3.6-flash'
+        if (rawModel.includes('3.6') || rawModel.includes('3.8') || rawModel.includes('3.7') || rawModel.includes('flash-latest')) {
+            model = rawModel
         } else if (rawModel.includes('pro')) {
             model = 'gemini-2.5-pro'
         } else {
-            model = 'gemini-2.5-flash'
+            model = 'gemini-3.6-flash'
         }
     } else {
         // OpenAI
@@ -90,14 +90,14 @@ export async function getGlobalAiIntegrationInfo() {
 }
 
 // Robust Google Gemini caller with candidate fallback
-async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-2.5-flash', isJson = false): Promise<string> {
+async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-3.6-flash', isJson = false): Promise<string> {
     const candidates = Array.from(new Set([
         preferredModel,
-        'gemini-2.5-flash',
-        'gemini-1.5-flash',
-        'gemini-2.0-flash',
+        'gemini-3.6-flash',
+        'gemini-3.8-flash',
+        'gemini-3.7-flash',
         'gemini-flash-latest'
-    ]))
+    ].filter(Boolean)))
 
     let lastError = ''
     for (const m of candidates) {
@@ -507,9 +507,21 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
 
                 // Trigger AI or Keyword auto-reply process ONLY if message is:
                 // - Sent by buyer (from_account_type = '1')
-                // - Received recently (last 5 minutes)
+                // - Received recently (last 15 minutes, with robust timestamp parsing)
                 const isBuyer = String(msg.from_account_type) === '1'
-                const isRecent = (Date.now() - parseInt(String(msg.send_time))) < 5 * 60 * 1000
+                
+                let msgTimeMs = Date.now()
+                if (msg.send_time) {
+                    const parsedNum = Number(msg.send_time)
+                    if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                        msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
+                    } else {
+                        const parsedDate = new Date(msg.send_time).getTime()
+                        if (!isNaN(parsedDate)) msgTimeMs = parsedDate
+                    }
+                }
+                const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
+
                 if (isBuyer && isRecent) {
                     await processIncomingMessageAutoReply(storeId, sessionId, {
                         content: String(msg.content),
@@ -518,6 +530,17 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
                     })
                 }
             }
+        }
+
+        // If new messages were cached and AI analysis is enabled, update analysis
+        if (newMessagesCached > 0) {
+            getChatSettings(storeId).then(settings => {
+                if (settings.ai_analysis_enabled) {
+                    generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
+                        console.warn(`[ChatSync] AI analysis failed for session ${sessionId}:`, err.message)
+                    })
+                }
+            }).catch(() => {})
         }
 
         return { success: true, count: newMessagesCached }
@@ -852,6 +875,11 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
         const supabase = await createAdminClient()
         const settings = await getChatSettings(storeId)
 
+        // If AI Analysis is explicitly disabled for this store, exit cleanly
+        if (settings && settings.ai_analysis_enabled === false) {
+            return { success: false, skipped: true, error: 'AI Analysis is not enabled for this store' }
+        }
+
         // 1. Fetch Session details
         const { data: session } = await supabase
             .from('daraz_chat_sessions')
@@ -865,12 +893,20 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
         let ordersSummary = 'No recent orders found for this buyer.'
         let prioritizedOrder: any = null
         if (session.buyer_id) {
-            const { data: orders } = await supabase
+            const safeTitle = (session.title || '').replace(/[,()]/g, ' ').trim()
+            let orderQuery = supabase
                 .from('daraz_orders')
-                .select('id, order_number, order_status, order_date, customer_name, total_amount, daraz_order_items(id, product_name, sku, quantity, item_price)')
-                .or(`customer_name.ilike.%${session.title}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                .select('id, order_number, order_status, order_date, customer_name, price, daraz_order_items(id, product_name, seller_sku, quantity, amount)')
                 .order('order_date', { ascending: false })
                 .limit(5)
+
+            if (safeTitle) {
+                orderQuery = orderQuery.or(`customer_name.ilike.%${safeTitle}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+            } else {
+                orderQuery = orderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
+            }
+
+            const { data: orders } = await orderQuery
 
             if (orders && orders.length > 0) {
                 const statusWeight: Record<string, number> = {
@@ -890,7 +926,7 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
 
                 ordersSummary = sortedOrders.map(o => {
                     const items = (o.daraz_order_items || []).map((i: any) => `${i.product_name} (Qty: ${i.quantity})`).join(', ')
-                    return `Order #${o.order_number} | Status: ${o.order_status} | Date: ${o.order_date ? new Date(o.order_date).toLocaleDateString() : 'N/A'} | Items: ${items || 'N/A'}`
+                    return `Order #${o.order_number} | Status: ${o.order_status} | Date: ${o.order_date ? new Date(o.order_date).toLocaleDateString() : 'N/A'} | Price: Rs. ${o.price || 'N/A'} | Items: ${items || 'N/A'}`
                 }).join('\n')
             }
         }
@@ -910,7 +946,10 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
                 try {
                     const parsed = JSON.parse(m.content)
                     if (parsed.txt) text = parsed.txt
-                    else if (m.template_id === '10006' || parsed.itemId) text = `[Product Inquiry Card: ${parsed.title || ''}]`
+                    else if (m.template_id === '10006' || parsed.itemId) {
+                        const priceStr = parsed.price ? ` - Listed Price: ${parsed.price}` : ''
+                        text = `[Product Inquiry Card: ${parsed.title || ''}${priceStr}]`
+                    }
                     else if (m.template_id === '10007' || parsed.orderId) text = `[Order Card: #${parsed.orderId}]`
                 } catch {}
                 const sender = String(m.from_account_type) === '1' ? 'Buyer' : 'Seller'
@@ -931,9 +970,9 @@ ${chatHistory || 'No messages yet.'}
 
 Instructions:
 1. Provide a concise 2-3 sentence summary of:
-   - The customer's primary inquiry or intent.
+   - The customer's primary inquiry or intent (e.g. asking for product price, order delivery status, or product details).
    - The current order situation (highlighting pending/active orders first).
-2. Check if the customer made any urgent requests (e.g. wants different color, change address, change phone, cancel order, or angry complaint).
+2. Check if the customer made any urgent requests (e.g. wants different color, change address, change phone, cancel order, unanswered price questions, or angry complaint).
 3. Output your response as a valid JSON object matching this structure:
 {
   "summary": "Concise 2-3 sentence summary here",
@@ -1110,6 +1149,10 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
 
             let targetItemId: string | null = null
             let targetProductTitle: string | null = null
+            let targetProductPrice: string | null = null
+            let targetProductOldPrice: string | null = null
+            let targetProductUrl: string | null = null
+            let targetProductSku: string | null = null
 
             if (sessionMsgs) {
                 for (const sm of sessionMsgs) {
@@ -1118,7 +1161,11 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
                             const p = JSON.parse(sm.content)
                             if (p.itemId || p.item_id) {
                                 targetItemId = String(p.itemId || p.item_id)
-                                targetProductTitle = p.title || null
+                                targetProductTitle = p.title || targetProductTitle
+                                targetProductPrice = p.price || p.item_price || p.special_price || p.newProduct?.voucherPrice || targetProductPrice
+                                targetProductOldPrice = p.oldPrice || p.originalPrice || targetProductOldPrice
+                                targetProductUrl = p.actionUrl || targetProductUrl
+                                targetProductSku = p.skuId || p.sku || targetProductSku
                                 break
                             }
                         } catch {}
@@ -1129,17 +1176,25 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             // 2. Fetch Buyer's Orders (Prioritizing Pending orders)
             let buyerOrdersContext = 'No active order records found for this buyer.'
             if (session?.buyer_id) {
-                const { data: buyerOrders } = await supabase
+                const safeTitle = (session?.title || '').replace(/[,()]/g, ' ').trim()
+                let buyerOrderQuery = supabase
                     .from('daraz_orders')
-                    .select('order_number, order_status, order_date, total_amount, daraz_order_items(product_name, sku, quantity)')
-                    .or(`customer_name.ilike.%${session.title || ''}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                    .select('order_number, order_status, order_date, price, daraz_order_items(product_name, seller_sku, quantity, amount)')
                     .order('order_date', { ascending: false })
                     .limit(3)
+
+                if (safeTitle) {
+                    buyerOrderQuery = buyerOrderQuery.or(`customer_name.ilike.%${safeTitle}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                } else {
+                    buyerOrderQuery = buyerOrderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
+                }
+
+                const { data: buyerOrders } = await buyerOrderQuery
 
                 if (buyerOrders && buyerOrders.length > 0) {
                     buyerOrdersContext = buyerOrders.map(bo => {
                         const items = (bo.daraz_order_items || []).map((i: any) => `${i.product_name} (Qty: ${i.quantity})`).join(', ')
-                        return `Order #${bo.order_number}: Status is "${bo.order_status}", Placed on ${bo.order_date ? new Date(bo.order_date).toLocaleDateString() : 'N/A'}. Items: ${items}`
+                        return `Order #${bo.order_number}: Status is "${bo.order_status}", Placed on ${bo.order_date ? new Date(bo.order_date).toLocaleDateString() : 'N/A'}. Total: Rs. ${bo.price || 'N/A'}. Items: ${items}`
                     }).join('\n')
                 }
             }
@@ -1160,16 +1215,23 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             }
 
             let productKnowledgeContext = ''
-            if (targetProductData || targetItemId) {
+            if (targetProductData || targetItemId || targetProductTitle) {
                 const cleanH = stripHtml(targetProductData?.highlights)
                 const cleanD = stripHtml(targetProductData?.description).substring(0, 400)
+                const resolvedPrice = targetProductData?.special_price 
+                    ? `Rs. ${targetProductData.special_price}` 
+                    : (targetProductData?.regular_price ? `Rs. ${targetProductData.regular_price}` : (targetProductPrice || 'N/A'))
+                const originalPriceStr = targetProductOldPrice ? ` (Original: ${targetProductOldPrice})` : ''
+
                 productKnowledgeContext = `
 Product Under Inquiry: ${targetProductData?.product_title || targetProductData?.product_name || targetProductTitle || 'Item ' + targetItemId}
-Price: Rs. ${targetProductData?.special_price || targetProductData?.regular_price || 'N/A'}
+Current Listed Price: ${resolvedPrice}${originalPriceStr}
+${targetProductSku ? `Item SKU: ${targetProductSku}` : ''}
+${targetProductUrl ? `Product URL: ${targetProductUrl}` : ''}
 Specifications & Highlights:
-${cleanH || 'No specific highlights listed.'}
+${cleanH || 'No specific highlights listed in inventory catalog.'}
 Description Summary:
-${cleanD || 'No description listed.'}
+${cleanD || 'No description listed in inventory catalog.'}
 
 Verified Product Q&A Knowledge Base:
 ${targetProductQAs.length > 0 
@@ -1218,9 +1280,11 @@ ${historyContext}
 
 Strict Guidelines for Response:
 1. Talk like a friendly human customer service agent. Keep responses short (under 2-3 sentences).
-2. If customer asks about order status or delivery date, check the Buyer Order Status above.
-3. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
-4. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
+2. If the customer asks about price or cost (e.g. "price kati xa?", "rate kati ho?", "kati parxa?", "how much is this?"), refer directly to "Current Listed Price" above and state the price clearly and politely (e.g. "Hajur, yo product ko price Rs. 1,290 ho.").
+3. If customer asks about order status or delivery date, check the Buyer Order Status above.
+4. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
+5. If the customer sends vague prompts or marks like "??" or greetings, respond politely acknowledging their interest in the product and ask how you can help them with their order.
+6. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
    Reply with:
    "Hamro team le yo barema check garera xittai tapailai jankari garaunecha. / Our team will check this specific detail and update you shortly."
    and append "[ACTION:HANDOVER_TO_HUMAN]" at the very end.
@@ -1261,6 +1325,13 @@ Response:`
                 await sendChatMessage(storeId, sessionId, '1', cleanReply, undefined, undefined, true)
                 try { revalidatePath('/dashboard/chat-ai') } catch {}
             }
+        }
+
+        // Trigger real-time AI Customer & Order Analysis update in background
+        if (settings.ai_analysis_enabled) {
+            generateSessionAiAnalysisAction(storeId, sessionId).catch(err => {
+                console.warn(`[AutoReply] Real-time AI analysis update failed for session ${sessionId}:`, err.message)
+            })
         }
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)

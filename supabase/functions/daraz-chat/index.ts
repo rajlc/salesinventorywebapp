@@ -298,21 +298,33 @@ Response:`;
                 return;
             }
             console.log('[EdgeFunction] Calling Gemini API...');
-            const response = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{
-                            parts: [{ text: systemPrompt }]
-                        }]
-                    })
+            const geminiCandidates = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+            for (const gm of geminiCandidates) {
+                try {
+                    const response = await fetch(
+                        `https://generativelanguage.googleapis.com/v1beta/models/${gm}:generateContent?key=${geminiApiKey}`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{
+                                    parts: [{ text: systemPrompt }]
+                                }]
+                            })
+                        }
+                    );
+                    if (response.ok) {
+                        const resData = await response.json();
+                        replyText = resData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        if (replyText) break;
+                    } else {
+                        const errBody = await response.text();
+                        console.warn(`[EdgeFunction] Gemini candidate ${gm} returned HTTP ${response.status}:`, errBody);
+                    }
+                } catch (gErr) {
+                    console.warn(`[EdgeFunction] Gemini candidate ${gm} failed:`, gErr);
                 }
-            );
-
-            const resData = await response.json();
-            replyText = resData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            }
         }
 
         if (replyText && replyText.trim()) {
@@ -325,29 +337,34 @@ Response:`;
         // Fallback to Gemini if OpenAI call failed and we have Gemini Key
         if (aiProvider === 'openai' && geminiApiKey) {
             console.log('[EdgeFunction] Attempting fallback to Gemini API after OpenAI failure...');
-            try {
-                const response = await fetch(
-                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            contents: [{
-                                parts: [{ text: systemPrompt }]
-                            }]
-                        })
+            const geminiCandidates = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+            for (const gm of geminiCandidates) {
+                try {
+                    const response = await fetch(
+                        `https://generativelanguage.googleapis.com/v1beta/models/${gm}:generateContent?key=${geminiApiKey}`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{
+                                    parts: [{ text: systemPrompt }]
+                                }]
+                            })
+                        }
+                    );
+                    if (response.ok) {
+                        const resData = await response.json();
+                        replyText = resData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        if (replyText && replyText.trim()) {
+                            const cleanReply = replyText.replace(/AI Assistant:/gi, '').trim();
+                            console.log(`[EdgeFunction] AI fallback response generated: "${cleanReply}"`);
+                            await sendDarazMessage(storeId, sessionId, cleanReply, supabase, appKey, appSecret);
+                            break;
+                        }
                     }
-                );
-
-                const resData = await response.json();
-                replyText = resData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                if (replyText && replyText.trim()) {
-                    const cleanReply = replyText.replace(/AI Assistant:/gi, '').trim();
-                    console.log(`[EdgeFunction] AI fallback response generated: "${cleanReply}"`);
-                    await sendDarazMessage(storeId, sessionId, cleanReply, supabase, appKey, appSecret);
+                } catch (geminiErr) {
+                    console.error(`[EdgeFunction] Gemini fallback ${gm} failed:`, geminiErr);
                 }
-            } catch (geminiErr) {
-                console.error('[EdgeFunction] Gemini fallback also failed:', geminiErr);
             }
         }
     }
