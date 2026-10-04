@@ -487,43 +487,39 @@ Deno.serve(async (req) => {
         settings.openai_api_key = globalAiRow.value.openaiApiKey;
     }
 
-    // We only process message_type 2 (Instant Messaging/Chat) here.
-    // Non-messaging events (e.g. trade orders, returns) are routed to the Next.js backend.
-    if (message_type !== 2 || !data) {
-        const envAppUrl = Deno.env.get('NEXT_PUBLIC_APP_URL')?.trim() || Deno.env.get('APP_URL')?.trim();
-        const dbAppUrl = settings?.app_url?.trim();
-        const appUrl = envAppUrl || dbAppUrl || '';
+    // Resolve Next.js backend URL
+    const envAppUrl = Deno.env.get('NEXT_PUBLIC_APP_URL')?.trim() || Deno.env.get('APP_URL')?.trim();
+    const dbAppUrl = settings?.app_url?.trim();
+    let appUrl = envAppUrl || dbAppUrl || '';
+    if (appUrl.endsWith('/')) {
+        appUrl = appUrl.slice(0, -1);
+    }
 
-        if (appUrl) {
-            console.log(`[EdgeFunction] Routing non-messaging message_type: ${message_type} to Next.js backend at ${appUrl}/api/daraz/webhook...`);
-            try {
-                const response = await fetch(`${appUrl}/api/daraz/webhook`, {
-                    method: 'POST',
-                    headers: {
-                        'content-type': 'application/json',
-                        'authorization': authorization || ''
-                    },
-                    body: rawBody
-                });
-                const resText = await response.text();
-                console.log(`[EdgeFunction] Next.js backend response status: ${response.status}. Response: ${resText}`);
+    // Forward ALL incoming webhook events to Next.js backend for unified processing
+    // (Next.js handles verified Product Q&As, rich order intelligence, real-time AI summary analysis, and automated chat replies)
+    if (appUrl) {
+        console.log(`[EdgeFunction] Forwarding webhook message_type: ${message_type} to Next.js backend at ${appUrl}/api/daraz/webhook...`);
+        try {
+            const response = await fetch(`${appUrl}/api/daraz/webhook`, {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'authorization': authorization || ''
+                },
+                body: rawBody
+            });
+            const resText = await response.text();
+            console.log(`[EdgeFunction] Next.js backend response status: ${response.status}. Response: ${resText}`);
+            if (response.ok) {
                 return new Response(resText, {
                     status: response.status,
                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
-            } catch (routingErr) {
-                console.error('[EdgeFunction] Failed routing to Next.js backend:', routingErr);
-                return new Response(JSON.stringify({ error: 'Failed to route to backend', details: routingErr.message }), {
-                    status: 500,
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
+            } else {
+                console.warn(`[EdgeFunction] Next.js returned HTTP ${response.status}, proceeding with local edge fallback...`);
             }
-        } else {
-            console.log(`[EdgeFunction] Ignoring message_type: ${message_type} (Next.js APP_URL is not configured in Supabase Secrets or Database settings)`);
-            return new Response(JSON.stringify({ success: true, message: 'Non-messaging type ignored (APP_URL not configured)' }), {
-                status: 200,
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            });
+        } catch (routingErr) {
+            console.error('[EdgeFunction] Failed routing to Next.js backend, proceeding with local edge fallback:', routingErr);
         }
     }
 

@@ -931,16 +931,39 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
             }
         }
 
-        // 3. Fetch Recent Messages
+        // 3. Fetch Recent Messages (up to 15 to capture full context)
         const { data: messages } = await supabase
             .from('daraz_chat_messages')
             .select('from_account_type, content, send_time, template_id')
             .eq('session_id', sessionId)
             .order('send_time', { ascending: false })
-            .limit(8)
+            .limit(15)
 
         let chatHistory = ''
+        let latestBuyerInquiry = ''
+        let latestProductCardTitle = ''
+        let latestProductCardPrice = ''
+
         if (messages && messages.length > 0) {
+            // Find the most recent buyer message and product card
+            for (const m of messages) {
+                const isBuyer = String(m.from_account_type) === '1'
+                try {
+                    const parsed = JSON.parse(m.content)
+                    if (isBuyer && !latestBuyerInquiry && (parsed.txt || parsed.content)) {
+                        latestBuyerInquiry = parsed.txt || parsed.content
+                    }
+                    if ((m.template_id === '10006' || parsed.itemId) && !latestProductCardTitle) {
+                        latestProductCardTitle = parsed.title || ''
+                        latestProductCardPrice = parsed.price || parsed.item_price || parsed.special_price || ''
+                    }
+                } catch {
+                    if (isBuyer && !latestBuyerInquiry) {
+                        latestBuyerInquiry = m.content
+                    }
+                }
+            }
+
             chatHistory = [...messages].reverse().map(m => {
                 let text = m.content
                 try {
@@ -957,7 +980,7 @@ export async function generateSessionAiAnalysisAction(storeId: string, sessionId
             }).join('\n')
         }
 
-        // 4. Generate AI Analysis
+        // 4. Generate AI Analysis with explicit NEW MESSAGE PRIORITY
         const prompt = `You are an expert E-Commerce Customer & Order Intelligence Analyst.
 Analyze the following buyer conversation and order records for a seller on Daraz:
 
@@ -965,17 +988,23 @@ Buyer Name / Title: ${session.title} (Buyer ID: ${session.buyer_id})
 Recent Orders (Prioritized):
 ${ordersSummary}
 
-Recent Conversation Thread:
+*** CRITICAL PRIORITY: FOCUS ON THE LATEST NEW MESSAGE ***
+The customer's MOST RECENT inquiry represents their current real-time intent:
+- Latest Inquiry from Buyer: "${latestBuyerInquiry || 'N/A'}"
+- Latest Product Looked At: "${latestProductCardTitle || 'N/A'}" ${latestProductCardPrice ? `(Price: ${latestProductCardPrice})` : ''}
+
+Full Recent Conversation History:
 ${chatHistory || 'No messages yet.'}
 
 Instructions:
 1. Provide a concise 2-3 sentence summary of:
-   - The customer's primary inquiry or intent (e.g. asking for product price, order delivery status, or product details).
-   - The current order situation (highlighting pending/active orders first).
-2. Check if the customer made any urgent requests (e.g. wants different color, change address, change phone, cancel order, unanswered price questions, or angry complaint).
+   - The customer's CURRENT active inquiry (highlighting their latest question and the specific product they just asked about).
+   - The current order situation (highlighting pending/active orders first, or noting if they have no active orders).
+2. Check if the customer made an urgent request (e.g. wants different color, change address, change phone, cancel order, or angry complaint).
+   NOTE: If the customer just asked for a product price or sent a product card, that is a standard inquiry (not urgent unless explicitly demanding an escalation).
 3. Output your response as a valid JSON object matching this structure:
 {
-  "summary": "Concise 2-3 sentence summary here",
+  "summary": "Concise 2-3 sentence summary here focusing on the newest inquiry",
   "is_urgent": true or false,
   "urgent_reason": "Specific reason if urgent, otherwise null"
 }`
@@ -987,7 +1016,7 @@ Instructions:
         }
 
         let aiJson: { summary: string; is_urgent: boolean; urgent_reason?: string | null } = {
-            summary: `Customer ${session.title} active thread. Prioritized Order: ${prioritizedOrder?.order_number || 'None'} (${prioritizedOrder?.order_status || 'N/A'}).`,
+            summary: `Customer ${session.title} active thread. Latest Inquiry: "${latestBuyerInquiry || 'Product Inquiry'}". Prioritized Order: ${prioritizedOrder?.order_number || 'None'} (${prioritizedOrder?.order_status || 'N/A'}).`,
             is_urgent: false,
             urgent_reason: null
         }
@@ -1016,6 +1045,9 @@ Instructions:
         if (aiJson.is_urgent) {
             updatePayload.is_urgent = true
             updatePayload.urgent_reason = aiJson.urgent_reason || 'Urgent request detected by AI analysis'
+        } else {
+            updatePayload.is_urgent = false
+            updatePayload.urgent_reason = null
         }
 
         await supabase

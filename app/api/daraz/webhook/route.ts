@@ -178,9 +178,9 @@ export async function POST(request: NextRequest) {
             }
         }
 
-        // Type 5: New IM Message from Buyer
+        // Type 2 / Type 5: New IM Message from Buyer
         // Type 6: Message Read Notification (session-level update)
-        if ((message_type === 5 || message_type === 6) && data) {
+        if ((message_type === 2 || message_type === 5 || message_type === 6) && data) {
             const sessionId = data.session_id || data.sessionId
             const msgContent = data.content || data.message || data.txt || ''
             const fromAccountType = String(data.from_account_type || data.sender_type || '1')
@@ -229,9 +229,16 @@ export async function POST(request: NextRequest) {
 
             if (!existing) {
                 // 3. Save the incoming message
-                const sendTimeISO = isNaN(Number(sendTime))
-                    ? sendTime
-                    : new Date(parseInt(String(sendTime))).toISOString()
+                let sendTimeISO = new Date().toISOString()
+                try {
+                    const parsedNum = Number(sendTime)
+                    if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                        sendTimeISO = new Date(parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum).toISOString()
+                    } else if (sendTime) {
+                        const parsedDate = new Date(sendTime).getTime()
+                        if (!isNaN(parsedDate)) sendTimeISO = new Date(parsedDate).toISOString()
+                    }
+                } catch {}
 
                 await supabase.from('daraz_chat_messages').insert({
                     message_id: messageId,
