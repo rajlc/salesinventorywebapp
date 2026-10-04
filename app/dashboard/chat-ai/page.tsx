@@ -1672,7 +1672,21 @@ function ChatAiDashboardContent() {
                                             No messages yet. Send a message to start the conversation!
                                         </div>
                                     ) : (
-                                        messages.map((message) => {
+                                        messages.filter((msg) => {
+                                            if (!msg.content) return false
+                                            const trimmed = typeof msg.content === 'string' ? msg.content.trim() : ''
+                                            if (!trimmed || trimmed === '{}' || trimmed === 'null' || trimmed === '""') return false
+                                            try {
+                                                const parsed = parseMsgContent(msg.content)
+                                                if (parsed.txt && String(parsed.txt).trim()) return true
+                                                if (parsed.content && String(parsed.content).trim()) return true
+                                                if (parsed.imgUrl || parsed.itemId || parsed.item_id || parsed.orderId || parsed.order_id || parsed.cardType || parsed.action || parsed.sellerId) return true
+                                                if (typeof parsed === 'string' && parsed.trim()) return true
+                                                return false
+                                            } catch {
+                                                return trimmed.length > 0
+                                            }
+                                        }).map((message) => {
                                             const isSelf = String(message.from_account_type) === '2' || message.from_account_id === 'seller'
                                             const parsed = parseMsgContent(message.content)
                                             const formattedTime = new Date(message.send_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })

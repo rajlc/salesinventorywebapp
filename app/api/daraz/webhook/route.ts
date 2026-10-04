@@ -236,6 +236,16 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ success: true, message: 'Read receipt processed' })
             }
 
+            // Guard: Ignore presence/ping events that contain no text/card content
+            const hasRealContent = typeof msgContent === 'string'
+                ? msgContent.trim() !== '' && msgContent.trim() !== '{}' && msgContent.trim() !== 'null'
+                : Boolean(msgContent)
+
+            if (!hasRealContent) {
+                console.log(`[Webhook] Chat event for session ${sessionId} carries no message body, skipping daraz_chat_messages insert.`)
+                return NextResponse.json({ success: true, message: 'Session event acknowledged' })
+            }
+
             // 2. Parse timestamp safely
             let sendTimeISO = new Date().toISOString()
             try {

@@ -609,39 +609,51 @@ Deno.serve(async (req) => {
 
         const finalTitle = (existingSession?.title && !isGenericTitle) ? existingSession.title : sessionTitle;
 
+        const rawContent = data.content || data.message || data.txt || '';
+        const hasContent = typeof rawContent === 'string'
+            ? rawContent.trim() !== '' && rawContent.trim() !== '{}' && rawContent.trim() !== 'null'
+            : Boolean(rawContent);
+
         // 2. IMMEDIATE SAVE: Upsert into daraz_chat_sessions so UI renders instantly
-        const sessionPayload = {
+        const sessionPayload: Record<string, any> = {
             session_id: sessionId,
             store_id: store.id,
             buyer_id: resolvedBuyerId,
             title: finalTitle,
-            unread_count: isBuyer ? (existingSession?.unread_count || 0) + 1 : 0,
-            last_message_id: data.message_id || data.msgId,
-            last_message_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
-            last_message_summary: data.content ? parseSummary(data.content) : null,
             updated_at: new Date().toISOString()
         };
 
+        if (hasContent) {
+            sessionPayload.unread_count = isBuyer ? (existingSession?.unread_count || 0) + 1 : 0;
+            sessionPayload.last_message_id = data.message_id || data.msgId;
+            sessionPayload.last_message_time = data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString();
+            sessionPayload.last_message_summary = parseSummary(rawContent);
+        }
+
         await supabase.from('daraz_chat_sessions').upsert(sessionPayload, { onConflict: 'session_id' });
 
-        // 3. IMMEDIATE SAVE: Upsert incoming message into daraz_chat_messages
-        const msgId = data.message_id || data.msgId || `msg_${Date.now()}`;
-        const msgPayload = {
-            message_id: msgId,
-            session_id: sessionId,
-            from_account_id: fromAccountType === '1' ? buyerId : sellerId,
-            from_account_type: fromAccountType,
-            to_account_id: fromAccountType === '1' ? sellerId : buyerId,
-            to_account_type: String(data.to_account_type || (isBuyer ? '2' : '1')),
-            content: data.content || data.message || data.txt || '',
-            template_id: String(data.template_id || '1'),
-            send_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
-            auto_reply: false,
-            tags: []
-        };
+        // 3. IMMEDIATE SAVE: Upsert incoming message into daraz_chat_messages ONLY IF IT HAS REAL CONTENT!
+        if (hasContent) {
+            const msgId = data.message_id || data.msgId || `msg_${Date.now()}`;
+            const msgPayload = {
+                message_id: msgId,
+                session_id: sessionId,
+                from_account_id: fromAccountType === '1' ? buyerId : sellerId,
+                from_account_type: fromAccountType,
+                to_account_id: fromAccountType === '1' ? sellerId : buyerId,
+                to_account_type: String(data.to_account_type || (isBuyer ? '2' : '1')),
+                content: rawContent,
+                template_id: String(data.template_id || '1'),
+                send_time: data.send_time ? parseTimestamp(data.send_time) : new Date().toISOString(),
+                auto_reply: false,
+                tags: []
+            };
 
-        await supabase.from('daraz_chat_messages').upsert(msgPayload, { onConflict: 'message_id' });
-        console.log(`[EdgeFunction] ✅ Saved incoming message ${msgId} for session ${sessionId} to database.`);
+            await supabase.from('daraz_chat_messages').upsert(msgPayload, { onConflict: 'message_id' });
+            console.log(`[EdgeFunction] ✅ Saved incoming message ${msgId} for session ${sessionId} to database.`);
+        } else {
+            console.log(`[EdgeFunction] Session event for ${sessionId} carries no message body, skipping daraz_chat_messages insert.`);
+        }
     }
 
     // 4. Forward chat event to Next.js backend for AI auto-reply & real-time AI summary analysis
