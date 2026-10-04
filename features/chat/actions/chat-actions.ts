@@ -1116,7 +1116,69 @@ export interface DarazMessage {
     send_time: string | number
 }
 
+// Guarded entry point: ensures only ONE auto-reply is generated per buyer burst, even when
+// Daraz fires several webhook events at once (text + order card + welcome message) or the
+// manual sync runs in parallel. Uses an atomic insert on app_settings(key) as a cross-instance lock.
 export async function processIncomingMessageAutoReply(storeId: string, sessionId: string, msg: DarazMessage) {
+    // 1. Ignore non-text events (order cards / product cards / follow cards) as reply triggers
+    try {
+        const parsed = JSON.parse(msg.content)
+        if (parsed && typeof parsed === 'object' && (parsed.orderId || parsed.itemId || parsed.item_id || parsed.cardType || parsed.sellerId) && !parsed.txt) {
+            console.log(`[AutoReply] Skipping card/non-text event for session ${sessionId}`)
+            return
+        }
+    } catch {}
+
+    const supabase = await createAdminClient()
+    const lockKey = `ai_reply_lock_${sessionId}`
+
+    // 2. Acquire atomic lock (key is unique). Break stale locks older than 60s.
+    let acquired = false
+    for (let attempt = 0; attempt < 2 && !acquired; attempt++) {
+        const { error } = await supabase.from('app_settings').insert({ key: lockKey, value: { locked_at: Date.now() } })
+        if (!error) { acquired = true; break }
+        const { data: existing } = await supabase.from('app_settings').select('value').eq('key', lockKey).maybeSingle()
+        const lockedAt = Number(existing?.value?.locked_at || 0)
+        if (existing && Date.now() - lockedAt > 60000) {
+            await supabase.from('app_settings').delete().eq('key', lockKey)
+        } else {
+            break
+        }
+    }
+    if (!acquired) {
+        console.log(`[AutoReply] Another reply is already being generated for session ${sessionId}, skipping duplicate.`)
+        return
+    }
+
+    try {
+        // 3. Skip if our AI already answered after this buyer message
+        let msgTimeMs = Date.now()
+        const num = Number(msg.send_time)
+        if (!isNaN(num) && num > 1000000000) msgTimeMs = num < 10000000000 ? num * 1000 : num
+        else if (msg.send_time) { const d = new Date(String(msg.send_time)).getTime(); if (!isNaN(d)) msgTimeMs = d }
+
+        const { data: lastAi } = await supabase
+            .from('daraz_chat_messages')
+            .select('send_time')
+            .eq('session_id', sessionId)
+            .eq('auto_reply', true)
+            .neq('template_id', '10015')
+            .neq('template_id', '10010')
+            .order('send_time', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        if (lastAi?.send_time && new Date(lastAi.send_time).getTime() >= msgTimeMs - 1000) {
+            console.log(`[AutoReply] Buyer message already answered for session ${sessionId}, skipping.`)
+            return
+        }
+
+        await runAutoReply(storeId, sessionId, msg)
+    } finally {
+        await supabase.from('app_settings').delete().eq('key', lockKey)
+    }
+}
+
+async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessage) {
     try {
         const supabase = await createAdminClient()
         const settings = await getChatSettings(storeId)
