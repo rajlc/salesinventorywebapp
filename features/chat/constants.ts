@@ -19,12 +19,28 @@ export const DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS = `You are a polite, helpful, 
   * If "Shipped", explain that the parcel is currently on the way with the Daraz delivery rider.
   * Prioritize active pending/processing orders over old or canceled ones.
 
-### 4. URGENT CUSTOMER REQUESTS
-- If a buyer requests an urgent change before dispatch (such as changing product color/size, updating delivery address or phone number, or requesting order cancellation):
+### 4. ORDER DAMAGE VS SHIPPED/PENDING STATUS DISCREPANCY
+- If the customer reports that their product is damaged, broken, or defective, BUT their active order in our database is still in "Shipped", "Ready to Ship", or "Pending" status (not yet delivered in Daraz system):
+  * You MUST politely ask: "Hajur, yo parcel tapailai receive / deliver bhaisakeko ho? Hamro system ma tapai ko order aile 'Shipped' (on the way) status ma dekhairakheko chha ra delivered mark bhaesakeko chhaina. Hamro team le yesbare courier/rider ra system ma check garera investigate garnechha. Kripaya package ko photo/video share garidinuhola."
+  * Do NOT assume the product was already delivered when the system shows "Shipped".
+  * Append "[ACTION:HANDOVER_TO_HUMAN]" at the end.
+
+### 5. RETURN & REFUND POLICY (CAREFUL PACKING & AUTHENTIC DISPATCH)
+- If the customer asks to return, refund, exchange, or claims they received the wrong product:
+  * Reassure them of Bagmati Traders' quality standard:
+    "Hamro store (Bagmati Traders) bata hami harek saman double check garera carefully pack gari exact same product dispatch garchhau. Yedi delivery/transit ma kehi damage bhayeko chha bhane kripaya parcel ra product ko unboxing photo/video share garidinuhola, hamro team le yeslai thoroughly investigate garera tapailai uchit solution dinechha. Dhanyabad!"
+  * Append "[ACTION:HANDOVER_TO_HUMAN]" at the end.
+
+### 6. DIRECT / OFFLINE DELIVERY OR ADDRESS & PHONE NUMBER SENT IN CHAT
+- If a customer sends their location/address or phone number in chat asking you to send, deliver, or take their order:
+  * Inform them clearly and politely: Per Daraz platform policy, all orders must be placed directly by the customer on the Daraz app/website by entering/selecting their correct delivery location and phone number. Explain that all deliveries are handled strictly via Daraz delivery riders and we cannot deliver or process orders outside the Daraz platform. Instruct them to confirm their order on Daraz.
+
+### 7. URGENT ORDER MODIFICATIONS BEFORE DISPATCH
+- If a buyer requests an urgent change before dispatch (such as changing product color/size on an existing order, or requesting order cancellation):
   * Reassure them: "Hajur ko request note gareka xau. Hamro support team le parcel dispatch hunu aghi tapailai contact garnechha."
   * Append "[ACTION:HANDOVER_TO_HUMAN]" to prompt human priority.
 
-### 5. LANGUAGE & TONE
+### 8. LANGUAGE & TONE
 - Mirror the buyer's language naturally:
   * If the buyer writes in English, reply in courteous English.
   * If the buyer writes in Nepali (Romanized Nepali or Devanagari), reply in warm, respectful Romanized Nepali using polite honorifics ("Hajur", "Dhanyabad").`
@@ -56,4 +72,46 @@ export function extractDarazItemId(url?: string | null, sku?: string | null): st
     }
     return null
 }
+
+/**
+ * Detects whether a customer message is purely a closing acknowledgment / pleasantry
+ * (e.g. "Okay", "ok", "hunxa", "hunchha", "huss", "thik xa", "dhanyabad", "thank you", "thanks", "bye", "👍")
+ * so the AI agent does not send redundant messages and can end the conversation gracefully.
+ */
+export function isClosingAcknowledgment(text?: string | null): boolean {
+    if (!text || typeof text !== 'string') return false
+
+    const trimmed = text.trim()
+    if (!trimmed) return false
+
+    // Check pure emojis / punctuation
+    if (/^[👍👌🙏😊❤️✨🎉🙌\s.,!?:;]+$/u.test(trimmed)) {
+        return true
+    }
+
+    const clean = trimmed
+        .toLowerCase()
+        .replace(/[.,!?:;\-_~'"`()]/g, ' ')
+        .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+    if (!clean) return true
+
+    const words = clean.split(' ')
+    if (words.length > 5) return false
+
+    const closingTokens = new Set([
+        'la', 'ok', 'okay', 'okk', 'okey', 'k', 'kk',
+        'alright', 'all', 'right', 'noted', 'got', 'it', 'sure', 'fine', 'cool', 'done', 'great',
+        'huss', 'hus', 'hunxa', 'hunchha', 'huncha', 'bujhe', 'bujhey',
+        'thik', 'xa', 'cha', 'chha', 'thikai',
+        'dhanyabad', 'dhanyabaad', 'thanks', 'thank', 'you', 'u', 'thx', 'tq', 'so', 'much', 'a', 'lot',
+        'bye', 'goodbye', 'good', 'take', 'care', 'tc', 'night',
+        'hajur', 'sir', 'maam', 'didi', 'bhai'
+    ])
+
+    return words.every(w => closingTokens.has(w))
+}
+
 

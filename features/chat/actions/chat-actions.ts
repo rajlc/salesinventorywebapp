@@ -6,7 +6,7 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { getProductQAs, type ProductQA } from './product-qa-actions'
 
-import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, type EffectiveAiConfig } from '../constants'
+import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, isClosingAcknowledgment, type EffectiveAiConfig } from '../constants'
 
 function stripHtml(html: string | null | undefined): string {
     if (!html) return ''
@@ -1232,6 +1232,12 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
         const cleanText = userText.toLowerCase().trim()
         if (!cleanText) return
 
+        // 0.1 End of Conversation Cut-Off: If customer sends pure closing acknowledgment (e.g. "Okay", "hunxa", "dhanyabad", "thank you", "huss", "👍"), do not reply
+        if (isClosingAcknowledgment(cleanText)) {
+            console.log(`[AutoReply] Customer sent closing acknowledgment ("${cleanText}"), ending conversation gracefully without reply.`)
+            return
+        }
+
         const cooldownHours = Number(settings.ai_cooldown_hours) || 2
 
         // A. Urgent Order Modification Detection (Color, Address, Phone, Cancel)
@@ -1240,8 +1246,7 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                                /(order|parcel|item).*(change|arkai).*(color|size)/i.test(cleanText) ||
                                /(pack|send|pathaunu|dinus).*(black|blue|red|green|white|yellow|gold|silver|pink)\s+(color|colour|ko|size|ma)/i.test(cleanText)
         const isAddressRequest = /(change|update|naya|arkai).*(address|thikana|location|ghar)/i.test(cleanText)
-        const isPhoneRequest = /(change|update|naya|arkai).*(phone|number|mobile|call)/i.test(cleanText) ||
-                              /(call|contact).*(this number|\d{10})/i.test(cleanText)
+        const isPhoneRequest = /(change|update|naya|arkai).*(phone|number|mobile)/i.test(cleanText)
         const isCancelRequest = /(cancel|cancellation|order radd|cancel garnu)/i.test(cleanText)
 
         if (isColorRequest || isAddressRequest || isPhoneRequest || isCancelRequest) {
@@ -1332,6 +1337,7 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
 
             // 2. Fetch Buyer's Orders (Prioritizing Pending orders)
             let buyerOrdersContext = 'No active order records found for this buyer.'
+            let buyerOrders: any[] | null = null
             if (session?.buyer_id) {
                 const safeTitle = (session?.title || '').replace(/[,()]/g, ' ').trim()
                 const isGenericBuyer = !safeTitle || /^buyer\s*\d*$/i.test(safeTitle)
@@ -1350,7 +1356,6 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                     buyerOrderQuery = buyerOrderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
                 }
 
-                let buyerOrders: any[] | null = null
                 try {
                     const res: any = await Promise.race([
                         buyerOrderQuery,
@@ -1366,6 +1371,24 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                         const items = (bo.daraz_order_items || []).map((i: any) => `${i.product_name} (Qty: ${i.quantity})`).join(', ')
                         return `Order #${bo.order_number}: Status is "${bo.order_status}", Placed on ${bo.order_date ? new Date(bo.order_date).toLocaleDateString() : 'N/A'}. Total: Rs. ${bo.price || 'N/A'}. Items: ${items}`
                     }).join('\n')
+                }
+            }
+
+            // Detect Damage complaints vs Non-Delivered Order status discrepancy
+            let orderDiscrepancyContext = ''
+            const isDamageComplaint = /(damage|broken|futeko|bigreko|defective|crack|chirkeko|tukra|bhatkeko|chalena|problem aayo|khrab|faulty|kam gardaina)/i.test(cleanText)
+            const isReturnRefundRequest = /(return|refund|paisa firta|saman firta|arkai saman|wrong product|wrong item|exchange)/i.test(cleanText)
+
+            if (buyerOrders && buyerOrders.length > 0) {
+                const latestOrder = buyerOrders[0]
+                const statusLower = String(latestOrder.order_status || '').toLowerCase()
+                const isNotDelivered = !statusLower.includes('deliver') && !statusLower.includes('complete') && !statusLower.includes('cancel')
+                if (isDamageComplaint && isNotDelivered) {
+                    orderDiscrepancyContext = `
+CRITICAL ORDER STATUS & DAMAGE DISCREPANCY:
+- The customer is reporting product damage or defect ("${userText}"), but in our database, their active Order #${latestOrder.order_number} has status "${latestOrder.order_status}" (IT IS NOT YET MARKED AS DELIVERED in Daraz system).
+- You MUST ask the customer: "Hajur, yo parcel tapailai receive / deliver bhaisakeko ho? Hamro system ma tapai ko order #${latestOrder.order_number} aile '${latestOrder.order_status}' status ma dekhairakheko chha ra delivered mark bhaesakeko chhaina. Hamro team le yesbare courier/rider ra system ma check garera investigate garnechha. Kripaya package ko photo/video share garidinuhola."
+- Do NOT assume the product was already delivered. Append "[ACTION:HANDOVER_TO_HUMAN]" at the end.`
                 }
             }
 
@@ -1441,6 +1464,7 @@ Buyer: ${session?.title || 'Customer'} (Buyer ID: ${session?.buyer_id || 'N/A'})
 
 Buyer Order Status:
 ${buyerOrdersContext}
+${orderDiscrepancyContext}
 
 ${productKnowledgeContext}
 
@@ -1452,9 +1476,12 @@ Strict Guidelines for Response:
 1. Talk like a friendly human customer service agent. Keep responses short (under 2-3 sentences).
 2. If the customer asks about price or cost (e.g. "price kati xa?", "rate kati ho?", "kati parxa?", "how much is this?"), refer directly to "Current Listed Price" above and state the price clearly and politely (e.g. "Hajur, yo product ko price Rs. 1,290 ho.").
 3. If customer asks about order status or delivery date, check the Buyer Order Status above.
-4. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
-5. If the customer sends vague prompts or marks like "??" or greetings, respond politely acknowledging their interest in the product and ask how you can help them with their order.
-6. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
+4. ORDER DAMAGE VS SHIPPED/PENDING STATUS: If customer claims product damage/defect but the order status is currently "Shipped", "Ready to Ship", or "Pending" (not delivered), politely ask if they have already received the parcel because our system still shows it as "Shipped", and state our team will investigate. Append "[ACTION:HANDOVER_TO_HUMAN]".
+5. RETURN & REFUND POLICY: If customer asks to return, refund, or claims wrong/defective item, state that Bagmati Traders carefully inspects and double-checks every parcel to dispatch the exact authentic item ordered. If damaged during courier transit, ask for unboxing photos/videos so our team can investigate and solve it. Append "[ACTION:HANDOVER_TO_HUMAN]".
+6. DIRECT / OFFLINE DELIVERY OR ADDRESS & PHONE NUMBER SENT IN CHAT: If customer sends a location/address or phone number asking to send or deliver to them, politely explain that per Daraz platform rules, all orders must be placed directly by the customer on the Daraz app/website by entering their delivery location and phone number. We cannot deliver or process orders outside the Daraz platform. Instruct them to confirm their order on Daraz.
+7. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
+8. If the customer sends vague prompts or marks like "??" or greetings, respond politely acknowledging their interest in the product and ask how you can help them with their order.
+9. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
    Reply with:
    "Hamro team le yo barema check garera xittai tapailai jankari garaunecha. / Our team will check this specific detail and update you shortly."
    and append "[ACTION:HANDOVER_TO_HUMAN]" at the very end.
@@ -1480,11 +1507,16 @@ Response:`
 
                 if (isHandover) {
                     const pausedUntil = new Date(Date.now() + cooldownHours * 60 * 60 * 1000).toISOString()
+                    let handoverReason = `Customer query requires human attention: "${userText.substring(0, 50)}"`
+                    if (orderDiscrepancyContext) handoverReason = `Damage claim while order in non-delivered status: "${userText.substring(0, 50)}"`
+                    else if (isReturnRefundRequest) handoverReason = `Return/refund request: "${userText.substring(0, 50)}"`
+                    else if (isDamageComplaint) handoverReason = `Product damage/defect claim: "${userText.substring(0, 50)}"`
+
                     await supabase
                         .from('daraz_chat_sessions')
                         .update({
                             is_urgent: true,
-                            urgent_reason: `Unanswered product query: "${userText.substring(0, 50)}"`,
+                            urgent_reason: handoverReason,
                             ai_paused_until: pausedUntil,
                             updated_at: new Date().toISOString()
                         })
