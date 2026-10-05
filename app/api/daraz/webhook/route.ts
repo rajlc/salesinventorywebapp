@@ -353,6 +353,7 @@ export async function POST(request: NextRequest) {
                     if (shouldAutoReply) {
                         try {
                             await processIncomingMessageAutoReply(storeId, sessionId, {
+                                message_id: String(messageId || ''),
                                 content: msgContent,
                                 from_account_type: fromAccountType,
                                 send_time: String(sendTime)

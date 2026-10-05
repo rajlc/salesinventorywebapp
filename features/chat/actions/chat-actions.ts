@@ -90,17 +90,15 @@ export async function getGlobalAiIntegrationInfo() {
 }
 
 // Robust Google Gemini caller with candidate fallback
-async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-3.5-flash', isJson = false): Promise<string> {
+async function callGeminiApi(apiKey: string, promptText: string, preferredModel = 'gemini-3.5-flash-lite', isJson = false): Promise<string> {
     const candidates = Array.from(new Set([
         preferredModel,
-        'gemini-3.5-flash',
         'gemini-3.5-flash-lite',
-        'gemini-3.1-flash-lite',
-        'gemini-3-flash-preview',
-        'gemini-3.6-flash',
-        'gemini-3.8-flash',
+        'gemini-flash-latest',
         'gemini-3.7-flash',
-        'gemini-flash-latest'
+        'gemini-3.1-flash-lite',
+        'gemini-3.8-flash',
+        'gemini-3.5-flash'
     ].filter(Boolean)))
 
     let lastError = ''
@@ -534,6 +532,7 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
 
                 if (isBuyer && isRecent) {
                     await processIncomingMessageAutoReply(storeId, sessionId, {
+                        message_id: String(msg.message_id || ''),
                         content: String(msg.content),
                         from_account_type: String(msg.from_account_type),
                         send_time: String(msg.send_time)
@@ -1209,6 +1208,7 @@ Instructions:
 
 // 10. Auto Reply processing (AI, RAG Knowledge Base & Keyword Matching rules)
 export interface DarazMessage {
+    message_id?: string
     content: string
     from_account_type: string | number
     send_time: string | number
@@ -1218,6 +1218,18 @@ export interface DarazMessage {
 // Daraz fires several webhook events at once (text + order card + welcome message) or the
 // manual sync runs in parallel. Uses an atomic insert on app_settings(key) as a cross-instance lock.
 export async function processIncomingMessageAutoReply(storeId: string, sessionId: string, msg: DarazMessage) {
+    const supabase = await createAdminClient()
+
+    // 0. Deduplicate by message_id if available to prevent double processing across webhook and sync
+    if (msg.message_id) {
+        const markerKey = `ai_replied_msg_${msg.message_id}`
+        const { data: alreadyReplied } = await supabase.from('app_settings').select('key').eq('key', markerKey).maybeSingle()
+        if (alreadyReplied) {
+            console.log(`[AutoReply] Message ${msg.message_id} was already processed/replied to, skipping duplicate.`)
+            return
+        }
+    }
+
     // 1. Ignore non-text events (order cards / product cards / follow cards / greetings) as reply triggers
     let extractedUserText = ''
     try {
@@ -1251,7 +1263,6 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
         return
     }
 
-    const supabase = await createAdminClient()
     const lockKey = `ai_reply_lock_${sessionId}`
 
     // 2. Acquire atomic lock (key is unique). Break stale locks older than 60s.
@@ -1273,7 +1284,7 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
     }
 
     try {
-        // 3. Prevent duplicate replies: check if the latest message in this session is already an AI auto-reply
+        // 3. Prevent duplicate replies: check if the latest message in this session is already from Seller (from_account_type = '2')
         const { data: latestMsgs } = await supabase
             .from('daraz_chat_messages')
             .select('message_id, from_account_type, auto_reply, template_id, send_time')
@@ -1282,12 +1293,20 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
             .limit(2)
 
         const topMsg = latestMsgs?.[0]
-        if (topMsg && topMsg.auto_reply === true && String(topMsg.from_account_type) === '2') {
-            console.log(`[AutoReply] Latest message in session ${sessionId} is already an AI auto-reply, skipping duplicate.`)
+        if (topMsg && String(topMsg.from_account_type) === '2') {
+            console.log(`[AutoReply] Latest message in session ${sessionId} is already from seller/AI, skipping duplicate reply.`)
             return
         }
 
         await runAutoReply(storeId, sessionId, msg)
+
+        // Mark this message as replied to prevent any parallel sync or re-poll from replying again
+        if (msg.message_id) {
+            await supabase.from('app_settings').upsert({
+                key: `ai_replied_msg_${msg.message_id}`,
+                value: { replied_at: Date.now(), session_id: sessionId }
+            })
+        }
     } finally {
         await supabase.from('app_settings').delete().eq('key', lockKey)
     }
@@ -1396,14 +1415,7 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
 
             console.log(`[AutoReply] Triggering AI (${effectiveAi.provider}, model: ${effectiveAi.model}) for message: "${userText}"`)
 
-            // 1. Check Product Card or Active Order Item for Product Context
-            const { data: sessionMsgs } = await supabase
-                .from('daraz_chat_messages')
-                .select('template_id, content')
-                .eq('session_id', sessionId)
-                .order('send_time', { ascending: false })
-                .limit(10)
-
+            // 1. Check Product Card (template_id = '10006') or recent messages for Product Context
             let targetItemId: string | null = null
             let targetProductTitle: string | null = null
             let targetProductPrice: string | null = null
@@ -1411,21 +1423,55 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
             let targetProductUrl: string | null = null
             let targetProductSku: string | null = null
 
-            if (sessionMsgs) {
-                for (const sm of sessionMsgs) {
-                    if (String(sm.template_id) === '10006' && sm.content) {
-                        try {
-                            const p = JSON.parse(sm.content)
-                            if (p.itemId || p.item_id) {
-                                targetItemId = String(p.itemId || p.item_id)
-                                targetProductTitle = p.title || targetProductTitle
-                                targetProductPrice = p.price || p.item_price || p.special_price || p.newProduct?.voucherPrice || targetProductPrice
-                                targetProductOldPrice = p.oldPrice || p.originalPrice || targetProductOldPrice
-                                targetProductUrl = p.actionUrl || targetProductUrl
-                                targetProductSku = p.skuId || p.sku || targetProductSku
-                                break
-                            }
-                        } catch {}
+            // First check the latest product card directly in this session
+            const { data: directCard } = await supabase
+                .from('daraz_chat_messages')
+                .select('content')
+                .eq('session_id', sessionId)
+                .eq('template_id', '10006')
+                .order('send_time', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+
+            if (directCard?.content) {
+                try {
+                    const p = JSON.parse(directCard.content)
+                    if (p.itemId || p.item_id) {
+                        targetItemId = String(p.itemId || p.item_id)
+                        targetProductTitle = p.title || null
+                        targetProductPrice = p.price || p.item_price || p.special_price || p.newProduct?.voucherPrice || null
+                        targetProductOldPrice = p.oldPrice || p.originalPrice || null
+                        targetProductUrl = p.actionUrl || null
+                        targetProductSku = p.skuId || p.sku || null
+                    }
+                } catch {}
+            }
+
+            // Fallback: search last 10 messages if direct card lookup had no item ID
+            if (!targetItemId) {
+                const { data: sessionMsgs } = await supabase
+                    .from('daraz_chat_messages')
+                    .select('template_id, content')
+                    .eq('session_id', sessionId)
+                    .order('send_time', { ascending: false })
+                    .limit(10)
+
+                if (sessionMsgs) {
+                    for (const sm of sessionMsgs) {
+                        if (String(sm.template_id) === '10006' && sm.content) {
+                            try {
+                                const p = JSON.parse(sm.content)
+                                if (p.itemId || p.item_id) {
+                                    targetItemId = String(p.itemId || p.item_id)
+                                    targetProductTitle = p.title || targetProductTitle
+                                    targetProductPrice = p.price || p.item_price || p.special_price || p.newProduct?.voucherPrice || targetProductPrice
+                                    targetProductOldPrice = p.oldPrice || p.originalPrice || targetProductOldPrice
+                                    targetProductUrl = p.actionUrl || targetProductUrl
+                                    targetProductSku = p.skuId || p.sku || targetProductSku
+                                    break
+                                }
+                            } catch {}
+                        }
                     }
                 }
             }
@@ -1491,21 +1537,39 @@ CRITICAL ORDER STATUS & DAMAGE DISCREPANCY:
             let targetProductData: any = null
             let targetProductQAs: ProductQA[] = []
 
-            if (targetItemId) {
-                const { data: prod } = await supabase
-                    .from('products')
-                    .select('id, product_name, product_title, highlights, description, special_price, regular_price, daraz_product_url, seller_sku1')
-                    .or(`daraz_product_url.ilike.%-i${targetItemId}-%,seller_sku1.ilike.${targetItemId}%`)
-                    .maybeSingle()
+            if (targetItemId || targetProductSku) {
+                const conditions: string[] = []
+                if (targetProductSku) {
+                    conditions.push(`seller_sku1.ilike.%${targetProductSku}%`)
+                    conditions.push(`daraz_product_url.ilike.%-s${targetProductSku}.%`)
+                }
+                if (targetItemId) {
+                    conditions.push(`daraz_product_url.ilike.%-i${targetItemId}-%`)
+                    conditions.push(`seller_sku1.ilike.${targetItemId}%`)
+                }
 
-                targetProductData = prod
-                targetProductQAs = await getProductQAs({ darazItemId: targetItemId, productId: prod?.id })
+                if (conditions.length > 0) {
+                    const { data: prods } = await supabase
+                        .from('products')
+                        .select('id, product_name, product_title, highlights, description, special_price, regular_price, daraz_product_url, seller_sku1')
+                        .or(conditions.join(','))
+                        .limit(1)
+
+                    if (prods && prods.length > 0) {
+                        targetProductData = prods[0]
+                    }
+                }
+
+                targetProductQAs = await getProductQAs({ 
+                    darazItemId: targetItemId || undefined, 
+                    productId: targetProductData?.id 
+                })
             }
 
             let productKnowledgeContext = ''
             if (targetProductData || targetItemId || targetProductTitle) {
-                const cleanH = stripHtml(targetProductData?.highlights)
-                const cleanD = stripHtml(targetProductData?.description).substring(0, 400)
+                const cleanH = stripHtml(targetProductData?.highlights).substring(0, 3000)
+                const cleanD = stripHtml(targetProductData?.description).substring(0, 3000)
                 const resolvedPrice = targetProductData?.special_price 
                     ? `Rs. ${targetProductData.special_price}` 
                     : (targetProductData?.regular_price ? `Rs. ${targetProductData.regular_price}` : (targetProductPrice || 'N/A'))
@@ -1574,11 +1638,11 @@ Strict Guidelines for Response:
 4. ORDER DAMAGE VS SHIPPED/PENDING STATUS: If customer claims product damage/defect but the order status is currently "Shipped", "Ready to Ship", or "Pending" (not delivered), politely ask if they have already received the parcel because our system still shows it as "Shipped", and state our team will investigate. Append "[ACTION:HANDOVER_TO_HUMAN]".
 5. RETURN & REFUND POLICY: If customer asks to return, refund, or claims wrong/defective item, state that Bagmati Traders carefully inspects and double-checks every parcel to dispatch the exact authentic item ordered. If damaged during courier transit, ask for unboxing photos/videos so our team can investigate and solve it. Append "[ACTION:HANDOVER_TO_HUMAN]".
 6. DIRECT / OFFLINE DELIVERY OR ADDRESS & PHONE NUMBER SENT IN CHAT: If customer sends a location/address or phone number asking to send or deliver to them, politely explain that per Daraz platform rules, all orders must be placed directly by the customer on the Daraz app/website by entering their delivery location and phone number. We cannot deliver or process orders outside the Daraz platform. Instruct them to confirm their order on Daraz.
-7. If customer asks about product specifications (color, size, material, warranty), check the Verified Product Q&A and Specifications above.
+7. PRODUCT SPECIFICATIONS (RECHARGEABLE, BATTERY, CHARGER, MATERIALS, SPECS): If customer asks about product specifications (e.g. "yo rechargeable ho?", battery, charging, USB cable, color, size, material, warranty), check both "Specifications & Highlights" and "Description Summary" above. If the information is present in either, answer accurately, politely, and directly in Nepali or English.
 8. If the customer sends vague prompts or marks like "??" or greetings, respond politely acknowledging their interest in the product and ask how you can help them with their order.
-9. CRITICAL RULE: If the customer asks a specific question about product features, dimensions, color, or material that is NOT answered in the Verified Product Q&A or Specifications above, DO NOT GUESS OR INVENT FACTS.
+9. CRITICAL RULE: Only if the customer asks a specific question about product features, dimensions, or compatibility that is TRULY NOT mentioned anywhere in the Specifications & Highlights, Description Summary, or Verified Q&A, DO NOT GUESS OR INVENT FACTS.
    Reply with:
-   "Hamro team le yo barema check garera xittai tapailai jankari garaunecha. / Our team will check this specific detail and update you shortly."
+   "Hajur, yo barema hamro team le warehouse/stock ma verify garera chhitai update garnechha. / Thank you for your inquiry. Our support team will verify this specific detail and update you shortly."
    and append "[ACTION:HANDOVER_TO_HUMAN]" at the very end.
 Response:`
 
