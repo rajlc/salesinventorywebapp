@@ -6,7 +6,7 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { getProductQAs, type ProductQA } from './product-qa-actions'
 
-import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, isClosingAcknowledgment, type EffectiveAiConfig } from '../constants'
+import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, DEFAULT_CUTOFF_PHRASES, isClosingAcknowledgment, type EffectiveAiConfig } from '../constants'
 
 function stripHtml(html: string | null | undefined): string {
     if (!html) return ''
@@ -834,6 +834,100 @@ export async function updateMessageTags(messageId: string, tags: string[]) {
     return { success: true }
 }
 
+// 7.1 Manage AI Cut-Off Phrases & Emojis
+export async function getAiCutoffPhrases(storeId?: string): Promise<string[]> {
+    try {
+        const supabase = await createAdminClient()
+
+        if (storeId) {
+            const { data: storeRow } = await supabase
+                .from('app_settings')
+                .select('value')
+                .eq('key', `daraz_chat_cutoff_phrases_${storeId}`)
+                .maybeSingle()
+
+            if (storeRow?.value?.phrases && Array.isArray(storeRow.value.phrases) && storeRow.value.phrases.length > 0) {
+                return storeRow.value.phrases
+            }
+        }
+
+        const { data: globalRow } = await supabase
+            .from('app_settings')
+            .select('value')
+            .eq('key', 'daraz_chat_cutoff_phrases')
+            .maybeSingle()
+
+        if (globalRow?.value?.phrases && Array.isArray(globalRow.value.phrases) && globalRow.value.phrases.length > 0) {
+            return globalRow.value.phrases
+        }
+
+        return DEFAULT_CUTOFF_PHRASES
+    } catch (err) {
+        console.error('[CutOffPhrases] Error fetching cut-off phrases, using defaults:', err)
+        return DEFAULT_CUTOFF_PHRASES
+    }
+}
+
+export async function saveAiCutoffPhrases(phrases: string[], storeId?: string): Promise<{ success: boolean; phrases: string[] }> {
+    const supabase = await createAdminClient()
+
+    // Clean and deduplicate phrases
+    const cleanPhrases = Array.from(
+        new Set(
+            phrases
+                .map(p => (typeof p === 'string' ? p.trim() : ''))
+                .filter(Boolean)
+        )
+    )
+
+    const now = new Date().toISOString()
+    const payload = {
+        phrases: cleanPhrases,
+        updated_at: now
+    }
+
+    // Always persist to global default
+    const { error: globalErr } = await supabase
+        .from('app_settings')
+        .upsert({
+            key: 'daraz_chat_cutoff_phrases',
+            value: payload,
+            updated_at: now
+        }, { onConflict: 'key' })
+
+    if (globalErr) {
+        console.error('[CutOffPhrases] Error saving global cut-off phrases:', globalErr)
+        throw new Error(globalErr.message)
+    }
+
+    // If storeId is provided, also persist for this store
+    if (storeId) {
+        const { error: storeErr } = await supabase
+            .from('app_settings')
+            .upsert({
+                key: `daraz_chat_cutoff_phrases_${storeId}`,
+                value: payload,
+                updated_at: now
+            }, { onConflict: 'key' })
+
+        if (storeErr) {
+            console.error('[CutOffPhrases] Error saving store cut-off phrases:', storeErr)
+            throw new Error(storeErr.message)
+        }
+    }
+
+    try {
+        revalidatePath('/dashboard/chat-ai')
+    } catch {
+        // Safe when invoked outside Next.js request context (e.g. tests, cron)
+    }
+    return { success: true, phrases: cleanPhrases }
+}
+
+export async function resetAiCutoffPhrases(storeId?: string): Promise<{ success: boolean; phrases: string[] }> {
+    return saveAiCutoffPhrases(DEFAULT_CUTOFF_PHRASES, storeId)
+}
+
 // 8. Manage Rules (Keyword / Exact match templates)
 export async function getChatRules(storeId: string) {
     const supabase = await createAdminClient()
@@ -1233,8 +1327,9 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
         if (!cleanText) return
 
         // 0.1 End of Conversation Cut-Off: If customer sends pure closing acknowledgment (e.g. "Okay", "hunxa", "dhanyabad", "thank you", "huss", "👍"), do not reply
-        if (isClosingAcknowledgment(cleanText)) {
-            console.log(`[AutoReply] Customer sent closing acknowledgment ("${cleanText}"), ending conversation gracefully without reply.`)
+        const cutoffPhrases = await getAiCutoffPhrases(storeId)
+        if (isClosingAcknowledgment(userText, cutoffPhrases)) {
+            console.log(`[AutoReply] Customer sent closing acknowledgment ("${userText}"), ending conversation gracefully without reply.`)
             return
         }
 

@@ -73,45 +73,144 @@ export function extractDarazItemId(url?: string | null, sku?: string | null): st
     return null
 }
 
+export const DEFAULT_CUTOFF_PHRASES: string[] = [
+    // Nepali affirmations & closings
+    'ok',
+    'okay',
+    'okk',
+    'la ok',
+    'hunxa',
+    'hunchha',
+    'huncha',
+    'huss',
+    'hus',
+    'huss hajur',
+    'hunxa hajur',
+    'thik xa',
+    'thik cha',
+    'thik chha',
+    'thik xa hajur',
+    'thikai xa',
+    'bujhe',
+    'bujhey',
+    'dhanyabad',
+    'dhanyabaad',
+    'dhanyabad hajur',
+    // English closings & pleasantries
+    'thanks',
+    'thank you',
+    'thank you so much',
+    'thx',
+    'tq',
+    'alright',
+    'noted',
+    'got it',
+    'sure',
+    'fine',
+    'cool',
+    'done',
+    'great',
+    'bye',
+    'goodbye',
+    'good night',
+    'take care',
+    // Popular emoji reactions
+    '👍',
+    '🙏',
+    '👌',
+    '❤️',
+    '😊',
+    '🤝',
+    '🙌',
+    '✨',
+    '💐',
+    '👋'
+]
+
 /**
  * Detects whether a customer message is purely a closing acknowledgment / pleasantry
- * (e.g. "Okay", "ok", "hunxa", "hunchha", "huss", "thik xa", "dhanyabad", "thank you", "thanks", "bye", "👍")
+ * (e.g. "Okay", "ok", "hunxa", "hunchha", "huss", "thik xa", "dhanyabad", "thank you", "thanks", "bye", "👍", "🙏")
  * so the AI agent does not send redundant messages and can end the conversation gracefully.
+ *
+ * Supports user-configured phrases and emojis from AI & Automation settings.
  */
-export function isClosingAcknowledgment(text?: string | null): boolean {
+export function isClosingAcknowledgment(text?: string | null, customPhrases?: string[] | null): boolean {
     if (!text || typeof text !== 'string') return false
 
     const trimmed = text.trim()
     if (!trimmed) return false
 
-    // Check pure emojis / punctuation
-    if (/^[👍👌🙏😊❤️✨🎉🙌\s.,!?:;]+$/u.test(trimmed)) {
-        return true
+    // Never cut off if the message contains question marks or inquiry keywords
+    if (/[?？]/.test(trimmed)) return false
+    if (/\b(kina|kahile|kati|kasto|kun|khoi|where|when|how|why|price|mol|cost)\b/i.test(trimmed)) return false
+    if (/\b(damage|broken|bigriyo|vachiyo|return|refund|cancel|change|fernu|sattnu|pathaunu|deliver|status)\b/i.test(trimmed)) return false
+
+    const activeList = Array.isArray(customPhrases) && customPhrases.length > 0
+        ? customPhrases
+        : DEFAULT_CUTOFF_PHRASES
+
+    const emojiRegex = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}]/gu
+
+    // Extract text phrases and emojis from active list
+    const emojis = activeList.filter(item => !/[a-zA-Z0-9\u0900-\u097F]/.test(item)).map(e => e.trim()).filter(Boolean)
+    const textPhrases = activeList
+        .filter(item => /[a-zA-Z0-9\u0900-\u097F]/.test(item))
+        .map(p => p.toLowerCase().trim())
+        .filter(Boolean)
+
+    // 1. Pure Emoji check (message composed only of emojis, spaces, and mild punctuation)
+    const withoutPunct = trimmed.replace(/[.,!?:;\-_~'"`()/\s]/g, '')
+    if (withoutPunct.length > 0 && withoutPunct.replace(emojiRegex, '').length === 0) {
+        // If message is purely emojis: check if at least one matches our emoji list or standard reaction set
+        if (emojis.length > 0) {
+            const hasConfiguredEmoji = emojis.some(e => trimmed.includes(e))
+            if (hasConfiguredEmoji) return true
+        }
+        if (/^[👍👌🙏😊❤️✨🎉🙌🤝💐👋\s.,!?:;~]+$/u.test(trimmed)) {
+            return true
+        }
     }
 
+    // 2. Clean text
     const clean = trimmed
         .toLowerCase()
         .replace(/[.,!?:;\-_~'"`()]/g, ' ')
-        .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
+        .replace(emojiRegex, '')
         .replace(/\s+/g, ' ')
         .trim()
 
-    if (!clean) return true
+    if (!clean) {
+        return true
+    }
 
+    // 3. Exact match against configured phrase (e.g. "thik xa hajur", "thank you so much")
+    if (textPhrases.includes(clean)) {
+        return true
+    }
+
+    // 4. Token-based matching for short closing statements (<= 5 words)
     const words = clean.split(' ')
     if (words.length > 5) return false
 
-    const closingTokens = new Set([
+    // Build closing token set dynamically from all textPhrases + polite Nepali/English address suffixes
+    const tokenSet = new Set([
         'la', 'ok', 'okay', 'okk', 'okey', 'k', 'kk',
         'alright', 'all', 'right', 'noted', 'got', 'it', 'sure', 'fine', 'cool', 'done', 'great',
         'huss', 'hus', 'hunxa', 'hunchha', 'huncha', 'bujhe', 'bujhey',
         'thik', 'xa', 'cha', 'chha', 'thikai',
         'dhanyabad', 'dhanyabaad', 'thanks', 'thank', 'you', 'u', 'thx', 'tq', 'so', 'much', 'a', 'lot',
         'bye', 'goodbye', 'good', 'take', 'care', 'tc', 'night',
-        'hajur', 'sir', 'maam', 'didi', 'bhai'
+        'hajur', 'sir', 'maam', 'madam', 'didi', 'dai', 'bhai', 'bro', 'ji', 'ho', 'ta'
     ])
 
-    return words.every(w => closingTokens.has(w))
+    for (const phrase of textPhrases) {
+        for (const token of phrase.split(' ')) {
+            if (token.trim()) tokenSet.add(token.trim())
+        }
+    }
+
+    return words.every(w => tokenSet.has(w))
 }
+
 
 

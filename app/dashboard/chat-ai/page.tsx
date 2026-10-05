@@ -16,9 +16,12 @@ import {
     toggleSessionUrgent,
     generateSessionAiAnalysisAction,
     getGlobalAiIntegrationInfo,
+    getAiCutoffPhrases,
+    saveAiCutoffPhrases,
+    resetAiCutoffPhrases,
     type ChatSettings
 } from '@/features/chat/actions/chat-actions'
-import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, extractDarazItemId } from '@/features/chat/constants'
+import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, DEFAULT_CUTOFF_PHRASES, extractDarazItemId } from '@/features/chat/constants'
 import {
     getProductQAs,
     addProductQA,
@@ -34,6 +37,8 @@ import {
 import { updateDarazOrderRemarks } from '@/features/sales/actions/daraz-actions'
 import {
     MessageSquare,
+    MessageSquareOff,
+    Smile,
     Cpu,
     Send,
     Tag,
@@ -304,6 +309,15 @@ function ChatAiDashboardContent() {
     const [settingsCategoryTab, setSettingsCategoryTab] = useState<'positive' | 'neutral' | 'negative'>('positive')
     const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
 
+    // AI Cut-off phrases & emojis state
+    const [cutoffPhrases, setCutoffPhrases] = useState<string[]>([])
+    const [loadingCutoffPhrases, setLoadingCutoffPhrases] = useState(false)
+    const [savingCutoffPhrases, setSavingCutoffPhrases] = useState(false)
+    const [newCutoffInput, setNewCutoffInput] = useState('')
+    const [editingCutoffIndex, setEditingCutoffIndex] = useState<number | null>(null)
+    const [editingCutoffValue, setEditingCutoffValue] = useState('')
+    const [cutoffSearchFilter, setCutoffSearchFilter] = useState('')
+
     // Loaders
     const [loadingSessions, setLoadingSessions] = useState(false)
     const [loadingMessages, setLoadingMessages] = useState(false)
@@ -449,6 +463,15 @@ function ChatAiDashboardContent() {
                 // Fetch Rules
                 const ruleList = await getChatRules(activeStoreId)
                 setRules(ruleList)
+
+                // Fetch AI Cut-off Phrases & Emojis
+                setLoadingCutoffPhrases(true)
+                try {
+                    const phrases = await getAiCutoffPhrases(activeStoreId)
+                    setCutoffPhrases(phrases)
+                } finally {
+                    setLoadingCutoffPhrases(false)
+                }
             } catch (err) {
                 console.error('Failed to load store chat configurations:', err)
             }
@@ -801,6 +824,88 @@ function ChatAiDashboardContent() {
             toast.error(errorMsg)
         } finally {
             setSavingSettings(false)
+        }
+    }
+
+    // Handlers for AI Cut-off phrases & emojis
+    const handleAddCutoffPhrase = async (rawInput?: string) => {
+        const itemToAdd = (rawInput !== undefined ? rawInput : newCutoffInput).trim()
+        if (!itemToAdd) return
+
+        // Prevent duplicate (case-insensitive for text)
+        if (cutoffPhrases.some(p => p.toLowerCase() === itemToAdd.toLowerCase())) {
+            toast.info(`"${itemToAdd}" is already in the cut-off list`)
+            setNewCutoffInput('')
+            return
+        }
+
+        const updated = [...cutoffPhrases, itemToAdd]
+        setCutoffPhrases(updated)
+        setNewCutoffInput('')
+
+        setSavingCutoffPhrases(true)
+        try {
+            await saveAiCutoffPhrases(updated, activeStoreId)
+            toast.success(`Added "${itemToAdd}" to cut-off list!`)
+        } catch {
+            toast.error('Failed to save cut-off phrase')
+        } finally {
+            setSavingCutoffPhrases(false)
+        }
+    }
+
+    const handleRemoveCutoffPhrase = async (phraseToRemove: string) => {
+        const updated = cutoffPhrases.filter(p => p !== phraseToRemove)
+        setCutoffPhrases(updated)
+        setSavingCutoffPhrases(true)
+        try {
+            await saveAiCutoffPhrases(updated, activeStoreId)
+            toast.success(`Removed "${phraseToRemove}"`)
+        } catch {
+            toast.error('Failed to update cut-off list')
+        } finally {
+            setSavingCutoffPhrases(false)
+        }
+    }
+
+    const handleSaveEditCutoffPhrase = async (index: number) => {
+        const val = editingCutoffValue.trim()
+        if (!val) {
+            setEditingCutoffIndex(null)
+            return
+        }
+
+        const updated = [...cutoffPhrases]
+        updated[index] = val
+        const unique = Array.from(new Set(updated))
+        setCutoffPhrases(unique)
+        setEditingCutoffIndex(null)
+        setEditingCutoffValue('')
+
+        setSavingCutoffPhrases(true)
+        try {
+            await saveAiCutoffPhrases(unique, activeStoreId)
+            toast.success('Cut-off item updated!')
+        } catch {
+            toast.error('Failed to save update')
+        } finally {
+            setSavingCutoffPhrases(false)
+        }
+    }
+
+    const handleResetCutoffDefaults = async () => {
+        if (!confirm('Reset all cut-off phrases and emojis to recommended defaults?')) return
+        setSavingCutoffPhrases(true)
+        try {
+            const res = await resetAiCutoffPhrases(activeStoreId)
+            if (res.success) {
+                setCutoffPhrases(res.phrases)
+                toast.success('✨ Restored recommended cut-off phrases and emojis!')
+            }
+        } catch {
+            toast.error('Failed to reset defaults')
+        } finally {
+            setSavingCutoffPhrases(false)
         }
     }
 
@@ -2851,60 +2956,284 @@ function ChatAiDashboardContent() {
                             </div>
                         </div>
 
-                        {/* Order Automation configuration */}
-                        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-5 shadow-sm space-y-4">
-                            <div className="flex items-center gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
-                                <ShoppingBag className="text-indigo-600" size={20} />
-                                <h2 className="text-base font-bold text-zinc-800 dark:text-zinc-100">New Order Automation</h2>
+                        {/* Right column: Order Automation & AI Conversation Cut-Off */}
+                        <div className="space-y-6">
+                            {/* Order Automation configuration */}
+                            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-5 shadow-sm space-y-4">
+                                <div className="flex items-center gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
+                                    <ShoppingBag className="text-indigo-600" size={20} />
+                                    <h2 className="text-base font-bold text-zinc-800 dark:text-zinc-100">New Order Automation</h2>
+                                </div>
+
+                                <div className="space-y-4">
+                                    {/* Toggle switch */}
+                                    <div className="flex justify-between items-center">
+                                        <div>
+                                            <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Auto-Message on New Order</h3>
+                                            <p className="text-[11px] text-zinc-500">Queue a greeting + follow invitation card when a new order is received.</p>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={currentStoreSettings.auto_reply_on_new_order || false}
+                                            onChange={(e) => handleSaveSettings({ auto_reply_on_new_order: e.target.checked })}
+                                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-zinc-300 rounded cursor-pointer"
+                                        />
+                                    </div>
+
+                                    {/* Delay Minutes input */}
+                                    <div className="space-y-1.5">
+                                        <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
+                                            <Clock size={12} /> Message Delay Time (Minutes)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="60"
+                                            value={currentStoreSettings.new_order_delay_minutes ?? 1}
+                                            onChange={(e) => handleSaveSettings({ new_order_delay_minutes: parseInt(e.target.value) || 0 })}
+                                            className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-1.5 text-sm w-32 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    {/* Text Template */}
+                                    <div className="space-y-1.5">
+                                        <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
+                                            Greeting Text Template
+                                        </label>
+                                        <textarea
+                                            rows={3}
+                                            value={currentStoreSettings.new_order_template || ''}
+                                            onChange={(e) => setStoreSettings(prev => ({
+                                                ...prev,
+                                                [activeStoreId]: { ...prev[activeStoreId], new_order_template: e.target.value }
+                                            }))}
+                                            onBlur={() => handleSaveSettings({ new_order_template: currentStoreSettings.new_order_template })}
+                                            className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg p-3 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
+                                            placeholder="Enter the template to send to new buyers..."
+                                        />
+                                        <p className="text-[10px] text-zinc-400">Note: The &quot;Follow Our Store&quot; invitation button will be appended automatically below this message.</p>
+                                    </div>
+                                </div>
                             </div>
 
-                            <div className="space-y-4">
-                                {/* Toggle switch */}
-                                <div className="flex justify-between items-center">
-                                    <div>
-                                        <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Auto-Message on New Order</h3>
-                                        <p className="text-[11px] text-zinc-500">Queue a greeting + follow invitation card when a new order is received.</p>
+                            {/* AI Conversation Cut-off (Phrases & Emojis) */}
+                            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-5 shadow-sm space-y-4">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
+                                    <div className="flex items-center gap-2">
+                                        <MessageSquareOff className="text-amber-500" size={20} />
+                                        <div>
+                                            <h2 className="text-base font-bold text-zinc-800 dark:text-zinc-100 flex items-center gap-2">
+                                                AI Conversation Cut-Off
+                                                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900/60">
+                                                    {cutoffPhrases.length} Active
+                                                </span>
+                                            </h2>
+                                            <p className="text-[11px] text-zinc-500">
+                                                AI stops replying when buyers send closing words, pleasantries, or emojis.
+                                            </p>
+                                        </div>
                                     </div>
-                                    <input
-                                        type="checkbox"
-                                        checked={currentStoreSettings.auto_reply_on_new_order || false}
-                                        onChange={(e) => handleSaveSettings({ auto_reply_on_new_order: e.target.checked })}
-                                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-zinc-300 rounded cursor-pointer"
-                                    />
+
+                                    <button
+                                        type="button"
+                                        onClick={handleResetCutoffDefaults}
+                                        disabled={savingCutoffPhrases}
+                                        className="px-2.5 py-1 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-lg border border-zinc-200 dark:border-zinc-700 flex items-center gap-1.5 shadow-2xs transition-all active:scale-95 cursor-pointer disabled:opacity-50"
+                                        title="Reset to recommended default cut-off words and emojis"
+                                    >
+                                        <RefreshCw size={11} className={savingCutoffPhrases ? 'animate-spin' : ''} />
+                                        Reset Defaults
+                                    </button>
                                 </div>
 
-                                {/* Delay Minutes input */}
+                                {/* Quick-Add Popular Emojis Bar */}
                                 <div className="space-y-1.5">
-                                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
-                                        <Clock size={12} /> Message Delay Time (Minutes)
+                                    <label className="text-[11px] font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
+                                        <Smile size={12} className="text-amber-500" />
+                                        Quick Add Emojis
                                     </label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max="60"
-                                        value={currentStoreSettings.new_order_delay_minutes ?? 1}
-                                        onChange={(e) => handleSaveSettings({ new_order_delay_minutes: parseInt(e.target.value) || 0 })}
-                                        className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-1.5 text-sm w-32 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                    />
+                                    <div className="flex flex-wrap gap-1.5 p-2 bg-zinc-50 dark:bg-zinc-950 rounded-lg border border-zinc-200/60 dark:border-zinc-800">
+                                        {['👍', '🙏', '👌', '❤️', '😊', '🤝', '🙌', '✨', '💐', '👋', '🫡', '👏', '🥰', '💯'].map(emoji => {
+                                            const isAdded = cutoffPhrases.includes(emoji)
+                                            return (
+                                                <button
+                                                    key={emoji}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (isAdded) {
+                                                            handleRemoveCutoffPhrase(emoji)
+                                                        } else {
+                                                            handleAddCutoffPhrase(emoji)
+                                                        }
+                                                    }}
+                                                    disabled={savingCutoffPhrases}
+                                                    className={`text-base w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer ${
+                                                        isAdded
+                                                            ? 'bg-amber-100 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 shadow-2xs scale-105'
+                                                            : 'bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-800 opacity-60 hover:opacity-100'
+                                                    }`}
+                                                    title={isAdded ? `Click to remove "${emoji}"` : `Click to add "${emoji}"`}
+                                                >
+                                                    {emoji}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
                                 </div>
 
-                                {/* Text Template */}
-                                <div className="space-y-1.5">
-                                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
-                                        Greeting Text Template
-                                    </label>
-                                    <textarea
-                                        rows={3}
-                                        value={currentStoreSettings.new_order_template || ''}
-                                        onChange={(e) => setStoreSettings(prev => ({
-                                            ...prev,
-                                            [activeStoreId]: { ...prev[activeStoreId], new_order_template: e.target.value }
-                                        }))}
-                                        onBlur={() => handleSaveSettings({ new_order_template: currentStoreSettings.new_order_template })}
-                                        className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg p-3 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
-                                        placeholder="Enter the template to send to new buyers..."
+                                {/* Add Custom Word or Emoji Input */}
+                                <form
+                                    onSubmit={(e) => {
+                                        e.preventDefault()
+                                        handleAddCutoffPhrase()
+                                    }}
+                                    className="flex gap-2"
+                                >
+                                    <input
+                                        type="text"
+                                        value={newCutoffInput}
+                                        onChange={(e) => setNewCutoffInput(e.target.value)}
+                                        placeholder="Type text (e.g. 'huss hajur', 'bujhe') or paste any emoji..."
+                                        className="flex-1 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-800 dark:text-zinc-100"
                                     />
-                                    <p className="text-[10px] text-zinc-400">Note: The &quot;Follow Our Store&quot; invitation button will be appended automatically below this message.</p>
+                                    <button
+                                        type="submit"
+                                        disabled={!newCutoffInput.trim() || savingCutoffPhrases}
+                                        className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm shrink-0 active:scale-95 cursor-pointer disabled:cursor-not-allowed"
+                                    >
+                                        <Plus size={14} />
+                                        Add Cut-Off
+                                    </button>
+                                </form>
+
+                                {/* Filter Search within Cut-off Phrases if more than 8 items */}
+                                {cutoffPhrases.length > 8 && (
+                                    <div className="relative">
+                                        <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                                        <input
+                                            type="text"
+                                            value={cutoffSearchFilter}
+                                            onChange={(e) => setCutoffSearchFilter(e.target.value)}
+                                            placeholder="Search active cut-off phrases & emojis..."
+                                            className="w-full pl-8 pr-3 py-1.5 bg-zinc-50/70 dark:bg-zinc-950 border border-zinc-200/80 dark:border-zinc-800 rounded-lg text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-700 dark:text-zinc-300"
+                                        />
+                                        {cutoffSearchFilter && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setCutoffSearchFilter('')}
+                                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+                                            >
+                                                <X size={12} />
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* List of Active Cut-off Chips */}
+                                <div className="p-3 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800/80 max-h-64 overflow-y-auto space-y-2">
+                                    {loadingCutoffPhrases ? (
+                                        <div className="flex items-center justify-center py-6 text-zinc-400 text-xs gap-2">
+                                            <Loader2 size={14} className="animate-spin text-blue-500" />
+                                            Loading cut-off phrases...
+                                        </div>
+                                    ) : cutoffPhrases.length === 0 ? (
+                                        <div className="text-center py-6 text-zinc-400 text-xs">
+                                            No cut-off phrases configured. Click &quot;Reset Defaults&quot; to load recommended items.
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {cutoffPhrases
+                                                .filter(phrase => !cutoffSearchFilter || phrase.toLowerCase().includes(cutoffSearchFilter.toLowerCase()))
+                                                .map((phrase, idx) => {
+                                                    const originalIdx = cutoffPhrases.indexOf(phrase)
+                                                    const isEditing = editingCutoffIndex === originalIdx
+                                                    const isEmoji = !/[a-zA-Z0-9\u0900-\u097F]/.test(phrase)
+
+                                                    if (isEditing) {
+                                                        return (
+                                                            <div
+                                                                key={idx}
+                                                                className="flex items-center gap-1 bg-white dark:bg-zinc-900 border border-blue-500 rounded-lg p-1 shadow-sm"
+                                                            >
+                                                                <input
+                                                                    type="text"
+                                                                    autoFocus
+                                                                    value={editingCutoffValue}
+                                                                    onChange={(e) => setEditingCutoffValue(e.target.value)}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter') handleSaveEditCutoffPhrase(originalIdx)
+                                                                        if (e.key === 'Escape') setEditingCutoffIndex(null)
+                                                                    }}
+                                                                    className="bg-transparent text-xs px-2 py-0.5 w-28 focus:outline-none text-zinc-800 dark:text-zinc-100"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleSaveEditCutoffPhrase(originalIdx)}
+                                                                    className="p-1 hover:bg-emerald-100 dark:hover:bg-emerald-950/60 text-emerald-600 rounded cursor-pointer"
+                                                                    title="Save"
+                                                                >
+                                                                    <Check size={12} />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setEditingCutoffIndex(null)}
+                                                                    className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 rounded cursor-pointer"
+                                                                    title="Cancel"
+                                                                >
+                                                                    <X size={12} />
+                                                                </button>
+                                                            </div>
+                                                        )
+                                                    }
+
+                                                    return (
+                                                        <div
+                                                            key={idx}
+                                                            className={`group inline-flex items-center gap-1.5 rounded-lg border transition-all ${
+                                                                isEmoji
+                                                                    ? 'px-2.5 py-0.5 bg-amber-50/60 dark:bg-amber-950/30 border-amber-200/70 dark:border-amber-900/40 text-sm shadow-2xs hover:border-amber-300'
+                                                                    : 'px-2.5 py-1 bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200 text-xs font-medium shadow-2xs hover:border-zinc-300'
+                                                            }`}
+                                                        >
+                                                            <span className={isEmoji ? 'text-base leading-none select-none' : 'font-medium'}>
+                                                                {phrase}
+                                                            </span>
+
+                                                            <div className="flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setEditingCutoffIndex(originalIdx)
+                                                                        setEditingCutoffValue(phrase)
+                                                                    }}
+                                                                    className="p-0.5 hover:text-blue-600 dark:hover:text-blue-400 rounded transition-colors cursor-pointer"
+                                                                    title={`Edit "${phrase}"`}
+                                                                >
+                                                                    <Edit2 size={11} />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleRemoveCutoffPhrase(phrase)}
+                                                                    className="p-0.5 hover:text-red-500 rounded transition-colors cursor-pointer"
+                                                                    title={`Delete "${phrase}"`}
+                                                                >
+                                                                    <X size={12} />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )
+                                                })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-1 border-t border-zinc-100 dark:border-zinc-800/60">
+                                    <span>Click pencil to edit, &quot;x&quot; to remove, or emoji buttons above to quick-toggle.</span>
+                                    {savingCutoffPhrases && (
+                                        <span className="flex items-center gap-1 text-blue-500 font-medium">
+                                            <Loader2 size={11} className="animate-spin" /> Saving...
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         </div>
