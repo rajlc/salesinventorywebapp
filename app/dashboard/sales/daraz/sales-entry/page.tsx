@@ -2,56 +2,204 @@
 
 import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getDarazOrders, getDarazOrderById, deleteDarazOrder, updateDarazOrderStatus, getDarazOrderStats, syncProductInfoFromInventory, syncDarazOrderProducts } from '@/features/sales/actions/daraz-actions'
+import {
+    getDarazOrders,
+    getDarazOrderById,
+    updateDarazOrderStatus,
+    getDarazOrderStats,
+    syncProductInfoFromInventory,
+    syncDarazOrderProducts,
+    checkDeliveredCustomerOrders
+} from '@/features/sales/actions/daraz-actions'
 import { syncOrderStatusesFromDarazData } from '@/features/sales/actions/daraz-sync-status'
-import { getUserRole, getUserDeletionStats, createDeletionRequest, softDeleteOrder } from '@/features/sales/actions/daraz-deletion-actions'
+import {
+    getUserRole,
+    getUserDeletionStats,
+    createDeletionRequest,
+    softDeleteOrder
+} from '@/features/sales/actions/daraz-deletion-actions'
 import { getOnlineStores } from '@/features/settings/actions/settingsActions'
 import { getActivePlanProductIds } from '@/features/purchase/actions/plan-actions'
 import { getOrdersStockInfo } from '@/features/sales/actions/get-order-stock-info'
-import { Search, Plus, Upload, Download, Printer, List, X, ArrowLeft, Trash2, Clock, RefreshCw, Filter, FileX, ChevronUp, ChevronDown, Package, MessageSquare } from 'lucide-react'
+import {
+    Search,
+    Plus,
+    Download,
+    Printer,
+    List,
+    X,
+    ArrowLeft,
+    Clock,
+    RefreshCw,
+    Filter,
+    FileX,
+    ChevronUp,
+    ChevronDown,
+    Package,
+    MessageSquare,
+    Copy,
+    Check,
+    CheckCircle2,
+    Truck,
+    ExternalLink,
+    RotateCcw,
+    Store,
+    Users,
+    CheckSquare,
+    Square
+} from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Card } from '@/components/ui-shim'
 import { AddDarazOrderModal } from '@/features/sales/components/AddDarazOrderModal'
-import { ImportDarazOrdersModal } from '@/features/sales/components/ImportDarazOrdersModal'
 import { DeletionReasonModal } from '@/features/sales/components/DeletionReasonModal'
 import { AdminDeleteConfirm } from '@/features/sales/components/AdminDeleteConfirm'
-import { AuditTrailHover } from '@/features/sales/components/AuditTrailHover'
 import { PartialReturnModal } from '@/features/sales/components/PartialReturnModal'
 import { QuickPlanButton } from '@/features/sales/components/QuickPlanButton'
-// DarazInvoice removed
-
 import { toast } from 'sonner'
 import { PermissionGuard } from '@/components/permissions/PermissionGuard'
 import { usePermissions } from '@/lib/permissions/PermissionContext'
+
+// Helper Tooltip for Customer Notes
 const CustomerRemarksTooltip = ({ remarks }: { remarks: string }) => {
     const [showTooltip, setShowTooltip] = useState(false)
     return (
-        <div 
-            className="relative z-20 hover:z-30 inline-block shrink-0"
+        <div
+            className="relative inline-flex items-center shrink-0 z-20"
             onMouseEnter={() => setShowTooltip(true)}
             onMouseLeave={() => setShowTooltip(false)}
-            onClick={(e) => {
-                e.stopPropagation()
-                alert(`Remarks / Note:\n\n${remarks}`)
-            }}
         >
-            <button 
-                type="button" 
-                className="text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors focus:outline-none flex items-center justify-center p-0.5"
-                title="Click to view full note"
+            <button
+                type="button"
+                onClick={(e) => {
+                    e.stopPropagation()
+                    alert(`Remarks / Note:\n\n${remarks}`)
+                }}
+                className="text-amber-500 hover:text-amber-600 dark:text-amber-400 p-1 hover:bg-amber-50 dark:hover:bg-amber-950/40 rounded transition-colors"
+                title="Customer note attached"
             >
-                <MessageSquare size={13} />
+                <MessageSquare size={14} />
             </button>
-            
+
             {showTooltip && (
-                <div className="absolute z-50 bottom-full mb-1.5 left-1/2 -translate-x-1/2 bg-zinc-900 text-white border border-zinc-700 rounded shadow-lg p-2 min-w-[200px] max-w-[300px] whitespace-normal text-left text-[11px] leading-snug font-normal">
-                    <div className="font-bold text-yellow-450 mb-0.5">Remarks / Note:</div>
-                    <div className="italic break-words text-zinc-200">{remarks}</div>
+                <div className="absolute z-50 bottom-full mb-1.5 left-1/2 -translate-x-1/2 bg-zinc-900/95 backdrop-blur-md text-white border border-zinc-700 rounded-lg shadow-xl p-2.5 min-w-[200px] max-w-[280px] whitespace-normal text-left text-xs leading-snug">
+                    <div className="font-semibold text-amber-400 mb-1 flex items-center gap-1">
+                        <MessageSquare size={12} /> Customer Note
+                    </div>
+                    <div className="text-zinc-300 text-xs leading-relaxed break-words">{remarks}</div>
                 </div>
             )}
         </div>
     )
+}
+
+// Modern Profit / Loss Badge
+const ProfitLossBadge = ({ profitInfo, isMobile = false }: { profitInfo: any, isMobile?: boolean }) => {
+    if (!profitInfo) {
+        return (
+            <span className={`inline-flex items-center justify-center ${isMobile ? 'text-[10px] px-1.5 py-0.5' : 'text-xs px-2 py-0.5'} font-medium rounded-md bg-gray-100 dark:bg-zinc-800 text-gray-400 border border-gray-200 dark:border-zinc-700 animate-pulse`}>
+                ...
+            </span>
+        )
+    }
+
+    const { status, display, tooltip } = profitInfo
+
+    let badgeClass = ''
+    if (status === 'profit') {
+        badgeClass = 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+    } else if (status === 'loss') {
+        badgeClass = 'bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800'
+    } else if (status === 'receivable') {
+        badgeClass = 'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800'
+    } else {
+        badgeClass = 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-900/50 dark:text-rose-200 dark:border-rose-800 font-extrabold'
+    }
+
+    return (
+        <span
+            className={`inline-flex items-center justify-center ${isMobile ? 'text-[10px] px-1.5 py-0.5' : 'text-xs px-2 py-0.5'} font-bold rounded-md border whitespace-nowrap select-none ${badgeClass}`}
+            title={tooltip || display}
+        >
+            {display}
+        </span>
+    )
+}
+
+// Status badge styling helper
+const getStatusBadge = (status: string) => {
+    const s = status.toLowerCase()
+    if (s === 'pending') {
+        return {
+            label: status,
+            bg: 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/60',
+            dot: 'bg-amber-500'
+        }
+    }
+    if (s === 'packed') {
+        return {
+            label: status,
+            bg: 'bg-indigo-50 text-indigo-800 border-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:border-indigo-800/60',
+            dot: 'bg-indigo-500'
+        }
+    }
+    if (s === 'ready to ship') {
+        return {
+            label: status,
+            bg: 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800/60',
+            dot: 'bg-emerald-500'
+        }
+    }
+    if (s === 'shipped') {
+        return {
+            label: status,
+            bg: 'bg-sky-50 text-sky-800 border-sky-200 dark:bg-sky-950/40 dark:text-sky-300 dark:border-sky-800/60',
+            dot: 'bg-sky-500'
+        }
+    }
+    if (s === 'delivered') {
+        return {
+            label: status,
+            bg: 'bg-green-50 text-green-800 border-green-200 dark:bg-green-950/40 dark:text-green-300 dark:border-green-800/60',
+            dot: 'bg-green-500'
+        }
+    }
+    if (s.includes('return')) {
+        return {
+            label: status,
+            bg: 'bg-orange-50 text-orange-800 border-orange-200 dark:bg-orange-950/40 dark:text-orange-300 dark:border-orange-800/60',
+            dot: 'bg-orange-500'
+        }
+    }
+    if (s.includes('fail') || s === 'cancelled' || s === 'cancel') {
+        return {
+            label: status,
+            bg: 'bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800/60',
+            dot: 'bg-rose-500'
+        }
+    }
+    return {
+        label: status,
+        bg: 'bg-gray-100 text-gray-800 border-gray-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700',
+        dot: 'bg-gray-400'
+    }
+}
+
+// Active dispatch statuses that qualify for duplicate detection
+const ACTIVE_DISPATCH_STATUSES = ['pending', 'packed', 'ready to ship', 'shipped']
+
+// Helper to get last 4 digits of order number
+const getOrderLast4 = (orderNumber: string | number) => {
+    if (!orderNumber) return ''
+    const clean = String(orderNumber).trim()
+    return clean.length >= 4 ? clean.slice(-4) : clean
+}
+
+// Helper to get compound key: customer name (exact spelling, case-insensitive) + order number last 4 digits
+const getCustomerOrderKey = (customerName: string, orderNumber: string | number) => {
+    const name = String(customerName || '').trim().toLowerCase()
+    const last4 = getOrderLast4(orderNumber)
+    if (!name || !last4) return ''
+    return `${name}|${last4}`
 }
 
 export default function DarazSalesEntryPage() {
@@ -61,17 +209,18 @@ export default function DarazSalesEntryPage() {
 
     const router = useRouter()
     const [isAddModalOpen, setIsAddModalOpen] = useState(false)
-    const [isImportModalOpen, setIsImportModalOpen] = useState(false)
     const [selectedOrders, setSelectedOrders] = useState<string[]>([])
     const [searchInput, setSearchInput] = useState('')
-    const [searchQuery, setSearchQuery] = useState('') // Actual search query used for fetching
+    const [searchQuery, setSearchQuery] = useState('')
     const [statusFilter, setStatusFilter] = useState('all')
-    const [sellerAccountFilter, setSellerAccountFilter] = useState('all') // New filter
-    const [unprintedOnly, setUnprintedOnly] = useState(false) // New filter for 'Awb Unprint'
+    const [sellerAccountFilter, setSellerAccountFilter] = useState('all')
+    const [unprintedOnly, setUnprintedOnly] = useState(false)
     const [bulkStatus, setBulkStatus] = useState('')
     const [page, setPage] = useState(1)
     const [limit, setLimit] = useState(1000)
     const [isSyncingOrders, setIsSyncingOrders] = useState(false)
+    const [copiedOrderId, setCopiedOrderId] = useState<string | null>(null)
+    const [collapsedStores, setCollapsedStores] = useState<Record<string, boolean>>({})
 
     const [userRole, setUserRole] = useState<'admin' | 'user' | null>(null)
     const [deletionModal, setDeletionModal] = useState<{ isOpen: boolean, order: any | null }>({ isOpen: false, order: null })
@@ -87,15 +236,23 @@ export default function DarazSalesEntryPage() {
         setIsPartialReturnOpen(true)
     }
 
-
     const queryClient = useQueryClient()
 
-    // Fetch stats (Filtered by Seller Account, Shipped restricted to Today for Sales Entry context)
+    // Fetch stats
     const { data: stats } = useQuery({
         queryKey: ['daraz-order-stats', sellerAccountFilter],
         queryFn: () => getDarazOrderStats(sellerAccountFilter, true),
-        placeholderData: { pending: 0, packed: 0, readyToShip: 0, shipped: 0 },
-        staleTime: 60 * 1000 // 1 minute
+        placeholderData: {
+            pending: 0,
+            pendingAmount: 0,
+            packed: 0,
+            packedAmount: 0,
+            readyToShip: 0,
+            readyToShipAmount: 0,
+            shipped: 0,
+            shippedAmount: 0
+        },
+        staleTime: 30 * 1000
     })
 
     // Fetch online stores for filter
@@ -106,18 +263,19 @@ export default function DarazSalesEntryPage() {
     const onlineStores = onlineStoresResult?.data || []
 
     // Fetch orders (Pending or Today's date + Filters)
-    const { data, isLoading, isFetching, refetch } = useQuery({
+    const { data, isLoading, isFetching } = useQuery({
         queryKey: ['daraz-orders', page, limit, searchQuery, statusFilter, sellerAccountFilter, unprintedOnly],
         queryFn: () => getDarazOrders({
             page,
             limit,
             status: statusFilter,
-            todayOnly: true, // Show only Pending or today's orders
+            todayOnly: true,
             sellerAccount: sellerAccountFilter,
             unprintedOnly
         }),
         placeholderData: (previousData) => previousData,
-        staleTime: 30 * 1000,
+        staleTime: 15 * 1000,
+        refetchOnWindowFocus: true,
         gcTime: 5 * 60 * 1000
     })
 
@@ -125,107 +283,153 @@ export default function DarazSalesEntryPage() {
     const pagination = data?.pagination
 
     // Fetch stock info for current page orders
-    const orderIds = orders.map(o => o.id)
+    const orderIds = useMemo(() => orders.map(o => o.id), [orders])
     const { data: stockInfoData } = useQuery({
         queryKey: ['order-stock-info', orderIds],
         queryFn: () => getOrdersStockInfo(orderIds),
         enabled: orderIds.length > 0,
-        staleTime: 2 * 60 * 1000, // 2 minutes
+        staleTime: 2 * 60 * 1000,
         placeholderData: {}
     })
-
     const stockInfo = stockInfoData || {}
-
 
     // Query for active purchase plans
     const { data: activePlanProductIds = [] } = useQuery({
         queryKey: ['active-purchase-plans'],
         queryFn: () => getActivePlanProductIds(),
-        // Refetch often to keep UI sync
         refetchInterval: 30000
     })
 
-
-    // Calculate customer frequency (Global in current list)
-    const customerCounts = useMemo(() => {
-        return orders.reduce((acc: { [key: string]: number }, order) => {
-            const name = order.customer_name?.toLowerCase().trim() || ''
-            if (name) acc[name] = (acc[name] || 0) + 1
-            return acc
-        }, {})
-    }, [orders])
-
-    // Calculate customer frequency per date
-    const customerCountsByDate = useMemo(() => {
-        return orders.reduce((acc: { [key: string]: number }, order) => {
-            const name = order.customer_name?.toLowerCase().trim() || ''
-            // Normalize date to YYYY-MM-DD to ignore time
-            const date = new Date(order.order_date).toLocaleDateString('en-CA')
-            const key = `${name}|${date}`
-            if (name) acc[key] = (acc[key] || 0) + 1
-            return acc
-        }, {})
-    }, [orders])
-
-    // Helper to determine customer highlight class
-    const getCustomerClass = (name: string, dateStr: string) => {
-        const n = name?.toLowerCase().trim() || ''
-        const date = new Date(dateStr).toLocaleDateString('en-CA')
-        const dateKey = `${n}|${date}`
-
-        // Priority 1: Duplicate Name AND Same Date (Green)
-        if (customerCountsByDate[dateKey] > 1) {
-            return 'text-green-600 dark:text-green-400 font-bold'
-        }
-
-        // Priority 2: Duplicate Name in List (Blue)
-        if (customerCounts[n] > 1) {
-            return 'text-blue-600 dark:text-blue-400 font-bold'
-        }
-
-        return 'text-gray-700 dark:text-gray-300'
-    }
-
-    // Memoize duplicate order number detection for performance
-    const duplicateOrderNumbers = useMemo(() => {
-        const counts: { [key: string]: number } = {}
+    // DUPLICATE ORDER LOGIC:
+    // Match BOTH Customer Name (exact spelling, case-insensitive) AND last 4 digits of order number.
+    // Qualifying statuses: pending, packed, ready to ship, shipped.
+    // Ignored statuses: unpaid, cancel, cancelled, delivered (never marked as duplicate).
+    // If two or more qualifying orders share BOTH the same customer name and last 4 digits of order number, mark all as duplicate!
+    const activeOrderKeysCount = useMemo(() => {
+        const counts: Record<string, number> = {}
         orders.forEach(order => {
-            counts[order.order_number] = (counts[order.order_number] || 0) + 1
-        })
-        return Object.keys(counts).filter(orderNumber => counts[orderNumber] > 1)
-    }, [orders])
-
-    // Memoize highlighted duplicate IDs
-    const highlightedDuplicates = useMemo(() => {
-        const ids: string[] = []
-        orders.forEach(order => {
-            if (duplicateOrderNumbers.includes(order.order_number)) {
-                ids.push(order.id)
+            const status = order.order_status?.toLowerCase().trim()
+            if (ACTIVE_DISPATCH_STATUSES.includes(status)) {
+                const key = getCustomerOrderKey(order.customer_name, order.order_number)
+                if (key) {
+                    counts[key] = (counts[key] || 0) + 1
+                }
             }
         })
-        return ids
-    }, [orders, duplicateOrderNumbers])
+        return counts
+    }, [orders])
+
+    // REPEAT CUSTOMER LOGIC:
+    // Match BOTH Customer Name (exact spelling, case-insensitive) AND last 4 digits of order number.
+    // One order is 'Delivered' and another is in ['pending', 'packed', 'ready to ship', 'shipped'].
+    // 1. Check within current loaded orders for 'Delivered'
+    const deliveredKeysInList = useMemo(() => {
+        const set = new Set<string>()
+        orders.forEach(order => {
+            const status = order.order_status?.toLowerCase().trim()
+            if (status === 'delivered') {
+                const key = getCustomerOrderKey(order.customer_name, order.order_number)
+                if (key) set.add(key)
+            }
+        })
+        return set
+    }, [orders])
+
+    // 2. Also check DB for historical 'Delivered' orders matching active customer name + last 4 digits
+    const activeLookupList = useMemo(() => {
+        const seen = new Set<string>()
+        const lookups: { customerName: string; last4: string }[] = []
+
+        orders.forEach(order => {
+            const status = order.order_status?.toLowerCase().trim()
+            if (ACTIVE_DISPATCH_STATUSES.includes(status)) {
+                const cName = String(order.customer_name || '').trim()
+                const last4 = getOrderLast4(order.order_number)
+                const key = `${cName.toLowerCase()}|${last4}`
+                if (cName && last4 && !seen.has(key)) {
+                    seen.add(key)
+                    lookups.push({ customerName: cName, last4 })
+                }
+            }
+        })
+
+        return lookups
+    }, [orders])
+
+    const { data: dbDeliveredKeys = [] } = useQuery({
+        queryKey: ['delivered-customer-orders', activeLookupList],
+        queryFn: () => checkDeliveredCustomerOrders(activeLookupList),
+        enabled: activeLookupList.length > 0,
+        staleTime: 5 * 60 * 1000
+    })
+
+    const allDeliveredKeys = useMemo(() => {
+        const set = new Set<string>(deliveredKeysInList)
+        dbDeliveredKeys.forEach((k: string) => set.add(k))
+        return set
+    }, [deliveredKeysInList, dbDeliveredKeys])
+
+    // Determine customer/order highlight type:
+    // 'duplicate' -> GREEN text (duplicate order: same customer name + last 4 digits among active orders)
+    // 'repeat'    -> BLUE text (repeat customer: same customer name + last 4 digits with delivered order)
+    // 'normal'    -> standard text
+    const getOrderHighlightType = (order: any): 'duplicate' | 'repeat' | 'normal' => {
+        const status = order.order_status?.toLowerCase().trim()
+        const key = getCustomerOrderKey(order.customer_name, order.order_number)
+        if (!key) return 'normal'
+
+        // Only active dispatch orders can be marked duplicate or repeat
+        if (ACTIVE_DISPATCH_STATUSES.includes(status)) {
+            // Priority 1: Duplicate order (2 or more active orders matching BOTH customer name and order number last 4 digits)
+            if ((activeOrderKeysCount[key] || 0) > 1) {
+                return 'duplicate'
+            }
+
+            // Priority 2: Repeat customer (one delivered order exists matching BOTH customer name and order number last 4 digits)
+            if (allDeliveredKeys.has(key)) {
+                return 'repeat'
+            }
+        }
+
+        // If this order itself is 'Delivered' and has a matching active order
+        if (status === 'delivered' && (activeOrderKeysCount[key] || 0) > 0) {
+            return 'repeat'
+        }
+
+        return 'normal'
+    }
 
     // Fetch user role on mount
     useEffect(() => {
         getUserRole().then(role => setUserRole(role))
     }, [])
 
+    // Copy order number handler
+    const handleCopyOrderNumber = (e: React.MouseEvent, orderNumber: string) => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(orderNumber)
+        setCopiedOrderId(orderNumber)
+        toast.success(`Copied #${orderNumber}`, { duration: 1500 })
+        setTimeout(() => setCopiedOrderId(null), 2000)
+    }
+
+    // Toggle store collapse
+    const toggleStoreCollapse = (seller: string) => {
+        setCollapsedStores(prev => ({
+            ...prev,
+            [seller]: !prev[seller]
+        }))
+    }
+
     // Handle refreshing order data from database
     const handleSyncOrders = async () => {
         setIsSyncingOrders(true)
         try {
-
-            // 1. Trigger Status Sync Logic (Fix mismatches between Raw JSON and Status Column)
             const syncResult = await syncOrderStatusesFromDarazData()
             if (syncResult.success && syncResult.updated > 0) {
                 toast.success(syncResult.message)
-            } else if (syncResult.success && syncResult.updated === 0) {
-                // constant feedback might be annoying, but good for confirmation
-                console.log(syncResult.message)
             }
 
-            // 2. Refetch queries
             await queryClient.refetchQueries({ queryKey: ['daraz-orders'] })
             await queryClient.refetchQueries({ queryKey: ['daraz-order-stats'] })
 
@@ -239,45 +443,8 @@ export default function DarazSalesEntryPage() {
         }
     }
 
-    // Handle syncing product info from inventory
-    const handleSyncProductInfo = async () => {
-        if (!confirm('This will match seller SKUs from your orders with products in the inventory and update product names/accounts.\n\nContinue?')) {
-            return
-        }
-
-        try {
-            const result = await syncProductInfoFromInventory()
-            alert(result.message)
-
-            if (result.success && result.updated > 0) {
-                // Refresh orders to show updated product info
-                queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
-            }
-        } catch (error: any) {
-            alert(`Sync error: ${error.message}`)
-        }
-    }
-
-    // Delete handlers
-    const handleDeleteClick = async (order: any) => {
-        if (userRole === 'admin') {
-            setAdminDeleteModal({ isOpen: true, order })
-        } else {
-            const stats = await getUserDeletionStats()
-            if (!stats.canDelete) {
-                const nextTime = stats.nextDeletionAvailable
-                    ? new Date(stats.nextDeletionAvailable).toLocaleString()
-                    : 'later'
-                toast.error(`Feature blocked! You can delete again after ${nextTime}`)
-                return
-            }
-            setDeletionModal({ isOpen: true, order })
-        }
-    }
-
     const handleUserDeletionSubmit = async (reason: string) => {
         if (!deletionModal.order) return
-
         setIsSubmittingDeletion(true)
         try {
             const result = await createDeletionRequest(
@@ -302,11 +469,9 @@ export default function DarazSalesEntryPage() {
 
     const handleAdminDeleteConfirm = async () => {
         if (!adminDeleteModal.order) return
-
         setIsSubmittingDeletion(true)
         try {
             const result = await softDeleteOrder(adminDeleteModal.order.id)
-
             if (result.success) {
                 toast.success('Order deleted and moved to Restore Backup')
                 queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
@@ -321,15 +486,8 @@ export default function DarazSalesEntryPage() {
         }
     }
 
-    const handleDelete = (orderId: string, orderNumber: string) => {
-        // Legacy function - redirect to new system
-        const order = orders.find(o => o.id === orderId)
-        if (order) handleDeleteClick(order)
-    }
-
-
     const handleSearch = () => {
-        setSearchQuery(searchInput)
+        setSearchQuery(searchInput.trim())
         setPage(1)
     }
 
@@ -337,14 +495,6 @@ export default function DarazSalesEntryPage() {
         setSearchInput('')
         setSearchQuery('')
         setPage(1)
-    }
-
-    const handleSelectAll = (checked: boolean) => {
-        if (checked) {
-            setSelectedOrders(orders.map(o => o.id))
-        } else {
-            setSelectedOrders([])
-        }
     }
 
     const handleSelectOrder = (orderId: string, checked: boolean) => {
@@ -355,12 +505,9 @@ export default function DarazSalesEntryPage() {
         }
     }
 
-    // New: Handle selection for a specific group of orders
     const handleSelectGroup = (checked: boolean, groupOrders: any[]) => {
         const groupIds = groupOrders.map(o => o.id)
-
         if (checked) {
-            // Add group IDs to selection (avoid duplicates)
             const newSelected = [...selectedOrders]
             groupIds.forEach(id => {
                 if (!newSelected.includes(id)) {
@@ -369,7 +516,6 @@ export default function DarazSalesEntryPage() {
             })
             setSelectedOrders(newSelected)
         } else {
-            // Remove group IDs from selection
             setSelectedOrders(selectedOrders.filter(id => !groupIds.includes(id)))
         }
     }
@@ -380,7 +526,6 @@ export default function DarazSalesEntryPage() {
             return
         }
 
-        // Intercept "Customer Return Delivered" for Partial Returns
         if (bulkStatus === 'Customer Return Delivered') {
             const targets = orders.filter(o => selectedOrders.includes(o.id))
             const multiItemOrder = targets.find(o => (o.total_quantity || 0) > 1)
@@ -390,10 +535,7 @@ export default function DarazSalesEntryPage() {
                     toast.warning('Please process multi-item returns one at a time to ensure accuracy.')
                     return
                 }
-
-                // Open Partial Return Modal for the single selected multi-item order
                 handleOpenPartialReturn(multiItemOrder)
-                // Reset bulk status to avoid confusion
                 setBulkStatus('')
                 return
             }
@@ -401,92 +543,20 @@ export default function DarazSalesEntryPage() {
 
         try {
             await updateDarazOrderStatus(selectedOrders, bulkStatus)
-            toast.success(`Updated ${selectedOrders.length} orders`)
+            toast.success(`Updated ${selectedOrders.length} orders to ${bulkStatus}`)
             setSelectedOrders([])
             setBulkStatus('')
             queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
+            queryClient.invalidateQueries({ queryKey: ['daraz-order-stats'] })
         } catch (error: any) {
             toast.error(error.message || 'Failed to update status')
         }
-    }
-
-    /* handlePrint removed in favor of direct window.open */
-
-
-    // Render pagination
-    const renderPagination = () => {
-        if (!pagination) return null
-
-        const pages = []
-        const { page: currentPage, totalPages } = pagination
-
-        // Smart pagination logic (same as Product List)
-        if (totalPages <= 7) {
-            for (let i = 1; i <= totalPages; i++) {
-                pages.push(i)
-            }
-        } else {
-            if (currentPage <= 3) {
-                pages.push(1, 2, 3, 4, 5, '...', totalPages)
-            } else if (currentPage >= totalPages - 2) {
-                pages.push(1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages)
-            } else {
-                pages.push(1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages)
-            }
-        }
-
-        return (
-            <div className="flex items-center justify-between px-4 py-3 border-t dark:border-zinc-700">
-                <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                        <span className="text-[14px] text-gray-600 dark:text-gray-400">Show:</span>
-                        <select
-                            value={limit === 1000 ? 'all' : limit}
-                            onChange={(e) => {
-                                const val = e.target.value
-                                setLimit(val === 'all' ? 1000 : Number(val))
-                                setPage(1)
-                            }}
-                            className="bg-zinc-50 border border-gray-300 text-gray-900 text-[13px] rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-1 dark:bg-zinc-700 dark:border-zinc-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500"
-                        >
-                            <option value="9">9</option>
-                            <option value="18">18</option>
-                            <option value="25">25</option>
-                            <option value="50">50</option>
-                            <option value="all">All</option>
-                        </select>
-                    </div>
-                    <div className="text-[15px] text-gray-600 dark:text-gray-400">
-                        Showing {((currentPage - 1) * pagination.limit) + 1} to {Math.min(currentPage * pagination.limit, pagination.total)} of {pagination.total} orders
-                    </div>
-                </div>
-                <div className="flex items-center gap-1">
-                    {pages.map((p, idx) => (
-                        p === '...' ? (
-                            <span key={idx} className="px-2 text-gray-400">...</span>
-                        ) : (
-                            <button
-                                key={idx}
-                                onClick={() => setPage(p as number)}
-                                className={`px-3 py-1 text-[17px] rounded ${p === currentPage
-                                    ? 'bg-blue-600 text-white'
-                                    : 'hover:bg-gray-100 dark:hover:bg-zinc-800'
-                                    }`}
-                            >
-                                {p}
-                            </button>
-                        )
-                    ))}
-                </div>
-            </div>
-        )
     }
 
     // Grouping and Sorting Logic
     const groupedOrders = useMemo(() => {
         if (!orders.length) return []
 
-        const storeOrder = ['Bagmati Traders', 'Balaju Shop', 'Btas', 'Cosmetic Shop']
         const statusPriority: Record<string, number> = {
             'pending': 1,
             'packed': 2,
@@ -506,7 +576,6 @@ export default function DarazSalesEntryPage() {
 
         const getStatusRank = (status: string) => statusPriority[status.toLowerCase()] || 99
 
-        // 1. Group by Seller Account
         const groups: Record<string, typeof orders> = {}
         orders.forEach(order => {
             const seller = order.seller_account || 'Unknown'
@@ -514,24 +583,17 @@ export default function DarazSalesEntryPage() {
             groups[seller].push(order)
         })
 
-        // 2. Sort Groups - "Account Not Found" first, then by Order Count (Descending)
         const sortedKeys = Object.keys(groups).sort((a, b) => {
-            // Priority: "Account Not Found" should always be first
             if (a === 'Account Not Found') return -1
             if (b === 'Account Not Found') return 1
-
-            // For other groups, sort by order count (descending)
             return (groups[b]?.length || 0) - (groups[a]?.length || 0)
         })
 
-        // 3. Sort Orders within Groups
         sortedKeys.forEach(key => {
             groups[key].sort((a, b) => {
                 const rankA = getStatusRank(a.order_status)
                 const rankB = getStatusRank(b.order_status)
                 if (rankA !== rankB) return rankA - rankB
-
-                // If same status, sort by Date (Desc)
                 return new Date(b.order_date).getTime() - new Date(a.order_date).getTime()
             })
         })
@@ -542,200 +604,72 @@ export default function DarazSalesEntryPage() {
         }))
     }, [orders])
 
-    /* REMOVED: Navigation code that used deleted currentGroupIndex state
-    // Sync current group index on scroll (Placed here so groupedOrders is defined)
-    useEffect(() => {
-        const handleScroll = () => {
-            const headerOffset = 180 // Increased offset for safety
- 
-            // Find the group that is currently at the top of the viewport
-            let activeIndex = 0
- 
-            for (let i = 0; i < groupedOrders.length; i++) {
-                const element = document.getElementById(`group-${i}`)
-                if (element) {
-                    const rect = element.getBoundingClientRect()
-                    // If the top of the element is visible or above the viewport, 
-                    // and the bottom is still in view (or it's the last one)
-                    if (rect.top <= headerOffset + 50) {
-                        activeIndex = i
-                    }
-                }
-            }
- 
-            setCurrentGroupIndex(activeIndex)
-        }
- 
-        window.addEventListener('scroll', handleScroll, { passive: true })
-        return () => window.removeEventListener('scroll', handleScroll)
-    }, [groupedOrders.length])
-    */
-
-    /* REMOVED: handleNextGroup function
-    const handleNextGroup = () => {
-        const headerOffset = 150 // Approx header height + sticky group header
-        let targetIndex = -1
- 
-        // Find the FIRST group that starts BELOW the current header line
-        for (let i = 0; i < groupedOrders.length; i++) {
-            const element = document.getElementById(`group-${i}`)
-            if (element) {
-                const rect = element.getBoundingClientRect()
-                // If this group's top is reasonably below the header, it's our target
-                // We use a small buffer (+10) to avoid selecting the current one if it's just barely aligned
-                if (rect.top > headerOffset + 10) {
-                    targetIndex = i
-                    break
-                }
-            }
-        }
- 
-        // If no group is below (e.g. we are at the last one), do nothing or strictly +1 if valid
-        if (targetIndex === -1 && currentGroupIndex < groupedOrders.length - 1) {
-            targetIndex = currentGroupIndex + 1
-        }
- 
-        if (targetIndex !== -1) {
-            const element = document.getElementById(`group-${targetIndex}`)
-            if (element) {
-                const elementPosition = element.getBoundingClientRect().top
-                const offsetPosition = elementPosition + window.scrollY - headerOffset
-                window.scrollTo({
-                    top: offsetPosition,
-                    behavior: 'smooth'
-                })
-                // No need to manually set index, the scroll listener will pick it up
-            }
-        }
-    }
-    */
-
-    /* REMOVED: handlePrevGroup function
-    const handlePrevGroup = () => {
-        const headerOffset = 150
-        let targetIndex = -1
- 
-        // Find the LAST group that is ABOVE or AT the header line
-        // We want to go to the "Previous" visual block
-        // Best logic: Find the group currently at the top (activeIndex), and go to activeIndex - 1
- 
-        // Let's re-calculate active index from DOM to be sure
-        let currentVisualIndex = 0
-        for (let i = 0; i < groupedOrders.length; i++) {
-            const element = document.getElementById(`group-${i}`)
-            if (element) {
-                const rect = element.getBoundingClientRect()
-                if (rect.top <= headerOffset + 50) {
-                    currentVisualIndex = i
-                }
-            }
-        }
- 
-        targetIndex = currentVisualIndex - 1
- 
-        if (targetIndex >= 0) {
-            const element = document.getElementById(`group-${targetIndex}`)
-            if (element) {
-                const elementPosition = element.getBoundingClientRect().top
-                const offsetPosition = elementPosition + window.scrollY - headerOffset
-                window.scrollTo({
-                    top: offsetPosition,
-                    behavior: 'smooth'
-                })
-            }
-        }
-    }
-    */
-
-    const getStatusColor = (status: string) => {
-        const s = status.toLowerCase()
-        if (s === 'pending') return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-        if (s === 'ready to ship') return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' // Light Green as requested
-        if (s === 'packed') return 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200'
-        if (s === 'shipped') return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-        if (s === 'delivered') return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-        if (s === 'cancel' || s === 'cancelled') return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' // Red as requested
-        if (s.includes('return')) return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
-        if (s.includes('fail') || s.includes('delivery failed') || s === 'failed delivered') return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
-    }
-
-    const getRowClass = (order: any) => {
-        const status = order.order_status.toLowerCase()
-        const isDuplicate = highlightedDuplicates.includes(order.id)
-
-        if (status === 'cancel' || status === 'cancelled') return 'bg-red-50 dark:bg-red-900/10 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors'
-        if (isDuplicate) return 'bg-red-50 dark:bg-red-950 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors'
-        return 'hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors'
-    }
-
     // Stock Indicator Component
     const StockIndicator = ({ orderId, order }: { orderId: string, order: any }) => {
         const orderStockInfo = stockInfo[orderId]
         const [showTooltip, setShowTooltip] = useState(false)
 
-        // Hide stock for shipped orders
         if (order?.order_status?.toLowerCase() === 'shipped') {
             return null
         }
 
         if (!orderStockInfo || orderStockInfo.total_count === 0) {
-            return null // No products or no stock data yet
+            return null
         }
 
         const { products, in_stock_count, total_count } = orderStockInfo
 
-        // Helper to get stock color
-        const getStockColor = (stock: number) => {
-            if (stock > 10) return 'text-green-600 dark:text-green-400'
-            if (stock > 0) return 'text-yellow-600 dark:text-yellow-400'
-            return 'text-red-600 dark:text-red-400'
+        const getStockBadge = (stock: number) => {
+            if (stock > 10) return 'text-emerald-700 bg-emerald-50 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+            if (stock > 0) return 'text-amber-700 bg-amber-50 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800'
+            return 'text-rose-700 bg-rose-50 border-rose-300 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800'
         }
 
-        // For single product
         if (total_count === 1) {
-            const stock = products[0].total_stock
+            const stock = products[0]?.total_stock ?? 0
             return (
-                <div className={`flex items-center gap-1 text-[11px] font-medium ${getStockColor(stock)}`} title={`Stock: ${stock}`}>
-                    <Package size={16} />
+                <span
+                    className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-md border ${getStockBadge(stock)}`}
+                    title={`Current Stock: ${stock}`}
+                >
+                    <Package size={13} />
                     <span>{stock}</span>
-                </div>
+                </span>
             )
         }
 
-        // For multiple products - show summary with tooltip
         const allInStock = in_stock_count === total_count
         const someInStock = in_stock_count > 0 && in_stock_count < total_count
-        const noneInStock = in_stock_count === 0
 
-        const badgeColor = allInStock
-            ? 'text-green-600 dark:text-green-400'
+        const badgeClass = allInStock
+            ? 'text-emerald-700 bg-emerald-50 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
             : someInStock
-                ? 'text-yellow-600 dark:text-yellow-400'
-                : 'text-red-600 dark:text-red-400'
+                ? 'text-amber-700 bg-amber-50 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800'
+                : 'text-rose-700 bg-rose-50 border-rose-300 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800'
 
         return (
             <div
-                className="relative"
+                className="relative inline-block"
                 onMouseEnter={() => setShowTooltip(true)}
                 onMouseLeave={() => setShowTooltip(false)}
             >
-                <div className={`flex items-center gap-1 text-[11px] font-medium cursor-help ${badgeColor}`}>
-                    <Package size={18} />
+                <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-md border cursor-help ${badgeClass}`}>
+                    <Package size={13} />
                     <span>{in_stock_count}/{total_count}</span>
-                </div>
+                </span>
 
-                {/* Tooltip */}
                 {showTooltip && (
-                    <div className="absolute z-50 bottom-full mb-2 right-0 bg-white dark:bg-zinc-800 border dark:border-zinc-700 rounded-lg shadow-lg p-2 min-w-[180px]">
-                        <div className="text-[11px] font-bold mb-1 text-gray-700 dark:text-gray-300">Stock Details:</div>
-                        <div className="space-y-1">
-                            {products.map((product, idx) => (
-                                <div key={idx} className="flex justify-between items-center text-[10px]">
-                                    <span className="truncate max-w-[120px] text-gray-600 dark:text-gray-400" title={product.product_name}>
+                    <div className="absolute z-50 bottom-full mb-1.5 right-0 bg-zinc-900/95 backdrop-blur-md text-white border border-zinc-700 rounded-lg shadow-xl p-2.5 min-w-[200px]">
+                        <div className="text-xs font-bold mb-1.5 text-zinc-300 flex items-center gap-1.5">
+                            <Package size={13} className="text-blue-400" /> Stock Breakdown
+                        </div>
+                        <div className="space-y-1.5">
+                            {products.map((product: any, idx: number) => (
+                                <div key={idx} className="flex justify-between items-center text-xs gap-2">
+                                    <span className="truncate max-w-[130px] text-zinc-300" title={product.product_name}>
                                         {product.product_name}
                                     </span>
-                                    <span className={`font-medium ml-2 ${getStockColor(product.total_stock)}`}>
+                                    <span className={`font-bold px-1.5 py-0.2 rounded border ${getStockBadge(product.total_stock)}`}>
                                         {product.total_stock}
                                     </span>
                                 </div>
@@ -747,526 +681,874 @@ export default function DarazSalesEntryPage() {
         )
     }
 
-    return (
-        <PermissionGuard mainRole="Daraz" subRole="Order Entry">
-            <div className="flex flex-col h-full bg-gray-50 dark:bg-zinc-900">
-            {/* Compact Header */}
-            <div className="z-10 bg-white dark:bg-zinc-900 border-b dark:border-zinc-800 px-3 py-1.5 shadow-sm">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                    {/* Left: Title Group */}
-                    {/* Left: Title Group */}
-                    <div className="hidden md:block">
-                        <h1 className="text-[18px] font-bold">Daraz Sales</h1>
-                        <p className="text-[14px] text-gray-500 dark:text-gray-400">Order Management</p>
-                    </div>
+    // Smart pagination
+    const renderPagination = () => {
+        if (!pagination) return null
 
-                    {stats && (
-                        <div className="flex flex-wrap gap-1.5">
-                            <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded border border-yellow-200 bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:border-yellow-900 dark:text-yellow-400 whitespace-nowrap`}>
-                                Pending: {stats.pending}
-                            </span>
-                            <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/20 dark:border-indigo-900 dark:text-indigo-400 whitespace-nowrap`}>
-                                Packed: {stats.packed}
-                            </span>
-                            <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded border border-green-200 bg-green-50 text-green-700 dark:bg-green-900/20 dark:border-green-900 dark:text-green-400 whitespace-nowrap`}>
-                                Ready: {stats.readyToShip}
-                            </span>
-                            <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:border-blue-900 dark:text-blue-400 whitespace-nowrap`}>
-                                Shipped: {stats.shipped}
-                            </span>
-                        </div>
-                    )}
+        const pages = []
+        const { page: currentPage, totalPages } = pagination
 
-                    {/* Right: Actions Group (Import/Export + Back) */}
-                    <div className="flex items-center gap-2">
-                        {canEditOrderEntry && (
-                            <>
-                                <button
-                                    onClick={() => setIsImportModalOpen(true)}
-                                    className="flex items-center gap-2 px-3 py-1 text-[15px] border dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded transition-colors dark:text-gray-50 whitespace-nowrap hidden md:flex"
-                                >
-                                    <Upload size={11} />
-                                    Import
-                                </button>
-                                <button className="flex items-center gap-2 px-3 py-1 text-[15px] border dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded transition-colors dark:text-gray-50 whitespace-nowrap hidden md:flex">
-                                    <Download size={11} />
-                                    Export
-                                </button>
-                            </>
-                        )}
+        if (totalPages <= 7) {
+            for (let i = 1; i <= totalPages; i++) pages.push(i)
+        } else {
+            if (currentPage <= 3) {
+                pages.push(1, 2, 3, 4, 5, '...', totalPages)
+            } else if (currentPage >= totalPages - 2) {
+                pages.push(1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages)
+            } else {
+                pages.push(1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages)
+            }
+        }
 
-                        <Link
-                            href="/dashboard/sales/daraz"
-                            className="hidden md:flex items-center gap-1 px-2 py-1 text-[15px] bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 rounded transition-colors whitespace-nowrap"
+        return (
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 rounded-b-xl shadow-xs">
+                <div className="flex items-center gap-3 text-sm text-gray-600 dark:text-zinc-400">
+                    <div className="flex items-center gap-1.5">
+                        <span>Show:</span>
+                        <select
+                            value={limit === 1000 ? 'all' : limit}
+                            onChange={(e) => {
+                                const val = e.target.value
+                                setLimit(val === 'all' ? 1000 : Number(val))
+                                setPage(1)
+                            }}
+                            className="bg-gray-50 border border-gray-200 text-gray-800 text-sm rounded-md px-2 py-1 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
                         >
-                            <ArrowLeft size={11} />
-                            Back to Sales
-                        </Link>
+                            <option value="15">15</option>
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                            <option value="all">All (Dispatch)</option>
+                        </select>
                     </div>
+                    <span>
+                        Showing {Math.min(((currentPage - 1) * pagination.limit) + 1, pagination.total)} - {Math.min(currentPage * pagination.limit, pagination.total)} of {pagination.total} orders
+                    </span>
+                </div>
+                <div className="flex items-center gap-1">
+                    {pages.map((p, idx) => (
+                        p === '...' ? (
+                            <span key={idx} className="px-2 text-sm text-gray-400">...</span>
+                        ) : (
+                            <button
+                                key={idx}
+                                onClick={() => setPage(p as number)}
+                                className={`px-3 py-1 text-sm font-semibold rounded-md transition-colors cursor-pointer ${p === currentPage
+                                    ? 'bg-blue-600 text-white shadow-xs'
+                                    : 'text-gray-700 hover:bg-gray-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                    }`}
+                            >
+                                {p}
+                            </button>
+                        )
+                    ))}
                 </div>
             </div>
+        )
+    }
 
-            {/* Compact Action Bar with Filters */}
-            <div className="z-10 bg-white dark:bg-zinc-900 border-b dark:border-zinc-800 px-3 py-1.5 shadow-sm">
-                <div className="flex flex-wrap items-center gap-1.5">
+    const hasActiveFilters = statusFilter !== 'all' || sellerAccountFilter !== 'all' || unprintedOnly || !!searchQuery
 
-                    {/* Seller Account Dropdown */}
-                    <select
-                        value={sellerAccountFilter}
-                        onChange={(e) => setSellerAccountFilter(e.target.value)}
-                        className="px-2 py-1 text-[15px] border dark:border-zinc-700 rounded focus:ring-1 focus:ring-blue-500 dark:bg-zinc-800 dark:text-gray-200"
-                        style={{ maxWidth: '120px' }}
-                    >
-                        <option value="all">All Sellers</option>
-                        {onlineStores.map((store: any) => (
-                            <option key={store.id} value={store.seller_account}>
-                                {store.seller_account}
-                            </option>
-                        ))}
-                    </select>
+    return (
+        <PermissionGuard mainRole="Daraz" subRole="Order Entry">
+            <div className="flex flex-col min-h-screen bg-slate-50/70 dark:bg-zinc-950 pb-20">
+                {/* 1. Top Executive Header - Full width, narrow padding */}
+                <div className="bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md border-b border-gray-200 dark:border-zinc-800 sticky top-0 z-30 px-3 sm:px-4 py-2.5 transition-colors">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                        {/* Title and breadcrumb */}
+                        <div className="flex items-center gap-2.5">
+                            <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-orange-500 to-amber-500 flex items-center justify-center text-white shadow-xs shadow-orange-500/20">
+                                <Package size={20} />
+                            </div>
+                            <div>
+                                <h1 className="text-lg font-bold text-gray-900 dark:text-zinc-50 tracking-tight flex items-center gap-2">
+                                    Daraz Sales &amp; Dispatch
+                                    {isFetching && <RefreshCw size={14} className="animate-spin text-blue-500" />}
+                                </h1>
+                                <p className="text-xs text-gray-500 dark:text-zinc-400">
+                                    Today&apos;s packing operations &amp; order processing
+                                </p>
+                            </div>
+                        </div>
 
-                    {/* Status Dropdown */}
-                    <select
-                        value={statusFilter}
-                        onChange={(e) => setStatusFilter(e.target.value)}
-                        className="px-2 py-1 text-[15px] border dark:border-zinc-700 rounded focus:ring-1 focus:ring-blue-500 dark:bg-zinc-800 dark:text-gray-200"
-                    >
-                        <option value="all">All Status</option>
-                        <option value="Unpaid">Unpaid</option>
-                        <option value="Pending">Pending</option>
-                        <option value="Packed">Packed</option>
-                        <option value="Ready to Ship">Ready to Ship</option>
-                        <option value="Shipped">Shipped</option>
-                        <option value="Delivered">Delivered</option>
-                        <option value="Delivery Failed">Delivery Failed</option>
-                        <option value="Returning To Seller">Returning To Seller</option>
-                        <option value="Customer Return">Customer Return</option>
-                        <option value="Customer Return Delivered">Customer Return Delivered</option>
-                        <option value="Cancelled">Cancelled</option>
-                    </select>
-
-                    {/* Awb Unprint Button */}
-                    <button
-                        onClick={() => setUnprintedOnly(!unprintedOnly)}
-                        className={`hidden md:flex items-center gap-1 px-2 py-1 text-[15px] border rounded transition-colors whitespace-nowrap ${unprintedOnly
-                            ? 'bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-400 font-medium'
-                            : 'hover:bg-gray-50 dark:border-zinc-700 dark:hover:bg-zinc-800 dark:text-gray-300'
-                            }`}
-                        title="Show orders with unprinted invoices/AWB only"
-                    >
-                        <FileX size={10} />
-                        Unprinted Invoices
-                    </button>
-
-                    {/* Separator */}
-                    <div className="h-4 w-px bg-gray-300 dark:bg-zinc-700"></div>
-
-                    {/* Search Box */}
-                    <div className="relative flex-1 min-w-[180px] max-w-xs">
-                        <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" size={11} />
-                        <input
-                            type="text"
-                            placeholder="Search order#, tracking#..."
-                            value={searchInput}
-                            onChange={(e) => setSearchInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                            className="w-full pl-6 pr-6 py-1 text-[15px] border dark:border-zinc-700 rounded focus:ring-1 focus:ring-blue-500 dark:bg-zinc-800 dark:text-gray-50"
-                        />
-                        {searchInput && (
+                        {/* Top Action Buttons */}
+                        <div className="flex items-center gap-2">
                             <button
-                                onClick={handleClearSearch}
-                                className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                                title="Clear search"
+                                onClick={handleSyncOrders}
+                                disabled={isSyncingOrders}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                                title="Sync Order Statuses with Daraz Data"
                             >
-                                <X size={10} />
+                                <RefreshCw size={13} className={isSyncingOrders ? 'animate-spin' : ''} />
+                                <span className="hidden sm:inline">Sync Orders</span>
                             </button>
-                        )}
-                    </div>
 
-                    {/* Action Buttons */}
-                    {canEditOrderEntry && (
-                        <button
-                            onClick={() => setIsAddModalOpen(true)}
-                            className="flex items-center gap-1 px-2 py-1 text-[15px] bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors whitespace-nowrap"
-                        >
-                            <Plus size={11} />
-                            Add
-                        </button>
-                    )}
+                            {canViewSalesDashboard && (
+                                <Link
+                                    href="/dashboard/sales/daraz/dashboard?from=sales-entry"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-purple-50 hover:bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 dark:hover:bg-purple-900/60 border border-purple-200/80 dark:border-purple-800/60 rounded-lg transition-colors"
+                                >
+                                    <List size={13} />
+                                    <span className="hidden sm:inline">Sales Dashboard</span>
+                                </Link>
+                            )}
 
-
-                    {/* Clear Filters Button */}
-                    <button
-                        onClick={() => {
-                            setSellerAccountFilter('all')
-                            setStatusFilter('all')
-                            setUnprintedOnly(false)
-                            setSearchQuery('')
-                            setSearchInput('')
-                            setBulkStatus('')
-                        }}
-                        className="flex items-center gap-1 px-3 py-1 text-[15px] font-bold text-white bg-red-500 hover:bg-red-600 rounded transition-colors whitespace-nowrap"
-                        title="Clear all filters"
-                    >
-                        <X size={10} strokeWidth={3} />
-                        Clear
-                    </button>
-
-                    {/* Right Aligned Navigation Group */}
-                    <div className="ml-auto flex items-center gap-2">
-                        {canViewSalesDashboard && (
                             <Link
-                                href="/dashboard/sales/daraz/dashboard?from=sales-entry"
-                                className="hidden md:flex items-center gap-1 px-2 py-1 text-[15px] bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors whitespace-nowrap"
+                                href="/dashboard/sales/daraz"
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white rounded-lg transition-colors"
                             >
-                                <List size={11} />
-                                Sales Dashboard
+                                <ArrowLeft size={13} />
+                                <span className="hidden sm:inline">Back</span>
                             </Link>
-                        )}
-
-
-
-                        <div className="text-[15px] font-black text-black dark:text-gray-100 whitespace-nowrap flex items-center gap-2">
-                            {isFetching && <RefreshCw className="animate-spin text-blue-600" size={12} />}
-                            Total: {pagination?.total || 0}
                         </div>
                     </div>
                 </div>
 
-                {/* Compact Bulk Actions */}
-                {selectedOrders.length > 0 && (
-                    <div className="mt-1.5 pt-1.5 border-t dark:border-zinc-700 flex flex-wrap items-center gap-1.5">
-                        <span className="text-[13px] font-medium text-gray-700 dark:text-gray-300">{selectedOrders.length} selected</span>
-                        <button
-                            onClick={() => setSelectedOrders([])}
-                            className="px-2 py-0.5 text-[11px] font-medium  text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded dark:bg-red-900/20 dark:text-red-400 dark:border-red-900 transition-colors"
+                {/* Main Content: Full-width container with narrow margins to match sidebar */}
+                <div className="w-full px-2 sm:px-3 py-2.5 space-y-2.5">
+                    {/* 2. Interactive KPI Status Cards */}
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                        {/* Pending Card */}
+                        <div
+                            onClick={() => {
+                                setStatusFilter(prev => prev === 'Pending' ? 'all' : 'Pending')
+                                setPage(1)
+                            }}
+                            className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
+                                statusFilter === 'Pending'
+                                    ? 'bg-amber-500/10 border-amber-500 ring-2 ring-amber-500/30 shadow-xs dark:bg-amber-950/40'
+                                    : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:border-amber-300'
+                            }`}
                         >
-                            Unselect All
-                        </button>
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-bold text-gray-600 dark:text-zinc-300 group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors">
+                                    Pending Orders
+                                </span>
+                                <div className="p-1 rounded-md bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-300 border border-amber-200 dark:border-amber-900/40">
+                                    <Clock size={15} />
+                                </div>
+                            </div>
+                            <div className="flex items-baseline justify-between gap-1 flex-wrap">
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-black text-gray-900 dark:text-zinc-100 tracking-tight">
+                                        {stats?.pending ?? 0}
+                                    </span>
+                                    <span className="text-xs font-bold text-amber-600 dark:text-amber-400">
+                                        (Rs. {(stats?.pendingAmount ?? 0).toLocaleString()})
+                                    </span>
+                                </div>
+                                <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">Needs packing</span>
+                            </div>
+                            {statusFilter === 'Pending' && (
+                                <span className="absolute top-2 right-2 text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/60 px-1.5 py-0.2 rounded">
+                                    Active Filter
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Packed Card */}
+                        <div
+                            onClick={() => {
+                                setStatusFilter(prev => prev === 'Packed' ? 'all' : 'Packed')
+                                setPage(1)
+                            }}
+                            className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
+                                statusFilter === 'Packed'
+                                    ? 'bg-indigo-500/10 border-indigo-500 ring-2 ring-indigo-500/30 shadow-xs dark:bg-indigo-950/40'
+                                    : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:border-indigo-300'
+                            }`}
+                        >
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-bold text-gray-600 dark:text-zinc-300 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                                    Packed Orders
+                                </span>
+                                <div className="p-1 rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/40">
+                                    <Package size={15} />
+                                </div>
+                            </div>
+                            <div className="flex items-baseline justify-between gap-1 flex-wrap">
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-black text-gray-900 dark:text-zinc-100 tracking-tight">
+                                        {stats?.packed ?? 0}
+                                    </span>
+                                    <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                                        (Rs. {(stats?.packedAmount ?? 0).toLocaleString()})
+                                    </span>
+                                </div>
+                                <span className="text-xs text-indigo-600 dark:text-indigo-400 font-medium">Ready for label</span>
+                            </div>
+                            {statusFilter === 'Packed' && (
+                                <span className="absolute top-2 right-2 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/60 px-1.5 py-0.2 rounded">
+                                    Active Filter
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Ready to Ship Card */}
+                        <div
+                            onClick={() => {
+                                setStatusFilter(prev => prev === 'Ready to Ship' ? 'all' : 'Ready to Ship')
+                                setPage(1)
+                            }}
+                            className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
+                                statusFilter === 'Ready to Ship'
+                                    ? 'bg-emerald-500/10 border-emerald-500 ring-2 ring-emerald-500/30 shadow-xs dark:bg-emerald-950/40'
+                                    : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:border-emerald-300'
+                            }`}
+                        >
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-bold text-gray-600 dark:text-zinc-300 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
+                                    Ready to Ship
+                                </span>
+                                <div className="p-1 rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/40">
+                                    <Truck size={15} />
+                                </div>
+                            </div>
+                            <div className="flex items-baseline justify-between gap-1 flex-wrap">
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-black text-gray-900 dark:text-zinc-100 tracking-tight">
+                                        {stats?.readyToShip ?? 0}
+                                    </span>
+                                    <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                                        (Rs. {(stats?.readyToShipAmount ?? 0).toLocaleString()})
+                                    </span>
+                                </div>
+                                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">Awaiting pickup</span>
+                            </div>
+                            {statusFilter === 'Ready to Ship' && (
+                                <span className="absolute top-2 right-2 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-900/60 px-1.5 py-0.2 rounded">
+                                    Active Filter
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Shipped Today Card */}
+                        <div
+                            onClick={() => {
+                                setStatusFilter(prev => prev === 'Shipped' ? 'all' : 'Shipped')
+                                setPage(1)
+                            }}
+                            className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
+                                statusFilter === 'Shipped'
+                                    ? 'bg-sky-500/10 border-sky-500 ring-2 ring-sky-500/30 shadow-xs dark:bg-sky-950/40'
+                                    : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:border-sky-300'
+                            }`}
+                        >
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-bold text-gray-600 dark:text-zinc-300 group-hover:text-sky-600 dark:group-hover:text-sky-400 transition-colors">
+                                    Shipped Today
+                                </span>
+                                <div className="p-1 rounded-md bg-sky-50 text-sky-600 dark:bg-sky-950/50 dark:text-sky-300 border border-sky-200 dark:border-sky-900/40">
+                                    <CheckCircle2 size={15} />
+                                </div>
+                            </div>
+                            <div className="flex items-baseline justify-between gap-1 flex-wrap">
+                                <div className="flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-black text-gray-900 dark:text-zinc-100 tracking-tight">
+                                        {stats?.shipped ?? 0}
+                                    </span>
+                                    <span className="text-xs font-bold text-sky-600 dark:text-sky-400">
+                                        (Rs. {(stats?.shippedAmount ?? 0).toLocaleString()})
+                                    </span>
+                                </div>
+                                <span className="text-xs text-sky-600 dark:text-sky-400 font-medium">Handed to rider</span>
+                            </div>
+                            {statusFilter === 'Shipped' && (
+                                <span className="absolute top-2 right-2 text-[10px] font-bold text-sky-700 dark:text-sky-300 bg-sky-100 dark:bg-sky-900/60 px-1.5 py-0.2 rounded">
+                                    Active Filter
+                                </span>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* 3. Unified Filter Bar */}
+                    <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-2.5 shadow-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                            {/* Search Box */}
+                            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-zinc-500" size={15} />
+                                <input
+                                    type="text"
+                                    placeholder="Search order#, customer, tracking..."
+                                    value={searchInput}
+                                    onChange={(e) => setSearchInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                                    className="w-full pl-8 pr-8 py-1.5 text-sm bg-gray-50 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-gray-800 dark:text-zinc-100 transition-all placeholder:text-gray-400"
+                                />
+                                {searchInput && (
+                                    <button
+                                        onClick={handleClearSearch}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded"
+                                        title="Clear search"
+                                    >
+                                        <X size={13} />
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* Seller Store Dropdown */}
+                            <div className="relative">
+                                <select
+                                    value={sellerAccountFilter}
+                                    onChange={(e) => {
+                                        setSellerAccountFilter(e.target.value)
+                                        setPage(1)
+                                    }}
+                                    className="px-3 py-1.5 text-sm font-semibold bg-gray-50 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg text-gray-700 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 cursor-pointer"
+                                >
+                                    <option value="all">🏬 All Stores</option>
+                                    {onlineStores.map((store: any) => (
+                                        <option key={store.id} value={store.seller_account}>
+                                            {store.seller_account}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {/* Status Dropdown */}
+                            <div className="relative">
+                                <select
+                                    value={statusFilter}
+                                    onChange={(e) => {
+                                        setStatusFilter(e.target.value)
+                                        setPage(1)
+                                    }}
+                                    className="px-3 py-1.5 text-sm font-semibold bg-gray-50 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg text-gray-700 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 cursor-pointer"
+                                >
+                                    <option value="all">⚡ All Statuses</option>
+                                    <option value="Pending">Pending</option>
+                                    <option value="Packed">Packed</option>
+                                    <option value="Ready to Ship">Ready to Ship</option>
+                                    <option value="Shipped">Shipped</option>
+                                    <option value="Delivered">Delivered</option>
+                                    <option value="Delivery Failed">Delivery Failed</option>
+                                    <option value="Returning To Seller">Returning To Seller</option>
+                                    <option value="Customer Return">Customer Return</option>
+                                    <option value="Customer Return Delivered">Customer Return Delivered</option>
+                                    <option value="Cancelled">Cancelled</option>
+                                    <option value="Unpaid">Unpaid</option>
+                                </select>
+                            </div>
+
+                            {/* Unprinted Invoices Toggle */}
+                            <button
+                                onClick={() => {
+                                    setUnprintedOnly(!unprintedOnly)
+                                    setPage(1)
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold rounded-lg border transition-all cursor-pointer ${
+                                    unprintedOnly
+                                        ? 'bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800'
+                                        : 'bg-gray-50 hover:bg-gray-100 text-gray-700 border-gray-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700 dark:hover:bg-zinc-800'
+                                }`}
+                                title="Show only orders with unprinted shipping labels"
+                            >
+                                <FileX size={14} className={unprintedOnly ? 'text-rose-600' : 'text-gray-500'} />
+                                <span>Unprinted Labels</span>
+                                {unprintedOnly && (
+                                    <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />
+                                )}
+                            </button>
+
+                            {/* Reset Filters */}
+                            {hasActiveFilters && (
+                                <button
+                                    onClick={() => {
+                                        setSellerAccountFilter('all')
+                                        setStatusFilter('all')
+                                        setUnprintedOnly(false)
+                                        setSearchQuery('')
+                                        setSearchInput('')
+                                        setBulkStatus('')
+                                        setPage(1)
+                                    }}
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-semibold text-gray-600 hover:text-gray-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                    title="Reset all filters"
+                                >
+                                    <RotateCcw size={13} />
+                                    <span>Reset</span>
+                                </button>
+                            )}
+
+                            {/* Right Actions: Add Order + Total count */}
+                            <div className="ml-auto flex items-center gap-2">
+                                {canEditOrderEntry && (
+                                    <button
+                                        onClick={() => setIsAddModalOpen(true)}
+                                        className="flex items-center gap-1.5 px-3.5 py-1.5 text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-xs shadow-blue-500/20 transition-colors cursor-pointer"
+                                    >
+                                        <Plus size={15} />
+                                        <span>Add Order</span>
+                                    </button>
+                                )}
+
+                                <div className="px-3 py-1 rounded-lg bg-gray-100 dark:bg-zinc-800 text-sm font-black text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
+                                    Total: {pagination?.total || 0}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 4. Grouped Order Sections by Seller Store */}
+                    <div className="space-y-3">
+                        {groupedOrders.map((group, groupIdx) => {
+                            const groupStats = group.orders.reduce((acc: any, order) => {
+                                const status = order.order_status
+                                acc[status] = (acc[status] || 0) + 1
+                                return acc
+                            }, {})
+
+                            const displayedOrders = group.orders.filter(order => {
+                                const s = order.order_status.toLowerCase()
+                                if (statusFilter === 'all' && (s === 'cancel' || s === 'cancelled' || s === 'unpaid')) {
+                                    return false
+                                }
+                                return true
+                            })
+
+                            if (displayedOrders.length === 0) return null
+
+                            const isCollapsed = collapsedStores[group.seller] ?? false
+                            const isAllSelected = displayedOrders.length > 0 && displayedOrders.every(o => selectedOrders.includes(o.id))
+
+                            return (
+                                <div
+                                    key={group.seller}
+                                    id={`group-${groupIdx}`}
+                                    className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-xs overflow-hidden transition-all"
+                                >
+                                    {/* Store Section Header */}
+                                    <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="h-7 w-7 rounded-lg bg-blue-100 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold border border-blue-200 dark:border-blue-800">
+                                                <Store size={15} />
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <h3 className="text-sm font-black text-gray-900 dark:text-zinc-100 uppercase tracking-wide">
+                                                    {group.seller}
+                                                </h3>
+                                                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                                                    {displayedOrders.length} orders
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* Status Breakdown Pills */}
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                            {Object.entries(groupStats).map(([st, cnt]) => {
+                                                const badge = getStatusBadge(st)
+                                                return (
+                                                    <span
+                                                        key={st}
+                                                        className={`text-xs font-bold px-2 py-0.5 rounded-md border flex items-center gap-1 ${badge.bg}`}
+                                                    >
+                                                        <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
+                                                        {st}: {cnt as number}
+                                                    </span>
+                                                )
+                                            })}
+
+                                            {/* Select Group Button */}
+                                            <button
+                                                onClick={() => handleSelectGroup(!isAllSelected, displayedOrders)}
+                                                className={`flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-lg border transition-colors cursor-pointer ml-1 ${
+                                                    isAllSelected
+                                                        ? 'bg-blue-600 text-white border-blue-600'
+                                                        : 'bg-white hover:bg-gray-50 text-gray-700 border-gray-200 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700'
+                                                }`}
+                                                title="Select all orders in this store"
+                                            >
+                                                {isAllSelected ? <CheckSquare size={14} /> : <Square size={14} />}
+                                                <span>{isAllSelected ? 'Selected' : 'Select All'}</span>
+                                            </button>
+
+                                            {/* Collapse / Expand Toggle */}
+                                            <button
+                                                onClick={() => toggleStoreCollapse(group.seller)}
+                                                className="p-1 text-gray-500 hover:text-gray-900 dark:text-zinc-400 dark:hover:text-zinc-100 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
+                                                title={isCollapsed ? 'Expand store' : 'Collapse store'}
+                                            >
+                                                {isCollapsed ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Table Content */}
+                                    {!isCollapsed && (
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-left border-collapse">
+                                                <thead>
+                                                    <tr className="border-b border-gray-200 dark:border-zinc-800 bg-gray-50/80 dark:bg-zinc-900/80 text-xs font-bold uppercase text-gray-700 dark:text-zinc-300 tracking-wider">
+                                                        <th className="py-2.5 px-3 w-10 text-center">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={isAllSelected}
+                                                                onChange={(e) => handleSelectGroup(e.target.checked, displayedOrders)}
+                                                                className="rounded border-gray-300 dark:border-zinc-600 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                                                            />
+                                                        </th>
+                                                        <th className="py-2.5 px-2 w-10 text-center">#</th>
+                                                        <th className="py-2.5 px-2.5 w-24">Date</th>
+                                                        <th className="py-2.5 px-2.5 w-28">Invoice</th>
+                                                        <th className="py-2.5 px-3 w-48">Order Number</th>
+                                                        <th className="hidden lg:table-cell py-2.5 px-3 w-52">Customer</th>
+                                                        <th className="py-2.5 px-3 min-w-[220px]">Product / Items</th>
+                                                        <th className="py-2.5 px-2 w-16 text-center">Qty</th>
+                                                        <th className="py-2.5 px-3 w-28 text-right">Amount</th>
+                                                        <th className="py-2.5 px-3 w-28 text-center">Status</th>
+                                                        <th className="py-2.5 px-3 text-center whitespace-nowrap min-w-[260px] xl:w-72">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 text-sm">
+                                                    {displayedOrders.map((order, idx) => {
+                                                        const isSelected = selectedOrders.includes(order.id)
+                                                        const statusBadge = getStatusBadge(order.order_status)
+                                                        const isCancelled = order.order_status.toLowerCase().includes('cancel')
+
+                                                        // Customer/Order Highlight Classification:
+                                                        // 'duplicate' = Green (active dispatch orders with same last 4 digits)
+                                                        // 'repeat'    = Blue (has matching delivered order)
+                                                        // 'normal'    = default
+                                                        const highlightType = getOrderHighlightType(order)
+
+                                                        const orderClass = highlightType === 'duplicate'
+                                                            ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                                                            : highlightType === 'repeat'
+                                                                ? 'text-blue-600 dark:text-blue-400 font-bold'
+                                                                : 'text-gray-800 dark:text-zinc-200 font-medium'
+
+                                                        const customerClass = highlightType === 'duplicate'
+                                                            ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                                                            : highlightType === 'repeat'
+                                                                ? 'text-blue-600 dark:text-blue-400 font-bold'
+                                                                : 'text-gray-900 dark:text-zinc-100 font-medium'
+
+                                                        return (
+                                                            <tr
+                                                                key={order.id}
+                                                                className={`group transition-colors ${
+                                                                    isSelected
+                                                                        ? 'bg-blue-50/70 dark:bg-blue-950/30'
+                                                                        : isCancelled
+                                                                            ? 'bg-rose-50/40 dark:bg-rose-950/20'
+                                                                            : highlightType === 'duplicate'
+                                                                                ? 'bg-emerald-50/30 dark:bg-emerald-950/15'
+                                                                                : highlightType === 'repeat'
+                                                                                    ? 'bg-blue-50/30 dark:bg-blue-950/15'
+                                                                                    : 'hover:bg-slate-50 dark:hover:bg-zinc-800/40'
+                                                                }`}
+                                                            >
+                                                                {/* Selection Checkbox */}
+                                                                <td className="py-2 px-3 text-center">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={isSelected}
+                                                                        onChange={(e) => handleSelectOrder(order.id, e.target.checked)}
+                                                                        className="rounded border-gray-300 dark:border-zinc-600 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                                                                    />
+                                                                </td>
+
+                                                                {/* Serial Number */}
+                                                                <td className="py-2 px-2 text-center text-sm text-gray-500 dark:text-zinc-400 font-semibold">
+                                                                    {idx + 1}
+                                                                </td>
+
+                                                                {/* Order Date */}
+                                                                <td className="py-2 px-2.5 whitespace-nowrap text-sm text-gray-700 dark:text-zinc-300 font-medium">
+                                                                    {new Date(order.order_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}
+                                                                </td>
+
+                                                                {/* Invoice Number Link */}
+                                                                <td className="py-2 px-2.5 whitespace-nowrap">
+                                                                    <button
+                                                                        onClick={() => router.push(`/dashboard/sales/daraz/order/${order.id}?from=sales-entry`)}
+                                                                        onMouseEnter={() => queryClient.prefetchQuery({
+                                                                            queryKey: ['daraz-order', order.id],
+                                                                            queryFn: () => getDarazOrderById(order.id)
+                                                                        })}
+                                                                        className="inline-flex items-center gap-1 font-mono text-sm font-bold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 hover:underline cursor-pointer"
+                                                                        title="View Order Details"
+                                                                    >
+                                                                        <span>{order.invoice_number}</span>
+                                                                        <ExternalLink size={11} className="opacity-60" />
+                                                                    </button>
+                                                                </td>
+
+                                                                {/* Order Number - Green for Duplicate, Blue for Repeat Customer */}
+                                                                <td className="py-2 px-3">
+                                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                                        <span className={`font-mono text-sm ${orderClass}`}>
+                                                                            {order.order_number}
+                                                                        </span>
+                                                                        <button
+                                                                            onClick={(e) => handleCopyOrderNumber(e, order.order_number)}
+                                                                            className="p-1 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                                                                            title="Copy Order Number"
+                                                                        >
+                                                                            {copiedOrderId === order.order_number ? (
+                                                                                <Check size={13} className="text-emerald-500" />
+                                                                            ) : (
+                                                                                <Copy size={13} />
+                                                                            )}
+                                                                        </button>
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Customer Name - Green for Duplicate, Blue for Repeat Customer */}
+                                                                <td className="hidden lg:table-cell py-2 px-3">
+                                                                    <div className="flex items-center gap-1.5 min-w-0">
+                                                                        <span className={`text-sm truncate ${customerClass}`} title={order.customer_name}>
+                                                                            {order.customer_name}
+                                                                        </span>
+                                                                        {order.remarks && (
+                                                                            <CustomerRemarksTooltip remarks={order.remarks} />
+                                                                        )}
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Product Column */}
+                                                                <td
+                                                                    className="py-2 px-3"
+                                                                    title={order.items && order.items.length > 1
+                                                                        ? order.items.map((item: any) => `${item.product_name || 'Unknown'} (Qty: ${item.quantity})`).join('\n')
+                                                                        : order.first_product_name
+                                                                    }
+                                                                >
+                                                                    <div className="flex flex-col gap-0.5">
+                                                                        <span className={`truncate max-w-[280px] text-sm font-medium ${
+                                                                            order.first_product_name === 'Product Not Found'
+                                                                                ? 'text-rose-600 font-bold'
+                                                                                : 'text-gray-800 dark:text-zinc-200'
+                                                                        }`}>
+                                                                            {order.first_product_name}
+                                                                        </span>
+                                                                        {order.item_count > 1 && (
+                                                                            <span className="inline-flex items-center gap-1 text-xs font-bold text-blue-600 dark:text-blue-400">
+                                                                                +{order.item_count - 1} more item{order.item_count > 2 ? 's' : ''}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Total Quantity */}
+                                                                <td className="py-2 px-2 text-center">
+                                                                    <span className="inline-flex items-center justify-center min-w-[26px] px-2 py-0.5 rounded-md font-bold text-sm bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
+                                                                        {order.total_quantity}
+                                                                    </span>
+                                                                </td>
+
+                                                                {/* Grand Total Amount */}
+                                                                <td className="py-2 px-3 text-right whitespace-nowrap">
+                                                                    <span className="font-bold text-sm text-gray-900 dark:text-zinc-100">
+                                                                        Rs. {order.grand_total?.toLocaleString()}
+                                                                    </span>
+                                                                </td>
+
+                                                                {/* Order Status Badge */}
+                                                                <td className="py-2 px-3 text-center whitespace-nowrap">
+                                                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-md border ${statusBadge.bg}`}>
+                                                                        <span className={`h-1.5 w-1.5 rounded-full ${statusBadge.dot}`} />
+                                                                        {order.order_status}
+                                                                    </span>
+                                                                </td>
+
+                                                                {/* Actions Column: In Single Row without Wrap on Desktop, NO Delete icon */}
+                                                                <td className="py-2 px-3 text-center">
+                                                                    <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
+                                                                        {/* Profit / Loss Badge */}
+                                                                        <ProfitLossBadge profitInfo={order.profit_info} />
+
+                                                                        {/* Inventory Stock Indicator */}
+                                                                        <StockIndicator orderId={order.id} order={order} />
+
+                                                                        {/* Quick Plan Button */}
+                                                                        <QuickPlanButton
+                                                                            order={order}
+                                                                            stockInfo={stockInfo[order.id]}
+                                                                            allOrders={orders}
+                                                                            activePlanProductIds={activePlanProductIds}
+                                                                        />
+
+                                                                        {/* Print Invoice Button */}
+                                                                        <button
+                                                                            onClick={() => window.open(`/print/daraz-invoice/${order.id}`, '_blank')}
+                                                                            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                                                                                order.is_printed
+                                                                                    ? 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                                                                                    : 'text-gray-600 bg-gray-50 border-gray-200 hover:bg-gray-100 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700 dark:hover:bg-zinc-700'
+                                                                            }`}
+                                                                            title={order.is_printed ? "Invoice printed (Click to re-print)" : "Print Shipping Label"}
+                                                                        >
+                                                                            <Printer size={15} />
+                                                                        </button>
+
+                                                                        {/* Sync Order Products Button */}
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                if (confirm('Sync products for this order from inventory?')) {
+                                                                                    const res = await syncDarazOrderProducts(order.id)
+                                                                                    if (res.success) {
+                                                                                        toast.success(res.message)
+                                                                                        queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
+                                                                                    } else {
+                                                                                        toast.error(res.message)
+                                                                                    }
+                                                                                }
+                                                                            }}
+                                                                            className="p-1.5 text-gray-500 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 border border-gray-200 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-blue-300 rounded-lg transition-colors cursor-pointer"
+                                                                            title="Sync Products from Inventory"
+                                                                        >
+                                                                            <RefreshCw size={15} />
+                                                                        </button>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        )
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            )
+                        })}
+
+                        {/* Empty State */}
+                        {orders.length === 0 && !isLoading && !isFetching && (
+                            <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-12 text-center shadow-xs">
+                                <div className="h-12 w-12 rounded-full bg-gray-100 dark:bg-zinc-800 text-gray-400 dark:text-zinc-500 flex items-center justify-center mx-auto mb-3">
+                                    <Package size={24} />
+                                </div>
+                                <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 mb-1">
+                                    No Orders Found
+                                </h3>
+                                <p className="text-sm text-gray-500 dark:text-zinc-400 max-w-sm mx-auto mb-4">
+                                    There are no pending or dispatched orders matching your current filter criteria.
+                                </p>
+                                {hasActiveFilters && (
+                                    <button
+                                        onClick={() => {
+                                            setSellerAccountFilter('all')
+                                            setStatusFilter('all')
+                                            setUnprintedOnly(false)
+                                            setSearchQuery('')
+                                            setSearchInput('')
+                                            setBulkStatus('')
+                                        }}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold bg-gray-100 hover:bg-gray-200 text-gray-800 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 rounded-lg transition-colors cursor-pointer"
+                                    >
+                                        <RotateCcw size={14} />
+                                        <span>Reset Filters</span>
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Loading State */}
+                        {(isLoading || (isFetching && orders.length === 0)) && (
+                            <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-12 text-center shadow-xs">
+                                <RefreshCw className="animate-spin text-blue-500 mx-auto mb-3" size={32} />
+                                <p className="text-sm font-bold text-gray-700 dark:text-zinc-300">
+                                    Loading Daraz Orders...
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Global Pagination Card */}
+                        {renderPagination()}
+                    </div>
+                </div>
+
+                {/* 5. Modern Floating Bulk Action Bar */}
+                {selectedOrders.length > 0 && (
+                    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-950/90 backdrop-blur-md text-white border border-zinc-700 shadow-2xl rounded-2xl px-4 py-2.5 flex items-center gap-3 transition-all animate-in fade-in slide-in-from-bottom-5 max-w-[95vw]">
+                        <div className="flex items-center gap-2 pr-3 border-r border-zinc-800">
+                            <span className="flex h-2.5 w-2.5 rounded-full bg-blue-500 animate-pulse" />
+                            <span className="text-sm font-bold text-zinc-100 whitespace-nowrap">
+                                {selectedOrders.length} selected
+                            </span>
+                            <button
+                                onClick={() => setSelectedOrders([])}
+                                className="text-xs text-zinc-400 hover:text-white transition-colors underline ml-1 cursor-pointer"
+                            >
+                                Clear
+                            </button>
+                        </div>
+
+                        {/* Bulk Print */}
                         <button
                             onClick={() => {
                                 const ids = selectedOrders.join(',')
                                 window.open(`/print/daraz-invoice/bulk?ids=${ids}`, '_blank')
                             }}
-                            className="flex items-center gap-1 px-2 py-0.5 text-[13px] border dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 rounded dark:text-gray-50"
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700 rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                            title="Print shipping labels for selected orders"
                         >
-                            <Printer size={11} />
-                            Print
+                            <Printer size={14} />
+                            <span>Print ({selectedOrders.length})</span>
                         </button>
-                        <select
-                            value={bulkStatus}
-                            onChange={(e) => setBulkStatus(e.target.value)}
-                            className="px-2 py-0.5 text-[13px] border dark:border-zinc-700 rounded focus:ring-1 focus:ring-blue-500 dark:bg-zinc-800 dark:text-gray-50"
-                        >
-                            <option value="">Change Status...</option>
-                            <option value="Unpaid">Unpaid</option>
-                            <option value="Pending">Pending</option>
-                            <option value="Packed">Packed</option>
-                            <option value="Ready to Ship">Ready to Ship</option>
-                            <option value="Shipped">Shipped</option>
-                            <option value="Delivered">Delivered</option>
-                            <option value="Returning to Seller">Returning to Seller</option>
-                            <option value="Returned Delivered">Returned Delivered</option>
-                            <option value="Customer Return">Customer Return</option>
-                            <option value="Customer Return Delivered">Customer Return Delivered</option>
-                            <option value="Cancel">Cancel</option>
-                        </select>
-                        <button
-                            onClick={handleBulkStatusUpdate}
-                            disabled={!bulkStatus}
-                            className="px-2 py-0.5 text-[13px] bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            Update
-                        </button>
-                    </div>
-                )}
-            </div>
 
-            {/* Orders Area - Grouped by Seller */}
-            <div className={`flex-1 overflow-y-auto p-2 pb-24 transition-opacity duration-200 ${isFetching ? 'opacity-50' : 'opacity-100'}`}>
-                {groupedOrders.map((group, groupIdx) => {
-                    // Calculate stats for this group
-                    const groupStats = group.orders.reduce((acc: any, order) => {
-                        const status = order.order_status
-                        acc[status] = (acc[status] || 0) + 1
-                        return acc
-                    }, {})
-
-                    // Filter orders for display: Hide Cancel/Cancelled or Unpaid orders
-                    const displayedOrders = group.orders.filter(order => {
-                        const s = order.order_status.toLowerCase()
-                        if (s === 'cancel' || s === 'cancelled' || s === 'unpaid') {
-                            return false // Hide Cancel/Cancelled and Unpaid orders
-                        }
-                        return true
-                    })
-
-                    if (displayedOrders.length === 0) return null // Skip empty groups after filter
-
-                    return (
-                        <div key={group.seller} id={`group-${groupIdx}`} className="mb-6 scroll-mt-32">
-                            {/* Group Header */}
-                            <div className="flex flex-col gap-1 mb-2 px-1 sticky top-0 z-10 bg-gray-50 dark:bg-zinc-900 py-1">
-                                {/* Row 1: Name and Total */}
-                                <div className="flex items-center gap-2">
-                                    <h3 className="text-sm font-bold text-gray-800 dark:text-gray-100 uppercase tracking-wide min-w-fit">
-                                        {group.seller}
-                                    </h3>
-                                    <span className="text-xs px-2 py-0.5 bg-white dark:bg-zinc-800 border dark:border-zinc-700 rounded-full text-gray-600 dark:text-gray-400 font-medium">
-                                        Total: {group.orders.length}
-                                    </span>
-                                </div>
-                                {/* Row 2: Status Badges (Scrollable) */}
-                                <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap scrollbar-hide pb-1">
-                                    {Object.entries(groupStats).map(([status, count]) => (
-                                        <span key={status} className={`text-[11px] px-1.5 py-0.5 rounded border ${status === 'Pending' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
-                                            status === 'Packed' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
-                                                status === 'Ready to Ship' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                    (status === 'Cancel' || status === 'Cancelled') ? 'bg-red-50 text-red-700 border-red-200' :
-                                                        'bg-gray-50 text-gray-600 border-gray-200'
-                                            }`}>
-                                            {status}: {count as number}
-                                        </span>
-                                    ))}
-                                </div>
-                            </div>
-
-                            <Card className="dark:bg-zinc-900 dark:border-zinc-700">
-                                <div className="overflow-x-auto">
-                                    <table className="w-full table-fixed border-collapse">
-                                        <thead className="bg-gray-50 dark:bg-zinc-800 border-b dark:border-zinc-700">
-                                            <tr>
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-left w-8">
-                                                    <input
-                                                        type="checkbox"
-                                                        // Checked if ALL displayed orders in this group are selected
-                                                        checked={displayedOrders.length > 0 && displayedOrders.every(o => selectedOrders.includes(o.id))}
-                                                        onChange={(e) => handleSelectGroup(e.target.checked, displayedOrders)}
-                                                        className="rounded text-blue-600 focus:ring-blue-500 dark:bg-zinc-700 dark:border-zinc-600 w-3.5 h-3.5"
-                                                        title="Select Group"
-                                                    />
-                                                </th>
-                                                <th className="px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-10">SN</th>
-                                                <th className="px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-14 md:w-22">Date</th>
-                                                <th className="px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-auto md:w-28">Invoice</th>
-                                                <th className="px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-auto md:w-32">Order</th>
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-45">Customer</th>
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-48">Product</th>
-                                                {/* <th className="hidden md:table-cell px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-20">Product ID</th> */}
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-right text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-16">Qty</th>
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-right text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-24">Amount</th>
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-left text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-24">Status</th>
-
-                                                <th className="hidden md:table-cell px-1.5 py-1 text-center text-[13px] font-bold uppercase text-gray-900 dark:text-gray-100 w-29">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-gray-200 dark:divide-zinc-700">
-                                            {displayedOrders.map((order, idx) => (
-                                                <tr
-                                                    key={order.id}
-                                                    className={getRowClass(order)}
-                                                >
-                                                    <td className="hidden md:table-cell px-1.5 py-0.5">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={selectedOrders.includes(order.id)}
-                                                            onChange={(e) => handleSelectOrder(order.id, e.target.checked)}
-                                                            className="rounded text-blue-600 focus:ring-blue-500 dark:bg-zinc-700 dark:border-zinc-600 w-3.5 h-3.5"
-                                                        />
-                                                    </td>
-                                                    <td className="px-1.5 py-0.5 text-sm text-gray-700 dark:text-gray-300 align-top md:align-middle">{idx + 1}</td>
-                                                    <td className="px-1.5 py-0.5 text-[15px] text-gray-700 dark:text-gray-300 align-top md:align-middle">
-                                                        <span className="md:hidden font-medium">{new Date(order.order_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}</span>
-                                                        <span className="hidden md:inline">{new Date(order.order_date).toLocaleDateString('en-GB')}</span>
-                                                    </td>
-                                                    <td className="px-1.5 py-0.5 align-top md:align-middle">
-                                                        <button
-                                                            onClick={() => router.push(`/dashboard/sales/daraz/order/${order.id}?from=sales-entry`)}
-                                                            onMouseEnter={() => queryClient.prefetchQuery({
-                                                                queryKey: ['daraz-order', order.id],
-                                                                queryFn: () => getDarazOrderById(order.id)
-                                                            })}
-                                                            className="text-[14px] font-mono text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 hover:underline cursor-pointer"
-                                                        >
-                                                            <span className="md:hidden">{order.invoice_number?.slice(-5)}</span>
-                                                            <span className="hidden md:inline">{order.invoice_number}</span>
-                                                        </button>
-                                                    </td>
-                                                    <td className="px-1.5 py-0.5 text-sm text-gray-700 dark:text-gray-300 align-top md:align-middle">
-                                                        {/* Desktop View */}
-                                                        <div className="hidden md:block">
-                                                            {order.order_number}
-                                                            {highlightedDuplicates.includes(order.id) && (
-                                                                <span className="ml-1 text-red-600 text-xs font-bold" title="Duplicate">⚠️</span>
-                                                            )}
-                                                        </div>
-
-                                                        {/* Mobile Merged View (3 Rows) */}
-                                                        <div className="md:hidden flex flex-col gap-0.5">
-                                                            {/* Row 1: Order # */}
-                                                            <div className="font-bold text-[13px] break-all">
-                                                                #{order.order_number}
-                                                            </div>
-                                                            {/* Row 2: Qty • Price */}
-                                                            <div className="text-[11px] font-medium text-gray-600 dark:text-gray-400">
-                                                                {order.total_quantity} • Rs. {order.grand_total?.toLocaleString()}
-                                                            </div>
-                                                            {/* Row 3: Status */}
-                                                            <div>
-                                                                <span className={`px-1.5 py-0.5 text-[10px] font-bold uppercase rounded ${getStatusColor(order.order_status)} inline-block`}>
-                                                                    {order.order_status}
-                                                                </span>
-                                                            </div>
-                                                        </div>
-                                                    </td>
-                                                    <td className={`hidden md:table-cell px-1.5 py-0.5 text-[15px] ${getCustomerClass(order.customer_name, order.order_date)}`}>
-                                                        <div className="flex items-center gap-1.5 min-w-0 overflow-visible relative z-10 hover:z-30">
-                                                            <span className="truncate" title={order.customer_name}>{order.customer_name}</span>
-                                                            {order.remarks && (
-                                                                <CustomerRemarksTooltip remarks={order.remarks} />
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                    <td
-                                                        className={`hidden md:table-cell px-1.5 py-0.5 text-[15px] ${order.first_product_name === 'Product Not Found' ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-700 dark:text-gray-300'} ${order.item_count > 1 ? 'cursor-help' : ''}`}
-                                                        title={order.items && order.items.length > 1
-                                                            ? order.items.map((item: any) => item.product_name || 'Unknown Product').join('\n')
-                                                            : order.first_product_name
-                                                        }
-                                                    >
-                                                        <div className="flex flex-col">
-                                                            <span className="truncate">{order.first_product_name}</span>
-                                                            {order.item_count > 1 && (
-                                                                <span className="text-xs font-bold text-blue-600 dark:text-blue-400">
-                                                                    (+{order.item_count - 1} more)
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                    {/* <td className="hidden md:table-cell px-1.5 py-0.5 text-sm text-gray-600 dark:text-gray-400">
-                                                        {order.first_product_code ? `#${order.first_product_code}` : '-'}
-                                                    </td> */}
-                                                    <td className="hidden md:table-cell px-1.5 py-0.5 text-[15px] text-right text-gray-700 dark:text-gray-300">{order.total_quantity}</td>
-                                                    <td className="hidden md:table-cell px-1.5 py-0.5 text-[15px] text-right font-medium text-gray-700 dark:text-gray-300">
-                                                        <span>Rs. {order.grand_total?.toLocaleString()}</span>
-                                                    </td>
-                                                    <td className="hidden md:table-cell px-1.5 py-0.5">
-                                                        <span className={`px-1 py-0.5 text-xs font-medium rounded ${getStatusColor(order.order_status)}`}>
-                                                            {order.order_status}
-                                                        </span>
-                                                    </td>
-
-                                                    <td className="hidden md:table-cell px-1.5 py-0.5">
-                                                        <div className="flex items-center justify-center gap-0.5">
-                                                            {/* Stock Indicator */}
-                                                            <StockIndicator orderId={order.id} order={order} />
-
-                                                            {/* Quick Plan Button */}
-                                                            <QuickPlanButton
-                                                                order={order}
-                                                                stockInfo={stockInfo[order.id]}
-                                                                allOrders={orders}
-                                                                activePlanProductIds={activePlanProductIds}
-                                                            />
-
-                                                            <button
-                                                                onClick={() => window.open(`/print/daraz-invoice/${order.id}`, '_blank')}
-                                                                className={`p-0.5 hover:bg-gray-100 dark:hover:bg-zinc-700 rounded ${order.is_printed ? 'text-green-600 dark:text-green-400' : 'text-gray-600 dark:text-gray-400'}`}
-                                                                title={order.is_printed ? "Printed" : "Print"}
-                                                            >
-                                                                <Printer size={13} />
-                                                            </button>
-
-                                                            <button
-                                                                onClick={async () => {
-                                                                    if (confirm('Sync products for this order?')) {
-                                                                        const res = await syncDarazOrderProducts(order.id)
-                                                                        if (res.success) {
-                                                                            toast.success(res.message)
-                                                                            // Auto-refresh: Invalidate orders cache to trigger automatic UI update
-                                                                            queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
-                                                                        } else {
-                                                                            toast.error(res.message)
-                                                                        }
-                                                                    }
-                                                                }}
-                                                                className="px-1 py-0.5 text-[13px] text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded"
-                                                                title="Sync products from inventory"
-                                                            >
-                                                                <RefreshCw size={13} />
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </Card>
+                        {/* Bulk Status Select & Apply */}
+                        <div className="flex items-center gap-1.5">
+                            <select
+                                value={bulkStatus}
+                                onChange={(e) => setBulkStatus(e.target.value)}
+                                className="px-2.5 py-1.5 text-xs font-medium bg-zinc-800 text-zinc-100 border border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                            >
+                                <option value="">Change Status...</option>
+                                <option value="Unpaid">Unpaid</option>
+                                <option value="Pending">Pending</option>
+                                <option value="Packed">Packed</option>
+                                <option value="Ready to Ship">Ready to Ship</option>
+                                <option value="Shipped">Shipped</option>
+                                <option value="Delivered">Delivered</option>
+                                <option value="Returning to Seller">Returning to Seller</option>
+                                <option value="Returned Delivered">Returned Delivered</option>
+                                <option value="Customer Return">Customer Return</option>
+                                <option value="Customer Return Delivered">Customer Return Delivered</option>
+                                <option value="Cancel">Cancel</option>
+                            </select>
+                            <button
+                                onClick={handleBulkStatusUpdate}
+                                disabled={!bulkStatus}
+                                className="px-3 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                            >
+                                Apply
+                            </button>
                         </div>
-                    )
-                })}
-
-                {orders.length === 0 && !isLoading && !isFetching && (
-                    <div className="text-center py-12 text-gray-500 dark:text-gray-400">
-                        No orders found. Click "Add New Order" to create one.
                     </div>
                 )}
 
-                {isLoading || isFetching && orders.length === 0 && (
-                    <div className="text-center py-12 text-gray-500 dark:text-gray-400">
-                        Loading...
-                    </div>
-                )}
-
-                {/* Global Pagination */}
-                {renderPagination()}
-            </div>
-
-            {/* Modals */}
-            {
-                isAddModalOpen && (
+                {/* 6. Modals */}
+                {isAddModalOpen && (
                     <AddDarazOrderModal
                         isOpen={isAddModalOpen}
                         onClose={() => setIsAddModalOpen(false)}
                     />
-                )
-            }
+                )}
 
-            {
-                isImportModalOpen && (
-                    <ImportDarazOrdersModal
-                        isOpen={isImportModalOpen}
-                        onClose={() => setIsImportModalOpen(false)}
-                    />
-                )
-            }
+                <DeletionReasonModal
+                    isOpen={deletionModal.isOpen}
+                    orderNumber={deletionModal.order?.order_number || ''}
+                    onClose={() => setDeletionModal({ isOpen: false, order: null })}
+                    onSubmit={handleUserDeletionSubmit}
+                    isSubmitting={isSubmittingDeletion}
+                />
 
-            {/* Deletion Modals */}
-            <DeletionReasonModal
-                isOpen={deletionModal.isOpen}
-                orderNumber={deletionModal.order?.order_number || ''}
-                onClose={() => setDeletionModal({ isOpen: false, order: null })}
-                onSubmit={handleUserDeletionSubmit}
-                isSubmitting={isSubmittingDeletion}
-            />
+                <AdminDeleteConfirm
+                    isOpen={adminDeleteModal.isOpen}
+                    orderNumber={adminDeleteModal.order?.order_number || ''}
+                    onClose={() => setAdminDeleteModal({ isOpen: false, order: null })}
+                    onConfirm={handleAdminDeleteConfirm}
+                    isDeleting={isSubmittingDeletion}
+                />
 
-            <AdminDeleteConfirm
-                isOpen={adminDeleteModal.isOpen}
-                orderNumber={adminDeleteModal.order?.order_number || ''}
-                onClose={() => setAdminDeleteModal({ isOpen: false, order: null })}
-                onConfirm={handleAdminDeleteConfirm}
-                isDeleting={isSubmittingDeletion}
-            />
-
-            <PartialReturnModal
-                isOpen={isPartialReturnOpen}
-                order={selectedOrderForReturn}
-                onClose={() => setIsPartialReturnOpen(false)}
-            />
-
-        </div >
+                <PartialReturnModal
+                    isOpen={isPartialReturnOpen}
+                    order={selectedOrderForReturn}
+                    onClose={() => setIsPartialReturnOpen(false)}
+                />
+            </div>
         </PermissionGuard>
     )
 }
-

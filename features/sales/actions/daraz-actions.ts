@@ -2,6 +2,7 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { calculateOrderProfitsForOrders, clearOrderProfitCalculatorCache } from '@/features/sales/utils/daraz-order-profit'
 
 // Types
 interface DarazOrderItem {
@@ -187,18 +188,12 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
     const orderIds = data?.map((o: any) => o.id) || []
     const { data: allItems } = await supabase
         .from('daraz_order_items')
-        .select('order_id, item_status, quantity, product_id, product_name')
+        .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
         .in('order_id', orderIds)
 
-    const orders = data?.map((order: any) => {
+    const rawOrders = data?.map((order: any) => {
         const orderItems = allItems?.filter((i: any) => i.order_id === order.id) || []
 
-        // Calculate item statuses - use item_status if set, otherwise fallback to main order status
-        // We create an array representing each unit? Or each line item?
-        // User screenshot implies line items or maybe exploded units.
-        // Let's stick to line items statuses for now as that's what we have.
-        // If an item has qty 2, it's one line. But if split, it becomes 2 lines.
-        // So mapping orderItems is correct.
         // Calculate item statuses - use item_status if set, otherwise fallback to main order status
         // Expand based on item quantity to show one status badge per unit
         const itemStatuses: string[] = []
@@ -216,6 +211,9 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
             item_statuses: itemStatuses
         }
     }) || []
+
+    // Calculate exact dynamic profit, receivable or invalid status based on Daraz fees and purchasing prices
+    const orders = await calculateOrderProfitsForOrders(rawOrders, allItems || [])
 
     return {
         orders,
@@ -1189,44 +1187,91 @@ export async function getDarazOrderStats(sellerAccount?: string, restrictShipped
     const supabase = await createClient()
 
     try {
-        // Build base query
-        const getQuery = (status: string, dateRestricted = false) => {
-            let query = supabase
-                .from('daraz_orders')
-                .select('*, items:daraz_order_items!inner(seller_account)', { count: 'exact', head: true })
-                .or('deleted.is.null,deleted.eq.false')
-                .ilike('order_status', status)
+        const today = new Date().toISOString().split('T')[0]
+        const todayStart = `${today}T00:00:00.000Z`
 
-            if (sellerAccount && sellerAccount !== 'all') {
-                query = query.eq('items.seller_account', sellerAccount)
-            }
+        // 1. Query active orders: Pending, Packed, Ready to Ship
+        let activeQuery = supabase
+            .from('daraz_orders_with_totals')
+            .select('order_status, grand_total, seller_account')
+            .or('deleted.is.null,deleted.eq.false')
+            .in('order_status', ['Pending', 'Packed', 'Ready to Ship'])
 
-            if (dateRestricted && restrictShippedToToday) {
-                const today = new Date().toISOString().split('T')[0]
-                const todayStart = `${today}T00:00:00.000Z`
-                // Match logic in getDarazOrders: Shipped Today means shipped_at >= Today 00:00
-                query = query.gte('shipped_at', todayStart)
-            }
-
-            return query
+        if (sellerAccount && sellerAccount !== 'all') {
+            activeQuery = activeQuery.eq('seller_account', sellerAccount)
         }
 
-        const [pending, packed, readyToShip, shipped] = await Promise.all([
-            getQuery('Pending'),
-            getQuery('Packed'),
-            getQuery('Ready to Ship'),
-            getQuery('Shipped', true) // Apply date restriction to Shipped only
-        ])
+        // 2. Query shipped orders (restricted to today if flag set)
+        let shippedQuery = supabase
+            .from('daraz_orders_with_totals')
+            .select('order_status, grand_total, seller_account')
+            .or('deleted.is.null,deleted.eq.false')
+            .eq('order_status', 'Shipped')
+
+        if (sellerAccount && sellerAccount !== 'all') {
+            shippedQuery = shippedQuery.eq('seller_account', sellerAccount)
+        }
+
+        if (restrictShippedToToday) {
+            shippedQuery = shippedQuery.gte('shipped_at', todayStart)
+        }
+
+        const [activeRes, shippedRes] = await Promise.all([activeQuery, shippedQuery])
+
+        const activeRows = activeRes.data || []
+        const shippedRows = shippedRes.data || []
+
+        let pendingCount = 0
+        let pendingAmount = 0
+        let packedCount = 0
+        let packedAmount = 0
+        let readyCount = 0
+        let readyAmount = 0
+
+        activeRows.forEach((r: any) => {
+            const st = r.order_status?.toLowerCase().trim()
+            const amt = Number(r.grand_total) || 0
+            if (st === 'pending') {
+                pendingCount++
+                pendingAmount += amt
+            } else if (st === 'packed') {
+                packedCount++
+                packedAmount += amt
+            } else if (st === 'ready to ship') {
+                readyCount++
+                readyAmount += amt
+            }
+        })
+
+        let shippedCount = 0
+        let shippedAmount = 0
+        shippedRows.forEach((r: any) => {
+            shippedCount++
+            shippedAmount += Number(r.grand_total) || 0
+        })
 
         return {
-            pending: pending.count || 0,
-            packed: packed.count || 0,
-            readyToShip: readyToShip.count || 0,
-            shipped: shipped.count || 0
+            pending: pendingCount,
+            pendingAmount: Math.round(pendingAmount),
+            packed: packedCount,
+            packedAmount: Math.round(packedAmount),
+            readyToShip: readyCount,
+            readyToShipAmount: Math.round(readyAmount),
+            shipped: shippedCount,
+            shippedAmount: Math.round(shippedAmount)
         }
     } catch (error) {
         console.error('Error fetching stats:', error)
-        return { pending: 0, shipped: 0 }
+        return {
+            pending: 0,
+            pendingAmount: 0,
+            packed: 0,
+            packedAmount: 0,
+            readyToShip: 0,
+            readyToShipAmount: 0,
+            shipped: 0,
+            shippedAmount: 0
+        }
     }
 }
 
@@ -1815,6 +1860,7 @@ export async function syncProductInfoFromInventory() {
             returnMessage += ` Found ${missingCount} SKU${missingCount > 1 ? 's' : ''} not in inventory (check logs).`
         }
 
+        clearOrderProfitCalculatorCache()
         revalidatePath('/dashboard/sales/daraz/sales-entry')
         return {
             success: true,
@@ -1857,7 +1903,7 @@ export async function syncDarazOrderProducts(orderId: string) {
             // Optimized query: Use .or with simple equality
             const { data: product } = await supabase
                 .from('products')
-                .select('product_name, seller_account1, seller_sku1, seller_account2, seller_sku2, seller_account3, seller_sku3, seller_account4, seller_sku4')
+                .select('id, product_name, seller_account1, seller_sku1, seller_account2, seller_sku2, seller_account3, seller_sku3, seller_account4, seller_sku4')
                 .or(`seller_sku1.eq."${sellerSku}",seller_sku2.eq."${sellerSku}",seller_sku3.eq."${sellerSku}",seller_sku4.eq."${sellerSku}"`)
                 .eq('is_deleted', false)
                 .maybeSingle() // Use maybeSingle to avoid error if not found
@@ -1874,6 +1920,7 @@ export async function syncDarazOrderProducts(orderId: string) {
                 const { error: updateError } = await supabase
                     .from('daraz_order_items')
                     .update({
+                        product_id: product.id,
                         product_name: product.product_name,
                         seller_account: matchedAccount
                     })
@@ -1888,6 +1935,7 @@ export async function syncDarazOrderProducts(orderId: string) {
             }
         }))
 
+        clearOrderProfitCalculatorCache()
         revalidatePath('/dashboard/sales/daraz/sales-entry')
         revalidatePath('/dashboard/sales/daraz/order-list')
 
@@ -2594,6 +2642,58 @@ export async function updateDarazOrderRemarks(orderId: string, remarks: string |
         return { success: false, error: error.message || 'Failed to update remarks' }
     }
 }
+
+// Check which customer orders (matching customer name AND last 4 digits of order number) have at least one 'Delivered' order in the database
+export async function checkDeliveredCustomerOrders(
+    lookups: { customerName: string; last4: string }[]
+): Promise<string[]> {
+    if (!lookups || lookups.length === 0) return []
+    const supabase = await createClient()
+
+    try {
+        const uniqueLookups = Array.from(
+            new Map(
+                lookups
+                    .filter(l => l && l.customerName && l.last4 && l.last4.length >= 4)
+                    .map(l => [`${l.customerName.trim().toLowerCase()}|${l.last4.trim()}`, l])
+            ).values()
+        )
+
+        if (uniqueLookups.length === 0) return []
+
+        const matchedKeys: string[] = []
+        const chunkSize = 20
+        for (let i = 0; i < uniqueLookups.length; i += chunkSize) {
+            const chunk = uniqueLookups.slice(i, i + chunkSize)
+            const customerNames = Array.from(new Set(chunk.map(c => c.customerName.trim())))
+
+            const { data, error } = await supabase
+                .from('daraz_orders')
+                .select('customer_name, order_number')
+                .eq('order_status', 'Delivered')
+                .or('deleted.is.null,deleted.eq.false')
+                .in('customer_name', customerNames)
+                .limit(200)
+
+            if (!error && data) {
+                data.forEach((d: any) => {
+                    const rowName = String(d.customer_name || '').trim().toLowerCase()
+                    const rowLast4 = String(d.order_number || '').trim().slice(-4)
+                    const key = `${rowName}|${rowLast4}`
+                    if (chunk.some(c => c.customerName.trim().toLowerCase() === rowName && c.last4.trim() === rowLast4)) {
+                        matchedKeys.push(key)
+                    }
+                })
+            }
+        }
+        return Array.from(new Set(matchedKeys))
+    } catch (err) {
+        console.error('Error checking delivered customer orders:', err)
+        return []
+    }
+}
+
+
 
 
 
