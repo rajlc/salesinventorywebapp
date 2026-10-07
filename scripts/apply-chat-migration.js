@@ -44,19 +44,14 @@ async function runMigration() {
     // 1. Try environment variables
     let connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL;
     
-    // 2. Try hardcoded remote credentials from check_tables_pg.js (dev & prod hosts)
     if (!connectionString) {
-        console.log('Trying development remote database connection...');
-        connectionString = 'postgresql://postgres:Bagmati%40123@db.shblzjrzulnrsarfxptv.supabase.co:5432/postgres';
+        console.error('DATABASE_URL is not set in environment.');
+        process.exit(1);
     }
 
     if (connectionString) {
         if (await tryConnectAndRun(connectionString)) return;
     }
-
-    console.log('Trying production remote database connection...');
-    const prodUrl = 'postgresql://postgres:Bagmati%40123@db.jdvnhvfchxceaczunael.supabase.co:5432/postgres';
-    if (await tryConnectAndRun(prodUrl)) return;
 
     // 3. Try local docker/Supabase ports as fallback
     console.log('Trying local database ports...');

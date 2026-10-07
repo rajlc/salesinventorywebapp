@@ -119,9 +119,11 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
         queryFn: getCompanyDetails,
     })
 
-    const { data: stockData = [] } = useQuery({
-        queryKey: ['stock-analysis-all'],
-        queryFn: () => getStockAnalysisData({ fiscalYearId: 'all' }),
+    // Fetch stock strictly as of formDate so products purchased after formDate are excluded
+    const { data: stockData = [], isLoading: isStockLoading } = useQuery({
+        queryKey: ['stock-analysis-as-of', formDate, sellerId],
+        queryFn: () => getStockAnalysisData({ fiscalYearId: 'all', asOfDate: formDate, companyId: sellerId || undefined }),
+        enabled: !!formDate,
     })
 
     // Set default seller
@@ -175,6 +177,11 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
         if (!sellerId) { setError('Please select a Seller'); return }
         if (increaseRate < 0) { setError('Increase Rate cannot be negative'); return }
 
+        if (isStockLoading) {
+            setError(`Loading stock data as of ${formDate}... Please wait a moment.`)
+            return
+        }
+
         // Determine which customer names to use
         const resolvedNames: string[] = manualCustomerMode
             ? [manualCustomerName.trim() || 'Cash Customer']
@@ -182,13 +189,13 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
                 ? customerNames
                 : ['Cash Customer']
 
-        // Filter eligible stock: running_stock > 0 and not frozen
+        // Filter eligible stock: running_stock > 0 and not frozen (strictly purchased on or before formDate)
         const eligibleStock = stockData.filter(s =>
             s.running_stock > 0 && !frozenProducts.has(s.particulars)
         )
 
         if (eligibleStock.length === 0) {
-            setError('No available stock to generate bills from. Check Running Stock or frozen products.')
+            setError(`No available stock found for ${formDate}. Products must be purchased on or before this date to generate sales bills.`)
             return
         }
 
@@ -382,6 +389,49 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
 
     const handleVerifyComplete = async () => {
         setError('')
+
+        // 1. Verify all bills have items
+        for (const bill of generatedBills) {
+            if (!bill.items || bill.items.length === 0) {
+                setError(`Bill #${bill.invoice_no} has no items.`)
+                return
+            }
+        }
+
+        // 2. Validate quantity: ensure cumulative sales quantity does not exceed purchase quantity
+        const totalQtyPerProduct = new Map<string, number>()
+        for (const bill of generatedBills) {
+            for (const item of bill.items) {
+                const name = item.particulars?.trim()
+                if (!name) {
+                    setError(`Bill #${bill.invoice_no}: Particulars cannot be empty.`)
+                    return
+                }
+                if (item.quantity <= 0) {
+                    setError(`Bill #${bill.invoice_no}: Quantity for "${name}" must be greater than 0.`)
+                    return
+                }
+                const cur = totalQtyPerProduct.get(name) || 0
+                totalQtyPerProduct.set(name, cur + item.quantity)
+            }
+        }
+
+        // 3. Verify that every product was purchased on or before formDate and total quantity <= available stock
+        for (const [particulars, totalRequestedQty] of totalQtyPerProduct.entries()) {
+            const stockItem = stockData.find(s => s.particulars.trim().toLowerCase() === particulars.toLowerCase())
+            const availableStock = stockItem?.running_stock || 0
+
+            if (!stockItem || availableStock <= 0) {
+                setError(`Cannot save bills: "${particulars}" was not purchased on or before ${formDate} (no stock available as of this date).`)
+                return
+            }
+
+            if (totalRequestedQty > availableStock) {
+                setError(`Cannot save bills: Total sales quantity for "${particulars}" across bills (${totalRequestedQty}) exceeds available purchase stock (${availableStock}) as of ${formDate}.`)
+                return
+            }
+        }
+
         setIsSaving(true)
         try {
             const params: CreateSalesBillParams[] = generatedBills.map(bill => ({
@@ -401,7 +451,9 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
 
             await bulkCreateSalesBills(params)
             queryClient.invalidateQueries({ queryKey: ['sales-bills'] })
+            queryClient.invalidateQueries({ queryKey: ['stock-analysis'] })
             queryClient.invalidateQueries({ queryKey: ['stock-analysis-all'] })
+            queryClient.invalidateQueries({ queryKey: ['stock-analysis-as-of'] })
             setSaveSuccess(true)
             setTimeout(() => onClose(), 1500)
         } catch (err: any) {
@@ -485,13 +537,28 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
                                         type="date"
                                         value={formDate}
                                         onChange={e => {
-                                            setFormDate(e.target.value)
+                                            const newDate = e.target.value
+                                            setFormDate(newDate)
                                             setCustomerNames([])
                                             setNoOrdersWarning(false)
                                             setManualCustomerMode(false)
+                                            if (generatedBills.length > 0) {
+                                                setGeneratedBills([])
+                                                setError(`Date changed to ${newDate}. Previous preview was cleared so products match the new purchase date.`)
+                                            }
                                         }}
                                         className="w-full pl-9 pr-3 py-2.5 border border-slate-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 text-sm focus:outline-none focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 transition-all"
                                     />
+                                </div>
+                                <div className="flex items-center justify-between mt-1 text-[11px]">
+                                    <span className="text-slate-400">BS: {formDate ? adToBS(formDate) : '-'}</span>
+                                    {isStockLoading ? (
+                                        <span className="text-blue-500 flex items-center gap-1"><RefreshCw className="h-2.5 w-2.5 animate-spin" /> Checking stock...</span>
+                                    ) : (
+                                        <span className={stockData.filter(s => s.running_stock > 0 && !frozenProducts.has(s.particulars)).length > 0 ? "text-emerald-600 dark:text-emerald-400 font-medium" : "text-amber-600 dark:text-amber-400 font-medium"}>
+                                            {stockData.filter(s => s.running_stock > 0 && !frozenProducts.has(s.particulars)).length} product(s) in stock on {formDate}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
 
@@ -787,23 +854,35 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
                                                                 </tr>
                                                             </thead>
                                                             <tbody className="divide-y divide-slate-100 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
-                                                                {bill.items.map((item, itemIdx) => (
-                                                                    <tr key={itemIdx} className="hover:bg-slate-50 dark:hover:bg-zinc-800/50">
-                                                                        <td className="px-3 py-2">
-                                                                            {isEditing ? (
-                                                                                <input type="text" value={item.hs_code} onChange={e => updateBillItem(billIdx, itemIdx, 'hs_code', e.target.value)} className="w-20 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-                                                                            ) : (item.hs_code || '-')}
-                                                                        </td>
-                                                                        <td className="px-3 py-2 font-medium text-slate-700 dark:text-zinc-300">
-                                                                            {isEditing ? (
-                                                                                <input type="text" value={item.particulars} onChange={e => updateBillItem(billIdx, itemIdx, 'particulars', e.target.value)} className="w-40 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-                                                                            ) : item.particulars}
-                                                                        </td>
-                                                                        <td className="px-3 py-2 text-right">
-                                                                            {isEditing ? (
-                                                                                <input type="number" min={1} value={item.quantity} onChange={e => updateBillItem(billIdx, itemIdx, 'quantity', e.target.value)} className="w-16 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs text-right bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-                                                                            ) : item.quantity}
-                                                                        </td>
+                                                                {bill.items.map((item, itemIdx) => {
+                                                                    const stockItem = stockData.find(s => s.particulars.trim().toLowerCase() === item.particulars.trim().toLowerCase())
+                                                                    const availableStock = stockItem?.running_stock || 0
+                                                                    const isInvalidStock = !stockItem || availableStock <= 0
+                                                                    const isExceeding = item.quantity > availableStock
+
+                                                                    return (
+                                                                        <tr key={itemIdx} className={`hover:bg-slate-50 dark:hover:bg-zinc-800/50 ${(isInvalidStock || isExceeding) ? 'bg-red-50/40 dark:bg-red-950/20' : ''}`}>
+                                                                            <td className="px-3 py-2">
+                                                                                {isEditing ? (
+                                                                                    <input type="text" value={item.hs_code} onChange={e => updateBillItem(billIdx, itemIdx, 'hs_code', e.target.value)} className="w-20 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                                                                                ) : (item.hs_code || '-')}
+                                                                            </td>
+                                                                            <td className="px-3 py-2 font-medium text-slate-700 dark:text-zinc-300">
+                                                                                {isEditing ? (
+                                                                                    <input type="text" value={item.particulars} onChange={e => updateBillItem(billIdx, itemIdx, 'particulars', e.target.value)} className="w-40 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                                                                                ) : item.particulars}
+                                                                                {isInvalidStock && (
+                                                                                    <span className="text-[10px] text-red-600 dark:text-red-400 block font-normal mt-0.5">⚠️ Not purchased on/before {bill.bill_date_ad}</span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td className="px-3 py-2 text-right">
+                                                                                {isEditing ? (
+                                                                                    <input type="number" min={1} value={item.quantity} onChange={e => updateBillItem(billIdx, itemIdx, 'quantity', e.target.value)} className="w-16 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs text-right bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                                                                                ) : item.quantity}
+                                                                                {isExceeding && (
+                                                                                    <span className="text-[9px] text-red-600 dark:text-red-400 block font-normal text-right mt-0.5">Max: {availableStock}</span>
+                                                                                )}
+                                                                            </td>
                                                                         <td className="px-3 py-2 text-right text-slate-500">
                                                                             {isEditing ? (
                                                                                 <input type="text" value={item.unit} onChange={e => updateBillItem(billIdx, itemIdx, 'unit', e.target.value)} className="w-16 px-1.5 py-1 border border-slate-200 dark:border-zinc-700 rounded text-xs text-right bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
@@ -829,7 +908,8 @@ export function BillGenerateModal({ onClose, frozenProducts = new Set() }: BillG
                                                                             </td>
                                                                         )}
                                                                     </tr>
-                                                                ))}
+                                                                )
+                                                            })}
                                                             </tbody>
                                                             <tfoot className="bg-slate-50 dark:bg-zinc-800/60 text-xs font-semibold">
                                                                 <tr>

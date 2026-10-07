@@ -92,10 +92,11 @@ export function AddSalesBillModal({ onClose, billToEdit }: AddSalesBillModalProp
         queryFn: getCompanyDetails,
     })
 
-    // Fetch Stock Data for Particulars Search
-    const { data: stockData = [] } = useQuery({
-        queryKey: ['stock-analysis-all'],
-        queryFn: () => getStockAnalysisData({ fiscalYearId: 'all' }), // Fetch all to search
+    // Fetch Stock Data strictly as of formData.bill_date_ad
+    const { data: stockData = [], isLoading: isStockLoading } = useQuery({
+        queryKey: ['stock-analysis-as-of', formData.bill_date_ad, formData.seller_company_id],
+        queryFn: () => getStockAnalysisData({ fiscalYearId: 'all', asOfDate: formData.bill_date_ad, companyId: formData.seller_company_id || undefined }),
+        enabled: !!formData.bill_date_ad,
     })
 
     // Helper for particulars dropdown
@@ -196,10 +197,14 @@ export function AddSalesBillModal({ onClose, billToEdit }: AddSalesBillModalProp
         setParticularSearch('')
     }
 
-    // Get Running Stock for a row
+    // Get Running Stock for a row (as of the selected bill date)
     const getRunningStock = (particulars: string) => {
-        const item = stockData.find(s => s.particulars === particulars)
-        return item?.running_stock || 0
+        const item = stockData.find(s => s.particulars.trim().toLowerCase() === particulars.trim().toLowerCase())
+        const base = item?.running_stock || 0
+        const originalBillQty = isEditing && billToEdit?.items
+            ? billToEdit.items.filter(it => it.particulars.trim().toLowerCase() === particulars.trim().toLowerCase()).reduce((sum, it) => sum + it.quantity, 0)
+            : 0
+        return base + originalBillQty
     }
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -239,10 +244,11 @@ export function AddSalesBillModal({ onClose, billToEdit }: AddSalesBillModalProp
             return
         }
 
+        const productTotals = new Map<string, number>()
         for (let i = 0; i < lineItems.length; i++) {
             const item = lineItems[i]
 
-            if (!item.particulars) {
+            if (!item.particulars || !item.particulars.trim()) {
                 setError(`Row ${i + 1}: Particulars is required`)
                 return
             }
@@ -251,9 +257,22 @@ export function AddSalesBillModal({ onClose, billToEdit }: AddSalesBillModalProp
                 return
             }
 
-            const runningStock = getRunningStock(item.particulars)
-            if (item.quantity > runningStock) {
-                setError(`Row ${i + 1}: Quantity (${item.quantity}) exceeds running stock (${runningStock}) for ${item.particulars}`)
+            const name = item.particulars.trim()
+            const cur = productTotals.get(name) || 0
+            productTotals.set(name, cur + item.quantity)
+        }
+
+        for (const [particulars, totalQty] of productTotals.entries()) {
+            const availableStock = getRunningStock(particulars)
+            const stockItem = stockData.find(s => s.particulars.trim().toLowerCase() === particulars.toLowerCase())
+
+            if (!stockItem || availableStock <= 0) {
+                setError(`"${particulars}" was not purchased on or before ${formData.bill_date_ad} (no stock available as of this date).`)
+                return
+            }
+
+            if (totalQty > availableStock) {
+                setError(`Total sales quantity (${totalQty}) exceeds available purchase stock (${availableStock}) as of ${formData.bill_date_ad} for "${particulars}"`)
                 return
             }
         }
@@ -558,7 +577,7 @@ export function AddSalesBillModal({ onClose, billToEdit }: AddSalesBillModalProp
                                                                             <span className="text-[10px] text-slate-400 dark:text-zinc-500 mt-0.5">HS: {stockItem.hs_code || 'N/A'}</span>
                                                                         </div>
                                                                         <div className="flex items-center gap-1.5">
-                                                                            <span className="text-[11px] font-semibold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 px-2 py-1 rounded-full">
+                                                                            <span className={`text-[11px] font-semibold px-2 py-1 rounded-full ${stockItem.running_stock > 0 ? 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400' : 'bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400'}`}>
                                                                                 Stock: {stockItem.running_stock}
                                                                             </span>
                                                                         </div>

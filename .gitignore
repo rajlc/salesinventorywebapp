@@ -64,7 +64,11 @@ add-*.js
 debug_*.js
 debug-*.js
 inspect_*.js
+inspect_*.ts
 test_*.js
+test_*.ts
 scaffold_*.js
 run_*.js
+run_*.ts
+debug_*.ts
 supabase/.temp/

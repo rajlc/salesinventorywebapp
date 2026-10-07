@@ -19,20 +19,30 @@ export interface StockAnalysisItem {
 interface InternalEntry extends StockAnalysisItem {
     _all_time_purchase_stock: number
     _all_time_purchase_amount: number
+    _as_of_purchase_stock: number
+    _as_of_purchase_amount: number
+    _all_time_sales_qty: number
 }
 
 export async function getStockAnalysisData(filters?: {
     fiscalYearId?: string
     companyId?: string
     search?: string
+    asOfDate?: string
 }): Promise<StockAnalysisItem[]> {
     const supabase = await createClient()
+
+    const asOfDate = filters?.asOfDate
 
     // 1. Determine Date Range
     let startDate: string
     let endDate: string
 
-    if (filters?.fiscalYearId && filters.fiscalYearId !== 'all') {
+    if (asOfDate) {
+        // When checking stock as of a specific date, opening includes all older history up to asOfDate
+        startDate = '2000-01-01'
+        endDate = asOfDate
+    } else if (filters?.fiscalYearId && filters.fiscalYearId !== 'all') {
         const { data: fy, error } = await supabase
             .from('fiscal_years')
             .select('start_date, end_date')
@@ -134,6 +144,9 @@ export async function getStockAnalysisData(filters?: {
                 unit: item.unit || 'Pcs',
                 _all_time_purchase_stock: 0,
                 _all_time_purchase_amount: 0,
+                _as_of_purchase_stock: 0,
+                _as_of_purchase_amount: 0,
+                _all_time_sales_qty: 0,
             })
         }
 
@@ -141,17 +154,27 @@ export async function getStockAnalysisData(filters?: {
 
         if (item.hs_code) entry.hs_code = item.hs_code
 
-        // Always accumulate all-time purchase totals (for rate fallback)
+        // Always accumulate all-time purchase totals (for rate fallback and overall stock guard)
         if (item.quantity > 0 && item.amount > 0) {
             entry._all_time_purchase_stock += item.quantity
             entry._all_time_purchase_amount += item.amount
         }
 
-        if (billDate < startDate) {
-            entry.opening_stock += item.quantity
-        } else if (billDate >= startDate && billDate <= endDate) {
-            entry.purchase_stock += item.quantity
-            entry.purchase_amount += item.amount
+        // If asOfDate is provided, check if purchase occurred on or before asOfDate
+        const isEligibleAsOf = !asOfDate || billDate <= asOfDate
+
+        if (isEligibleAsOf && item.quantity > 0 && item.amount > 0) {
+            entry._as_of_purchase_stock += item.quantity
+            entry._as_of_purchase_amount += item.amount
+        }
+
+        if (isEligibleAsOf) {
+            if (billDate < startDate) {
+                entry.opening_stock += item.quantity
+            } else if (billDate >= startDate && billDate <= endDate) {
+                entry.purchase_stock += item.quantity
+                entry.purchase_amount += item.amount
+            }
         }
     }
 
@@ -172,6 +195,9 @@ export async function getStockAnalysisData(filters?: {
                 weighted_average_rate: 0,
                 _all_time_purchase_stock: 0,
                 _all_time_purchase_amount: 0,
+                _as_of_purchase_stock: 0,
+                _as_of_purchase_amount: 0,
+                _all_time_sales_qty: 0,
             })
         }
 
@@ -179,33 +205,62 @@ export async function getStockAnalysisData(filters?: {
 
         if (item.hs_code && !entry.hs_code) entry.hs_code = item.hs_code
 
-        if (billDate < startDate) {
-            entry.opening_stock -= item.quantity
-        } else if (billDate >= startDate && billDate <= endDate) {
-            entry.sales_qty += item.quantity
+        entry._all_time_sales_qty += item.quantity
+
+        const isEligibleAsOf = !asOfDate || billDate <= asOfDate
+
+        if (isEligibleAsOf) {
+            if (billDate < startDate) {
+                entry.opening_stock -= item.quantity
+            } else if (billDate >= startDate && billDate <= endDate) {
+                entry.sales_qty += item.quantity
+            }
         }
     }
 
     // 5. Final Calculations (Running Stock & Valuation Rate)
     const results = Array.from(productMap.values()).map(entry => {
-        // Running Stock = Opening + Purchase - Sales
-        entry.running_stock = entry.opening_stock + entry.purchase_stock - entry.sales_qty
-
-        // Purchase Rate (weighted average):
-        // - Primary: use purchases within the selected period
-        // - Fallback: if no purchases in this period (opening stock from older FYs),
-        //   use all-time weighted average so the rate column is never 0 for products with history
-        if (entry.purchase_stock > 0) {
-            entry.weighted_average_rate = entry.purchase_amount / entry.purchase_stock
-        } else if (entry._all_time_purchase_stock > 0) {
-            // All-time fallback rate (historical cost price)
-            entry.weighted_average_rate = entry._all_time_purchase_amount / entry._all_time_purchase_stock
+        if (asOfDate) {
+            // When asOfDate is specified:
+            // If product was never purchased on or before asOfDate, it cannot be sold on this date
+            if (entry._as_of_purchase_stock <= 0) {
+                entry.running_stock = 0
+                entry.weighted_average_rate = 0
+            } else {
+                const stockAsOfDate = (entry.opening_stock + entry.purchase_stock) - entry.sales_qty
+                const allTimeStock = entry._all_time_purchase_stock - entry._all_time_sales_qty
+                entry.running_stock = Math.max(0, Math.min(stockAsOfDate, allTimeStock))
+                entry.weighted_average_rate = entry._as_of_purchase_stock > 0
+                    ? (entry._as_of_purchase_amount / entry._as_of_purchase_stock)
+                    : 0
+            }
         } else {
-            entry.weighted_average_rate = 0
+            // Running Stock = Opening + Purchase - Sales
+            entry.running_stock = entry.opening_stock + entry.purchase_stock - entry.sales_qty
+
+            // Purchase Rate (weighted average):
+            // - Primary: use purchases within the selected period
+            // - Fallback: if no purchases in this period (opening stock from older FYs),
+            //   use all-time weighted average so the rate column is never 0 for products with history
+            if (entry.purchase_stock > 0) {
+                entry.weighted_average_rate = entry.purchase_amount / entry.purchase_stock
+            } else if (entry._all_time_purchase_stock > 0) {
+                // All-time fallback rate (historical cost price)
+                entry.weighted_average_rate = entry._all_time_purchase_amount / entry._all_time_purchase_stock
+            } else {
+                entry.weighted_average_rate = 0
+            }
         }
 
         // Strip internal fields from the returned object
-        const { _all_time_purchase_stock, _all_time_purchase_amount, ...publicEntry } = entry
+        const {
+            _all_time_purchase_stock,
+            _all_time_purchase_amount,
+            _as_of_purchase_stock,
+            _as_of_purchase_amount,
+            _all_time_sales_qty,
+            ...publicEntry
+        } = entry as any
         return publicEntry as StockAnalysisItem
     })
 
