@@ -267,6 +267,22 @@ export async function autoPlanPurchaseForOrder(orderId: string): Promise<void> {
 
     console.log(`[AutoPlan] ====== Running for order UUID: ${orderId} ======`)
 
+    // ── GUARD 0: Check if Automatic add purchase list is paused/disabled ──────
+    try {
+        const { data: syncSettings, error: syncErr } = await supabase
+            .from('app_settings')
+            .select('value')
+            .eq('key', 'daraz_sync_rules')
+            .maybeSingle()
+
+        if (!syncErr && syncSettings?.value?.auto_add_purchase_list === false) {
+            console.log(`[AutoPlan] ⏸️ Automatic add to purchase list is PAUSED in Sync Settings. Skipping auto-plan for order ${orderId}.`)
+            return
+        }
+    } catch (settingErr) {
+        console.warn('[AutoPlan] Could not read sync settings, proceeding with default behavior:', settingErr)
+    }
+
     // ── GUARD: Only process brand-new Pending orders ──────────────────────────
     const { data: orderData, error: orderStatusErr } = await supabase
         .from('daraz_orders')

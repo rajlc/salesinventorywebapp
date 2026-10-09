@@ -126,7 +126,8 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
             .from('daraz_orders')
             .select('id, invoice_number')
             .eq('order_id', orderId)
-            .single()
+            .eq('store_id', storeId)
+            .maybeSingle()
 
         let invoiceNumber = existingOrder?.invoice_number
         if (!invoiceNumber) {
@@ -198,7 +199,7 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
 
         const { data: initialSavedOrder, error: saveError } = await supabase
             .from('daraz_orders')
-            .upsert(upsertPayload, { onConflict: 'order_id' })
+            .upsert(upsertPayload, { onConflict: 'order_id,store_id' })
             .select()
             .single()
 
@@ -212,7 +213,7 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
                  
                  const { data: retrySavedOrder, error: retrySaveError } = await supabase
                       .from('daraz_orders')
-                      .upsert(upsertPayload, { onConflict: 'order_id' })
+                      .upsert(upsertPayload, { onConflict: 'order_id,store_id' })
                       .select()
                       .single()
                  

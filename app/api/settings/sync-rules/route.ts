@@ -17,9 +17,18 @@ export async function GET() {
             console.error("Error fetching settings:", error)
         }
 
-        return NextResponse.json(data?.value || { cutoff_date: null, product_cutoff_date: null })
+        const settings = data?.value || {}
+        return NextResponse.json({
+            cutoff_date: settings.cutoff_date ?? null,
+            product_cutoff_date: settings.product_cutoff_date ?? null,
+            auto_add_purchase_list: settings.auto_add_purchase_list !== false, // Defaults to true
+        })
     } catch (error) {
-        return NextResponse.json({ cutoff_date: null, product_cutoff_date: null })
+        return NextResponse.json({ 
+            cutoff_date: null, 
+            product_cutoff_date: null,
+            auto_add_purchase_list: true 
+        })
     }
 }
 
@@ -28,12 +37,26 @@ export async function POST(request: Request) {
         const supabase = await createAdminClient()
         const body = await request.json()
 
+        // Fetch current settings to avoid overwriting unrelated fields
+        const { data: existingData } = await supabase
+            .from('app_settings')
+            .select('value')
+            .eq('key', 'daraz_sync_rules')
+            .maybeSingle()
+
+        const currentValue = existingData?.value || {}
+        const updatedValue = {
+            ...currentValue,
+            ...body,
+            auto_add_purchase_list: body.auto_add_purchase_list !== false,
+        }
+
         // Upsert setting
         const { error } = await supabase
             .from('app_settings')
             .upsert({
                 key: 'daraz_sync_rules',
-                value: body,
+                value: updatedValue,
                 updated_at: new Date().toISOString()
             }, { onConflict: 'key' })
 

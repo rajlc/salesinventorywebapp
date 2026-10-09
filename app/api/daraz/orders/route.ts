@@ -278,10 +278,12 @@ export async function GET(request: NextRequest) {
                 supabase
                     .from('daraz_orders')
                     .select('id, invoice_number, order_status, order_number, order_id, import_source')
+                    .eq('store_id', storeId)
                     .in('order_id', allOrderIds),
                 supabase
                     .from('daraz_orders')
                     .select('id, invoice_number, order_status, order_number, order_id, import_source')
+                    .eq('store_id', storeId)
                     .in('order_number', allOrderNumbers)
             ])
 
@@ -521,7 +523,7 @@ export async function GET(request: NextRequest) {
                 console.log(`[DarazSync] Batch inserting ${ordersToInsert.length} new orders`)
                 const { data, error } = await supabase
                     .from('daraz_orders')
-                    .upsert(ordersToInsert.map(o => o.payload), { onConflict: 'order_id' })
+                    .upsert(ordersToInsert.map(o => o.payload), { onConflict: 'order_id,store_id' })
                     .select()
 
                 if (error) {
@@ -559,7 +561,7 @@ export async function GET(request: NextRequest) {
 
                                     const { data: singleInsert, error: singleError } = await supabase
                                         .from('daraz_orders')
-                                        .upsert(orderToInsert.payload, { onConflict: 'order_id' })
+                                        .upsert(orderToInsert.payload, { onConflict: 'order_id,store_id' })
                                         .select()
                                         .single()
 
