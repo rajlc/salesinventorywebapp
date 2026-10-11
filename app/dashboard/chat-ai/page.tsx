@@ -420,7 +420,8 @@ function ChatAiDashboardContent() {
     const handleConnectChat = async (storeId: string) => {
         setConnectingStoreId(storeId)
         try {
-            const response = await fetch(`/api/daraz/auth/url?storeId=${storeId}&appType=chat`)
+            const originParam = typeof window !== 'undefined' ? `&origin=${encodeURIComponent(window.location.origin)}` : ''
+            const response = await fetch(`/api/daraz/auth/url?storeId=${storeId}&appType=chat${originParam}`)
             const data = await response.json()
             if (data.url) {
                 window.location.href = data.url
@@ -3693,9 +3694,9 @@ function ChatAiDashboardContent() {
                     </DialogHeader>
                     <div className="space-y-4 pt-2">
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                            Authorize each store for the <strong>Bagmati Traders IM Chat</strong> app (AppKey: 505350) to enable automated messaging and AI replies.
+                            Authorize each store for the <strong>Bagmati Traders IM Chat</strong> app (AppKey: 505356) to enable automated messaging and AI replies.
                         </p>
-                        <div className="divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-zinc-50 dark:bg-zinc-950 max-h-64 overflow-y-auto">
+                        <div className="divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-zinc-50 dark:bg-zinc-950 max-h-[420px] overflow-y-auto">
                             {stores.length === 0 ? (
                                 <p className="p-4 text-center text-xs text-zinc-500">No stores found.</p>
                             ) : (

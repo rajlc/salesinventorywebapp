@@ -1,4 +1,4 @@
-﻿'use client'
+'use client'
 
 import { useState, useEffect, useMemo } from 'react'
 import { useOnlineStores } from '@/features/settings/hooks/useStores'
@@ -482,7 +482,8 @@ function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (order
     const handleConnect = async () => {
         try {
             setStatus('linking')
-            const response = await fetch(`/api/daraz/auth/url?storeId=${store.id}`)
+            const originParam = typeof window !== 'undefined' ? `&origin=${encodeURIComponent(window.location.origin)}` : ''
+            const response = await fetch(`/api/daraz/auth/url?storeId=${store.id}${originParam}`)
             const data = await response.json()
             if (data.url) {
                 window.location.href = data.url

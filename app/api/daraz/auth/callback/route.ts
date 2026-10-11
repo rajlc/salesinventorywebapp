@@ -95,9 +95,18 @@ export async function GET(request: NextRequest) {
 
             console.log(`[AuthCallback] ✅ Token saved for store "${storeId}" (${appType})`)
 
-            // Redirect back to the app.
-            // Prefer NEXT_PUBLIC_APP_URL so it works the same on Render, ngrok, and localhost.
-            const baseUrl = process.env.NEXT_PUBLIC_APP_URL?.trim() || request.nextUrl.origin
+            // Redirect back to the app dynamically matching the current host
+            const host = request.headers.get('x-forwarded-host') || request.headers.get('host') || request.nextUrl.host
+            const proto = request.headers.get('x-forwarded-proto') || (host.includes('localhost') ? 'http' : 'https')
+            let baseUrl = `${proto}://${host}`
+
+            if (process.env.NEXT_PUBLIC_APP_URL?.trim()) {
+                const envAppUrl = process.env.NEXT_PUBLIC_APP_URL.trim()
+                if (!(baseUrl.includes('onrender.com') && envAppUrl.includes('vercel.app'))) {
+                    baseUrl = envAppUrl
+                }
+            }
+
             const redirectPath = appType === 'chat'
                 ? '/dashboard/chat-ai?status=success'
                 : '/dashboard/sales/daraz/order-sync?status=success'

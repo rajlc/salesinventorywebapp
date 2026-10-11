@@ -1,8 +1,6 @@
 'use server'
 
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-import { redirect } from 'next/navigation'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 
 export async function loginAction(
     credentials: FormData | string,
@@ -23,90 +21,80 @@ export async function loginAction(
         return { error: 'Email and password are required' }
     }
 
-    const cookieStore = await cookies()
+    const supabase = await createClient()
 
-    const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-            cookies: {
-                get(name: string) {
-                    return cookieStore.get(name)?.value
-                },
-                set(name: string, value: string, options: any) {
-                    try {
-                        cookieStore.set(name, value, options)
-                    } catch (error) {
-                        // Handle cookie setting error
-                    }
-                },
-                remove(name: string, options: any) {
-                    try {
-                        cookieStore.set(name, '', options)
-                    } catch (error) {
-                        // Handle cookie removal error
-                    }
-                },
-            },
-        }
-    )
-
-    const { data: { user }, error } = await supabase.auth.signInWithPassword({
+    const { data: { user }, error: signInError } = await supabase.auth.signInWithPassword({
         email,
         password,
     })
 
-    if (error) {
-        return { error: error.message }
+    if (signInError) {
+        return { error: signInError.message }
     }
 
     if (!user) {
-        return { error: 'Login failed' }
+        return { error: 'Login failed. Please verify your credentials.' }
     }
 
-    // Check user status
-    const { data: profile, error: profileError } = await supabase
+    // Check user status in user_profiles
+    let profile: { status: string; role?: string } | null = null
+
+    const { data: userProfile, error: profileError } = await supabase
         .from('user_profiles')
-        .select('status')
+        .select('status, role')
         .eq('id', user.id)
         .single()
 
-    if (profileError) {
-        // If no profile exists, user status is pending by default
-        return { error: 'Your account is waiting for admin approval. Please check back later.' }
+    if (userProfile) {
+        profile = userProfile
+    } else {
+        // Fallback to admin client to bypass potential RLS restrictions
+        try {
+            const admin = await createAdminClient()
+            const { data: adminProfile } = await admin
+                .from('user_profiles')
+                .select('status, role')
+                .eq('id', user.id)
+                .single()
+
+            if (adminProfile) {
+                profile = adminProfile
+            }
+        } catch (adminErr) {
+            console.error('Failed to fetch profile via admin client:', adminErr)
+        }
     }
 
-    // Check status and return appropriate message
-    if (profile.status === 'pending') {
-        // Sign out the user
-        await supabase.auth.signOut()
-        return { error: 'Your account is waiting for admin approval. Please check back later.' }
+    if (profile) {
+        if (profile.status === 'pending') {
+            await supabase.auth.signOut()
+            return { error: 'Your account is pending admin approval. Please contact an administrator.' }
+        }
+
+        if (profile.status === 'disable') {
+            await supabase.auth.signOut()
+            return { error: 'Your account has been disabled. Please contact the administrator.' }
+        }
+
+        if (profile.status !== 'active' && profile.role !== 'admin') {
+            await supabase.auth.signOut()
+            return { error: 'Your account status is inactive. Please contact the administrator.' }
+        }
     }
 
-    if (profile.status === 'disable') {
-        // Sign out the user
-        await supabase.auth.signOut()
-        return { error: 'Your account has been disabled. Please contact the administrator.' }
-    }
-
-    // Only allow active users to proceed
-    if (profile.status !== 'active') {
-        await supabase.auth.signOut()
-        return { error: 'Your account status is not active. Please contact the administrator.' }
-    }
-
-    // Log login activity
+    // Log login activity asynchronously
     try {
         await supabase.from('user_activity_logs').insert({
             user_id: user.id,
             action: 'login',
             browser: typeof navigator !== 'undefined' ? navigator.userAgent : null,
-            ip_address: null, // Can be populated from headers if needed
+            ip_address: null,
         })
     } catch (logError) {
         // Silent fail for logging
-        console.error('Failed to log activity:', logError)
+        console.error('Failed to log login activity:', logError)
     }
 
-    redirect('/dashboard')
+    // Return success to the client instead of throwing Next.js NEXT_REDIRECT
+    return { success: true, redirectTo: '/dashboard' }
 }
