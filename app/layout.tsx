@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { Inter, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ReactQueryProvider } from "@/lib/providers/ReactQueryProvider";
@@ -36,8 +37,9 @@ export default function RootLayout({
         <html lang="en" suppressHydrationWarning>
             <head suppressHydrationWarning>
                 {/* Prevent dark-mode flash of unstyled content (FOUC) before hydration */}
-                <script
-                    suppressHydrationWarning
+                <Script
+                    id="theme-initializer"
+                    strategy="beforeInteractive"
                     dangerouslySetInnerHTML={{
                         __html: `try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark')}else{document.documentElement.classList.remove('dark')}}catch(e){}`,
                     }}

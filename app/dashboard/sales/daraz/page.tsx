@@ -64,8 +64,37 @@ const ALL_DARAZ_MODULES = [
 ]
 
 
+import { useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
+import { getDarazOrders, getDarazOrderStats } from '@/features/sales/actions/daraz-actions'
+
 export default function DarazSalesMenuPage() {
+    const router = useRouter()
+    const queryClient = useQueryClient()
     const { userRole, hasPermission, isLoading } = usePermissions()
+
+    const handlePrefetchModule = (href: string) => {
+        router.prefetch(href)
+        if (href.includes('sales-entry')) {
+            queryClient.prefetchQuery({
+                queryKey: ['daraz-orders', 1, 1000, '', 'all', 'all', false],
+                queryFn: () => getDarazOrders({
+                    page: 1,
+                    limit: 1000,
+                    status: 'all',
+                    todayOnly: true,
+                    sellerAccount: 'all',
+                    unprintedOnly: false
+                }),
+                staleTime: 60 * 1000
+            })
+            queryClient.prefetchQuery({
+                queryKey: ['daraz-order-stats', 'all'],
+                queryFn: () => getDarazOrderStats('all', true),
+                staleTime: 60 * 1000
+            })
+        }
+    }
 
     const visibleModules = ALL_DARAZ_MODULES.filter((module) => {
         if (userRole === 'admin') return true
@@ -78,6 +107,8 @@ export default function DarazSalesMenuPage() {
                 <h1 className="text-xl font-bold">Daraz Sales</h1>
                 <Link
                     href="/dashboard/sales"
+                    prefetch={true}
+                    onMouseEnter={() => router.prefetch('/dashboard/sales')}
                     className="flex items-center gap-1.5 px-3 py-1 text-[15px] bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 rounded-lg transition-colors border border-gray-200 dark:border-zinc-700"
                 >
                     <ArrowLeft size={14} />
@@ -103,7 +134,12 @@ export default function DarazSalesMenuPage() {
                         {visibleModules.map((item) => {
                             const Icon = item.icon
                             return (
-                                <Link key={item.name} href={item.href}>
+                                <Link
+                                    key={item.name}
+                                    href={item.href}
+                                    prefetch={true}
+                                    onMouseEnter={() => handlePrefetchModule(item.href)}
+                                >
                                     <Card className="p-3 hover:shadow-lg transition-all cursor-pointer h-full border border-gray-400 dark:border-zinc-600 bg-gray-200 dark:bg-zinc-800 flex flex-col items-center justify-center gap-2 text-center">
                                         <div className={`${item.color} p-2 rounded-full shadow-sm`}>
                                             <Icon size={18} className="text-white" />

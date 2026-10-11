@@ -4,15 +4,20 @@ import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Plus, Loader2 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
 import { createPurchasePlan, getProductPurchaseStats, ProductPurchaseStats } from '@/features/purchase/actions/plan-actions'
 import { getAllProductOptions, getProductBySku } from '@/features/inventory/actions/product-actions'
 import { toast } from 'sonner'
 import Select from 'react-select'
 
+// Module-level cache for instant dropdown display across opens
+let cachedProductOptions: any[] | null = null
+
 export function AddPlanModal({
     onPlanAdded,
     trigger,
     prefilledProductId,
+    prefilledProductName,
     prefilledQuantity,
     prefilledRemarks,
     onSuccess,
@@ -23,6 +28,7 @@ export function AddPlanModal({
     onPlanAdded: () => void
     trigger?: React.ReactNode
     prefilledProductId?: string
+    prefilledProductName?: string
     prefilledQuantity?: number
     prefilledRemarks?: string
     onSuccess?: () => void
@@ -31,6 +37,7 @@ export function AddPlanModal({
     onOpenChange?: (isOpen: boolean) => void
 }) {
     const router = useRouter()
+    const queryClient = useQueryClient()
     const [internalOpen, setInternalOpen] = useState(false)
     const [loading, setLoading] = useState(false)
     const [mounted, setMounted] = useState(false)
@@ -42,10 +49,13 @@ export function AddPlanModal({
     // Use external control if provided, otherwise use internal state
     const open = externalIsOpen !== undefined ? externalIsOpen : internalOpen
     const setOpen = (value: boolean) => {
-        if (externalOnClose) {
-            if (!value) externalOnClose()
+        if (!value) {
+            if (externalOnClose) {
+                externalOnClose()
+            }
+            setInternalOpen(false)
         } else {
-            setInternalOpen(value)
+            setInternalOpen(true)
         }
         onOpenChange?.(value)
     }
@@ -64,7 +74,7 @@ export function AddPlanModal({
     const [statsLoading, setStatsLoading] = useState(false)
 
     // Product Options
-    const [productOptions, setProductOptions] = useState<any[]>([])
+    const [productOptions, setProductOptions] = useState<any[]>(cachedProductOptions || [])
     const [loadingProducts, setLoadingProducts] = useState(false)
 
     // Load stats when product changes
@@ -82,7 +92,11 @@ export function AddPlanModal({
 
     // Load Products on Mount
     useEffect(() => {
-        setLoadingProducts(true)
+        if (cachedProductOptions && cachedProductOptions.length > 0) {
+            setProductOptions(cachedProductOptions)
+        } else {
+            setLoadingProducts(true)
+        }
         getAllProductOptions()
             .then(products => {
                 const options = products.map((p: any) => ({
@@ -90,6 +104,7 @@ export function AddPlanModal({
                     label: `${p.product_name} ${p.seller_sku1 ? `(${p.seller_sku1})` : ''}`,
                     product: p
                 }))
+                cachedProductOptions = options
                 setProductOptions(options)
             })
             .catch(err => console.error("Failed to load products", err))
@@ -99,15 +114,19 @@ export function AddPlanModal({
     // Handle prefilled data when modal opens
     useEffect(() => {
         if (open) {
-            // Handle prefilled Product ID
-            if (prefilledProductId && productOptions.length > 0 && !productId) {
-                const option = productOptions.find(opt => opt.value === prefilledProductId)
-                if (option) {
-                    setProductId(option.value)
-                    setProductName(option.label)
-                    // Auto-fill seller sku
-                    const p = option.product
-                    setSellerSku(p.seller_sku1 || p.seller_sku2 || '')
+            // Handle prefilled Product ID and Name immediately so UI displays at 0ms and stats start fetching
+            if (prefilledProductId) {
+                setProductId(prefilledProductId)
+                if (prefilledProductName && !productName) {
+                    setProductName(prefilledProductName)
+                }
+                if (productOptions.length > 0) {
+                    const option = productOptions.find(opt => opt.value === prefilledProductId)
+                    if (option) {
+                        setProductName(option.label)
+                        const p = option.product
+                        setSellerSku(p.seller_sku1 || p.seller_sku2 || '')
+                    }
                 }
             }
 
@@ -121,7 +140,7 @@ export function AddPlanModal({
                 setQuantity(prefilledQuantity)
             }
         }
-    }, [prefilledProductId, prefilledRemarks, prefilledQuantity, productOptions, open, productId, remarks])
+    }, [prefilledProductId, prefilledProductName, prefilledRemarks, prefilledQuantity, productOptions, open, remarks])
 
     // Reset form when modal closes
     useEffect(() => {
@@ -178,15 +197,6 @@ export function AddPlanModal({
     }
 
     const handleClose = () => {
-        // Dirty Check: If any field has data (except defaults)
-        const isDirty = productId || sellerSku || quantity !== 1 || remarks || status !== 'Pending'
-
-        if (isDirty) {
-            if (!window.confirm("You have unsaved changes. Are you sure you want to close?")) {
-                return
-            }
-        }
-
         resetForm()
         setOpen(false)
     }
@@ -220,36 +230,43 @@ export function AddPlanModal({
             return
         }
 
-        setLoading(true)
-        try {
-            await createPurchasePlan({
-                plan_date: date,
-                product_id: productId,
-                quantity,
-                remarks,
-                status,
-                stats: stats || undefined
-            })
-
-            // Mobile Feedback
-            triggerMobileFeedback(true)
-
-            toast.success("Plan added successfully")
-            resetForm() // Reset immediately after success
-            setOpen(false)
-
-            // Use custom callback if provided, otherwise use default behavior
-            if (onSuccess) {
-                onSuccess()
-            } else {
-                router.refresh()
-                onPlanAdded()
-            }
-        } catch (error: any) {
-            toast.error(error.message)
-        } finally {
-            setLoading(false)
+        // Snapshot plan data for background execution
+        const planData = {
+            plan_date: date,
+            product_id: productId,
+            quantity,
+            remarks,
+            status,
+            stats: stats || undefined
         }
+
+        // 1. Immediate mobile feedback
+        triggerMobileFeedback(true)
+
+        // 2. Optimistic immediate close - Form closes immediately in 0ms!
+        resetForm()
+        setOpen(false)
+        if (onSuccess) {
+            onSuccess()
+        }
+
+        // 3. Save in background and notify with toast
+        const toastId = toast.loading("Saving purchase plan...")
+
+        createPurchasePlan(planData)
+            .then(() => {
+                toast.success("Plan added successfully", { id: toastId })
+                queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
+                queryClient.invalidateQueries({ queryKey: ['daily-plans'] })
+                queryClient.invalidateQueries({ queryKey: ['purchase-plans'] })
+                queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
+                router.refresh()
+                onPlanAdded?.()
+            })
+            .catch((error: any) => {
+                console.error("Failed to save plan in background:", error)
+                toast.error(error?.message || "Failed to save purchase plan", { id: toastId })
+            })
     }
 
     return (
@@ -267,11 +284,18 @@ export function AddPlanModal({
 
             {mounted && open && createPortal(
                 <div className="fixed inset-0 z-[100] flex items-center justify-center md:p-4">
-                    <div className="absolute inset-0 bg-black/50" onClick={handleClose} />
-                    <div className="relative bg-white dark:bg-zinc-900 md:rounded-lg shadow-xl w-full max-w-2xl h-full md:h-auto md:max-h-[90vh] overflow-hidden flex flex-col">
+                    <div className="absolute inset-0 bg-black/50 cursor-pointer" onClick={handleClose} />
+                    <div className="relative bg-white dark:bg-zinc-900 md:rounded-lg shadow-xl w-full max-w-2xl h-full md:h-auto md:max-h-[90vh] overflow-hidden flex flex-col z-[101]">
                         <div className="flex items-center justify-between px-4 py-3 border-b dark:border-zinc-700">
                             <h2 className="text-lg font-bold">Add Daily Purchase Plan</h2>
-                            <button onClick={handleClose}><X size={20} className="text-gray-500" /></button>
+                            <button
+                                type="button"
+                                onClick={handleClose}
+                                className="p-1.5 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                                aria-label="Close modal"
+                            >
+                                <X size={20} />
+                            </button>
                         </div>
 
                         <form onSubmit={handleSubmit} className="p-4 space-y-4 overflow-y-auto flex-1 pb-20 md:pb-4">
@@ -358,8 +382,18 @@ export function AddPlanModal({
                             </div>
 
                             <div className="flex justify-end gap-3 px-4 py-3 border-t dark:border-zinc-700 fixed bottom-[60px] md:bottom-0 left-0 right-0 md:static bg-white dark:bg-zinc-900 shrink-0 z-[101] w-full md:w-auto">
-                                <button type="button" onClick={handleClose} className="px-4 py-2 text-sm border rounded-md hover:bg-gray-100 dark:hover:bg-zinc-800">Cancel</button>
-                                <button type="submit" disabled={loading} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={handleClose}
+                                    className="px-4 py-2 text-sm font-medium border border-gray-300 dark:border-zinc-700 rounded-md hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-700 dark:text-gray-200 transition-colors cursor-pointer"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2 cursor-pointer transition-colors"
+                                >
                                     {loading && <Loader2 className="h-3 w-3 animate-spin" />}
                                     Save Plan
                                 </button>

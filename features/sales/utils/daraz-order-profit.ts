@@ -36,11 +36,22 @@ export interface OrderProfitInfo {
 // In-memory cache for category commissions and other fees to avoid repetitive database overhead
 let cachedCategoryCommissionMap: Map<string, number> | null = null
 let cachedCategoryCommissionTime = 0
-const COMMISSIONS_CACHE_TTL = 60 * 1000 // 1 minute (fast refresh)
+const COMMISSIONS_CACHE_TTL = 30 * 60 * 1000 // 30 minutes
 
 let cachedOtherFees: OtherFeeItem[] | null = null
 let cachedOtherFeesTime = 0
-const OTHER_FEES_CACHE_TTL = 60 * 1000 // 1 minute
+const OTHER_FEES_CACHE_TTL = 30 * 60 * 1000 // 30 minutes
+
+// In-memory cache for combos and wholesale prices
+let cachedCombosMap: Map<string, Array<{ child_product_id: string, quantity: number }>> | null = null
+let cachedWholesaleMap: Map<string, number> | null = null
+let cachedCombosAndWholesaleTime = 0
+const COMBOS_WHOLESALE_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+
+// In-memory cache for product purchases & price reports
+const cachedPurchasesMap = new Map<string, { price: number, time: number }>()
+const cachedViewPurchasesMap = new Map<string, { price: number, time: number }>()
+const PURCHASES_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
 /**
  * Fetch and cache full category commissions map with pagination (all 5,200+ categories)
@@ -128,6 +139,11 @@ export function clearOrderProfitCalculatorCache() {
     cachedCategoryCommissionTime = 0
     cachedOtherFees = null
     cachedOtherFeesTime = 0
+    cachedCombosMap = null
+    cachedWholesaleMap = null
+    cachedCombosAndWholesaleTime = 0
+    cachedPurchasesMap.clear()
+    cachedViewPurchasesMap.clear()
 }
 
 /**
@@ -281,35 +297,52 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
     // 4. Fetch purchasing prices, combos, and variations
     const allMatchedIds = matchedProducts.map(p => p.id)
 
-    // A. Fetch combos and wholesale prices
-    const [combosRes, wholesaleRes] = await Promise.all([
-        supabase
-            .from('product_combos')
-            .select('parent_product_id, child_product_id, quantity'),
-        supabase
-            .from('product_wholesale_prices')
-            .select('product_id, wholesale_price')
-    ])
+    // A. Fetch combos and wholesale prices (using in-memory cache)
+    const nowTime = Date.now()
+    let comboComponentsMap: Map<string, Array<{ child_product_id: string, quantity: number }>>
+    let bestWholesaleMap: Map<string, number>
 
-    const comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
-    combosRes.data?.forEach((c: any) => {
-        if (!comboComponentsMap.has(c.parent_product_id)) {
-            comboComponentsMap.set(c.parent_product_id, [])
-        }
-        comboComponentsMap.get(c.parent_product_id)!.push({
-            child_product_id: c.child_product_id,
-            quantity: Number(c.quantity) || 1
+    if (
+        cachedCombosMap &&
+        cachedWholesaleMap &&
+        (nowTime - cachedCombosAndWholesaleTime) < COMBOS_WHOLESALE_CACHE_TTL
+    ) {
+        comboComponentsMap = cachedCombosMap
+        bestWholesaleMap = cachedWholesaleMap
+    } else {
+        const [combosRes, wholesaleRes] = await Promise.all([
+            supabase
+                .from('product_combos')
+                .select('parent_product_id, child_product_id, quantity'),
+            supabase
+                .from('product_wholesale_prices')
+                .select('product_id, wholesale_price')
+        ])
+
+        comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
+        combosRes.data?.forEach((c: any) => {
+            if (!comboComponentsMap.has(c.parent_product_id)) {
+                comboComponentsMap.set(c.parent_product_id, [])
+            }
+            comboComponentsMap.get(c.parent_product_id)!.push({
+                child_product_id: c.child_product_id,
+                quantity: Number(c.quantity) || 1
+            })
         })
-    })
 
-    const bestWholesaleMap = new Map<string, number>()
-    wholesaleRes.data?.forEach((wp: any) => {
-        const current = bestWholesaleMap.get(wp.product_id) || Infinity
-        const val = Number(wp.wholesale_price)
-        if (!isNaN(val) && val < current) {
-            bestWholesaleMap.set(wp.product_id, val)
-        }
-    })
+        bestWholesaleMap = new Map<string, number>()
+        wholesaleRes.data?.forEach((wp: any) => {
+            const current = bestWholesaleMap.get(wp.product_id) || Infinity
+            const val = Number(wp.wholesale_price)
+            if (!isNaN(val) && val < current) {
+                bestWholesaleMap.set(wp.product_id, val)
+            }
+        })
+
+        cachedCombosMap = comboComponentsMap
+        cachedWholesaleMap = bestWholesaleMap
+        cachedCombosAndWholesaleTime = nowTime
+    }
 
     // B. Recursively collect all descendant child product IDs for combos/variations
     const allPriceQueryIds = new Set<string>(allMatchedIds)
@@ -331,18 +364,35 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
     const latestPurchasesMap = new Map<string, number>()
     const viewPurchasesMap = new Map<string, number>()
 
-    if (queryIdList.length > 0) {
+    // Check which IDs need fetching vs already cached
+    const missingIds: string[] = []
+    queryIdList.forEach(id => {
+        const cachedPu = cachedPurchasesMap.get(id)
+        const cachedVp = cachedViewPurchasesMap.get(id)
+
+        if (cachedPu && (nowTime - cachedPu.time < PURCHASES_CACHE_TTL)) {
+            latestPurchasesMap.set(id, cachedPu.price)
+        }
+        if (cachedVp && (nowTime - cachedVp.time < PURCHASES_CACHE_TTL)) {
+            viewPurchasesMap.set(id, cachedVp.price)
+        }
+        if (!cachedPu || !cachedVp || (nowTime - (cachedPu?.time || 0) >= PURCHASES_CACHE_TTL)) {
+            missingIds.push(id)
+        }
+    })
+
+    if (missingIds.length > 0) {
         const [viewRes, purchasesRes] = await Promise.all([
             // Latest prices from inventory_price_reports_view (matches Average Sales Price page)
             supabase
                 .from('inventory_price_reports_view')
                 .select('product_id, last_price, est_price')
-                .in('product_id', queryIdList),
+                .in('product_id', missingIds),
             // Direct purchase history
             supabase
                 .from('purchases')
                 .select('product_id, unit_amount, purchase_date')
-                .in('product_id', queryIdList)
+                .in('product_id', missingIds)
                 .gt('unit_amount', 0)
                 .order('purchase_date', { ascending: false })
         ])
@@ -351,12 +401,15 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
             const price = Number(vp.last_price || vp.est_price || 0)
             if (price > 0) {
                 viewPurchasesMap.set(vp.product_id, price)
+                cachedViewPurchasesMap.set(vp.product_id, { price, time: nowTime })
             }
         })
 
         purchasesRes.data?.forEach((pu: any) => {
             if (!latestPurchasesMap.has(pu.product_id)) {
-                latestPurchasesMap.set(pu.product_id, Number(pu.unit_amount))
+                const price = Number(pu.unit_amount)
+                latestPurchasesMap.set(pu.product_id, price)
+                cachedPurchasesMap.set(pu.product_id, { price, time: nowTime })
             }
         })
     }

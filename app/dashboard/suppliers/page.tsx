@@ -30,7 +30,12 @@ export default function SuppliersPage() {
     }, [hasPermission, activeTab, isLoading])
 
     if (isLoading) {
-        return <div className="p-8 text-center text-gray-500">Checking permissions...</div>
+        return (
+            <div className="p-4 space-y-3 animate-pulse">
+                <div className="h-8 w-48 bg-gray-200 dark:bg-zinc-800 rounded-lg" />
+                <div className="h-64 bg-gray-100 dark:bg-zinc-850 rounded-xl" />
+            </div>
+        )
     }
 
     const hasAnyAccess = hasPermission('Suppliers', 'Suppliers Ledger') || 

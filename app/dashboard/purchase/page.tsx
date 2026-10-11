@@ -47,7 +47,10 @@ const ALL_PURCHASE_MODULES = [
     },
 ]
 
+import { useRouter } from 'next/navigation'
+
 export default function PurchaseDashboardPage() {
+    const router = useRouter()
     const { setIsMobileMenuOpen } = useDashboard()
     const { userRole, hasPermission, isLoading } = usePermissions()
 
@@ -89,7 +92,12 @@ export default function PurchaseDashboardPage() {
                         {visibleModules.map((module) => {
                             const Icon = module.icon
                             return (
-                                <Link key={module.name} href={module.href}>
+                                <Link
+                                    key={module.name}
+                                    href={module.href}
+                                    prefetch={true}
+                                    onMouseEnter={() => router.prefetch(module.href)}
+                                >
                                     <Card className="p-3 hover:shadow-lg transition-all cursor-pointer h-full border border-gray-400 dark:border-zinc-600 bg-gray-200 dark:bg-zinc-800 flex flex-col items-center justify-center gap-2 text-center">
                                         <div className={`${module.color} p-2 rounded-md shadow-sm`}>
                                             <Icon size={18} className="text-white" />

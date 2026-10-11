@@ -2,7 +2,7 @@
 
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import Link from 'next/link';
-import { usePathname, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams, useRouter } from 'next/navigation';
 import { useEffect, useState, Suspense } from 'react';
 
 interface NavItemProps {
@@ -23,6 +23,7 @@ const NavItemWithParams = ({
   onMobileItemClick
 }: NavItemProps) => {
   const [isOpen, setIsOpen] = useState(false);
+  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
@@ -72,6 +73,8 @@ const NavItemWithParams = ({
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={true}
+                onMouseEnter={() => router.prefetch(item.href)}
                 onClick={onMobileItemClick}
                 className={`block px-3 py-2 text-sm rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
                   ? 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-white font-medium'
@@ -91,6 +94,8 @@ const NavItemWithParams = ({
   return (
     <Link
       href={href}
+      prefetch={true}
+      onMouseEnter={() => router.prefetch(href)}
       onClick={onMobileItemClick}
       className={`flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
         ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
@@ -113,6 +118,7 @@ const NavItemStandard = ({
   onMobileItemClick
 }: NavItemProps) => {
   const [isOpen, setIsOpen] = useState(false);
+  const router = useRouter();
   const pathname = usePathname();
 
   const isLinkActive = (targetHref: string) => {
@@ -154,6 +160,8 @@ const NavItemStandard = ({
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={true}
+                onMouseEnter={() => router.prefetch(item.href)}
                 onClick={onMobileItemClick}
                 className={`block px-3 py-2 text-sm rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
                   ? 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-white font-medium'
@@ -173,6 +181,8 @@ const NavItemStandard = ({
   return (
     <Link
       href={href}
+      prefetch={true}
+      onMouseEnter={() => router.prefetch(href)}
       onClick={onMobileItemClick}
       className={`flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
         ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'

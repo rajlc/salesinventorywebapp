@@ -18,6 +18,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
     const [showProductSelection, setShowProductSelection] = useState(false)
     const [showPlanModal, setShowPlanModal] = useState(false)
     const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
+    const [selectedProductName, setSelectedProductName] = useState<string>('')
     const [selectedProductRemarks, setSelectedProductRemarks] = useState<string>('')
     const [prefilledQuantity, setPrefilledQuantity] = useState<number>(1)
     const [isChecking, setIsChecking] = useState(false)
@@ -35,26 +36,25 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
         return null // No products in order
     }
 
-    const handleClick = async () => {
-        setIsChecking(true)
-
-        try {
-            // Always show selection modal
-            setShowProductSelection(true)
-        } catch (error) {
-            console.error('Error:', error)
-            toast.error('Failed to process request')
-        } finally {
-            setIsChecking(false)
-        }
+    const handleClick = () => {
+        // Open selection modal immediately
+        setShowProductSelection(true)
     }
 
-    const handleProductSelect = async (productId: string, remarks?: string, quantity?: number) => {
+    const handleProductSelect = async (productId: string, remarks?: string, quantity?: number, productName?: string) => {
         setShowProductSelection(false)
 
         if (!productId) {
             toast.error('Product not found in inventory', {
                 description: 'Please add this product to inventory first.'
+            })
+            return
+        }
+
+        // Fast check against activePlanProductIds in memory
+        if (activePlanProductIds.includes(productId)) {
+            toast.error('Product Already in Purchase List', {
+                description: 'This product is already in the pending purchase list.'
             })
             return
         }
@@ -86,6 +86,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
         setPrefilledQuantity(finalQty > 0 ? finalQty : 1)
 
         setSelectedProductId(productId)
+        if (productName) setSelectedProductName(productName)
         if (remarks) setSelectedProductRemarks(remarks)
         setShowPlanModal(true)
     }
@@ -93,8 +94,8 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
     const handlePlanSuccess = () => {
         setShowPlanModal(false)
         setSelectedProductId(null)
+        setSelectedProductName('')
         setSelectedProductRemarks('')
-        toast.success('Purchase plan created successfully!')
     }
 
     // Check if any product in this order is already in active plans
@@ -137,15 +138,13 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
                     }
 
                     // Get stock for this product from stockInfo
-                    // Note: In new design, stock is handled internally via stockBreakdown for resolved components
-                    // But we still pass basic info here
                     const productStock = stockInfo?.products?.find((p: any) => p.product_id === item.product_id)
                     return {
                         product_id: item.product_id,
                         product_name: item.product_name || 'Unknown Product',
-                        image_url: productStock?.image_url,
+                        image_url: productStock?.image_url || item.image_url,
                         quantity: totalItemQty > 0 ? totalItemQty : item.quantity,
-                        stock: 0 // Placeholder
+                        stock: productStock?.total_stock ?? productStock?.stock ?? 0
                     }
                 })}
                 stockBreakdown={stockInfo?.products}
@@ -158,6 +157,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
                     trigger={null}
                     onPlanAdded={() => { }}
                     prefilledProductId={selectedProductId}
+                    prefilledProductName={selectedProductName}
                     prefilledQuantity={prefilledQuantity}
                     prefilledRemarks={selectedProductRemarks}
                     onSuccess={handlePlanSuccess}
@@ -165,6 +165,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
                     onClose={() => {
                         setShowPlanModal(false)
                         setSelectedProductId(null)
+                        setSelectedProductName('')
                     }}
                 />
             )}

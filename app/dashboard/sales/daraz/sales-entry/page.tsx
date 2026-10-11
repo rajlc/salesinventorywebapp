@@ -24,6 +24,7 @@ import { getOrdersStockInfo } from '@/features/sales/actions/get-order-stock-inf
 import {
     Search,
     Plus,
+    Loader2,
     Download,
     Printer,
     List,
@@ -252,13 +253,14 @@ export default function DarazSalesEntryPage() {
             shipped: 0,
             shippedAmount: 0
         },
-        staleTime: 30 * 1000
+        staleTime: 60 * 1000
     })
 
     // Fetch online stores for filter
     const { data: onlineStoresResult } = useQuery({
         queryKey: ['online-stores'],
-        queryFn: getOnlineStores
+        queryFn: getOnlineStores,
+        staleTime: 10 * 60 * 1000
     })
     const onlineStores = onlineStoresResult?.data || []
 
@@ -274,9 +276,9 @@ export default function DarazSalesEntryPage() {
             unprintedOnly
         }),
         placeholderData: (previousData) => previousData,
-        staleTime: 15 * 1000,
-        refetchOnWindowFocus: true,
-        gcTime: 5 * 60 * 1000
+        staleTime: 60 * 1000,
+        refetchOnWindowFocus: false,
+        gcTime: 15 * 60 * 1000
     })
 
     const orders = data?.orders || []
@@ -1082,16 +1084,37 @@ export default function DarazSalesEntryPage() {
                                     </button>
                                 )}
 
-                                <div className="px-3 py-1 rounded-lg bg-gray-100 dark:bg-zinc-800 text-sm font-black text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
-                                    Total: {pagination?.total || 0}
+                                <div className="px-3 py-1 rounded-lg bg-gray-100 dark:bg-zinc-800 text-sm font-black text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700 flex items-center gap-1.5">
+                                    {isFetching && <Loader2 size={13} className="animate-spin text-blue-600 dark:text-blue-400" />}
+                                    <span>Total: {pagination?.total || 0}</span>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    {/* 4. Grouped Order Sections by Seller Store */}
-                    <div className="space-y-3">
-                        {groupedOrders.map((group, groupIdx) => {
+                    {/* 4. Grouped Order Sections by Seller Store with Loading Overlay */}
+                    <div className="relative min-h-[300px]">
+                        {/* Loading Overlay when filtering, searching, or fetching data */}
+                        {isFetching && (
+                            <div className="absolute inset-0 bg-white/75 dark:bg-zinc-950/75 backdrop-blur-[2px] z-30 flex flex-col items-center justify-start pt-28 rounded-2xl transition-all duration-200 animate-in fade-in">
+                                <div className="sticky top-44 flex flex-col items-center gap-3 bg-white dark:bg-zinc-900 px-6 py-4 rounded-2xl shadow-2xl border border-gray-200 dark:border-zinc-800">
+                                    <div className="relative flex items-center justify-center">
+                                        <div className="w-10 h-10 rounded-full border-3 border-blue-100 dark:border-blue-950 border-t-blue-600 animate-spin" />
+                                        <div className="absolute inset-0 flex items-center justify-center text-blue-600 dark:text-blue-400">
+                                            <Filter size={15} />
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-col items-center text-center">
+                                        <span className="text-sm font-bold text-gray-900 dark:text-white">
+                                            Loading Orders...
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className={`space-y-3 transition-opacity duration-200 ${isFetching ? 'opacity-35 pointer-events-none' : 'opacity-100'}`}>
+                            {groupedOrders.map((group, groupIdx) => {
                             const groupStats = group.orders.reduce((acc: any, order) => {
                                 const status = order.order_status
                                 acc[status] = (acc[status] || 0) + 1
@@ -1456,6 +1479,7 @@ export default function DarazSalesEntryPage() {
 
                         {/* Global Pagination Card */}
                         {renderPagination()}
+                        </div>
                     </div>
                 </div>
 

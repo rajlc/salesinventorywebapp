@@ -59,6 +59,13 @@ function DashboardLayout({
 
     const closeMobileMenu = () => setIsMobileMenuOpen(false)
 
+    // Reset page-specific headerTitle and headerAction immediately on route change.
+    // This permanently prevents stale headers from previous pages displaying during fast navigations!
+    useEffect(() => {
+        setHeaderTitle(null)
+        setHeaderAction(null)
+    }, [pathname])
+
     return (
         <DashboardContext.Provider value={{ isMobileMenuOpen, setIsMobileMenuOpen, isCollapsed, setHeaderTitle, setHeaderAction }}>
             <div className="flex h-screen bg-slate-50 dark:bg-zinc-950 relative">

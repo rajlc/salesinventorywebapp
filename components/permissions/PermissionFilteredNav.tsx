@@ -10,11 +10,9 @@ interface PermissionFilteredNavProps {
 }
 
 export function PermissionFilteredNav({ mainRole, subRole, children }: PermissionFilteredNavProps) {
-    const { hasPermission, isLoading } = usePermissions()
+    const { hasPermission, isLoading, isMounted } = usePermissions()
 
-    if (isLoading) {
-        // While loading permissions, hide the nav items to prevent flicker
-        // Or could return a skeleton if needed. Let's just return null for now.
+    if (!isMounted || isLoading) {
         return null
     }
 
