@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import { Plus } from 'lucide-react'
-import { checkActiveProductPlan } from '@/features/purchase/actions/plan-actions'
 import { ProductSelectionModal } from './ProductSelectionModal'
 import { AddPlanModal } from '@/features/purchase/components/daily-plan/AddPlanModal'
 import { toast } from 'sonner'
@@ -41,7 +40,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
         setShowProductSelection(true)
     }
 
-    const handleProductSelect = async (productId: string, remarks?: string, quantity?: number, productName?: string) => {
+    const handleProductSelect = (productId: string, remarks?: string, quantity?: number, productName?: string) => {
         setShowProductSelection(false)
 
         if (!productId) {
@@ -53,15 +52,6 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
 
         // Fast check against activePlanProductIds in memory
         if (activePlanProductIds.includes(productId)) {
-            toast.error('Product Already in Purchase List', {
-                description: 'This product is already in the pending purchase list.'
-            })
-            return
-        }
-
-        const alreadyPlanned = await checkActiveProductPlan(productId)
-
-        if (alreadyPlanned) {
             toast.error('Product Already in Purchase List', {
                 description: 'This product is already in the pending purchase list.'
             })

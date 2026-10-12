@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Plus, Loader2 } from 'lucide-react'
-import { useRouter } from 'next/navigation'
 import { useQueryClient } from '@tanstack/react-query'
 import { createPurchasePlan, getProductPurchaseStats, ProductPurchaseStats } from '@/features/purchase/actions/plan-actions'
 import { getAllProductOptions, getProductBySku } from '@/features/inventory/actions/product-actions'
@@ -36,11 +35,10 @@ export function AddPlanModal({
     onClose?: () => void
     onOpenChange?: (isOpen: boolean) => void
 }) {
-    const router = useRouter()
     const queryClient = useQueryClient()
     const [internalOpen, setInternalOpen] = useState(false)
     const [loading, setLoading] = useState(false)
-    const [mounted, setMounted] = useState(false)
+    const [mounted, setMounted] = useState(() => typeof window !== 'undefined')
 
     useEffect(() => {
         setMounted(true)
@@ -62,11 +60,11 @@ export function AddPlanModal({
 
     // Form State
     const [date, setDate] = useState(new Date().toISOString().split('T')[0])
-    const [productId, setProductId] = useState('')
-    const [productName, setProductName] = useState('') // Controlled display label for Select
+    const [productId, setProductId] = useState(prefilledProductId || '')
+    const [productName, setProductName] = useState(prefilledProductName || '') // Controlled display label for Select
     const [sellerSku, setSellerSku] = useState('')
     const [quantity, setQuantity] = useState(prefilledQuantity || 1)
-    const [remarks, setRemarks] = useState('')
+    const [remarks, setRemarks] = useState(prefilledRemarks || '')
     const [status, setStatus] = useState('Pending')
 
     // Stats
@@ -250,6 +248,12 @@ export function AddPlanModal({
             onSuccess()
         }
 
+        // Optimistically update active-purchase-plans so +Add button reflects active state immediately without reloading orders
+        queryClient.setQueryData<string[]>(['active-purchase-plans'], (old = []) => {
+            const list = Array.isArray(old) ? old : []
+            return list.includes(planData.product_id) ? list : [...list, planData.product_id]
+        })
+
         // 3. Save in background and notify with toast
         const toastId = toast.loading("Saving purchase plan...")
 
@@ -259,13 +263,12 @@ export function AddPlanModal({
                 queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
                 queryClient.invalidateQueries({ queryKey: ['daily-plans'] })
                 queryClient.invalidateQueries({ queryKey: ['purchase-plans'] })
-                queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
-                router.refresh()
                 onPlanAdded?.()
             })
             .catch((error: any) => {
                 console.error("Failed to save plan in background:", error)
                 toast.error(error?.message || "Failed to save purchase plan", { id: toastId })
+                queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
             })
     }
 
