@@ -180,7 +180,7 @@ export default function ProfitTrackerOrderPage() {
             const { syncOrderPurchaseCost } = await import('@/features/sales/actions/report-actions')
             const result = await syncOrderPurchaseCost(order.order_number)
             setSyncMessage('✓ Synced!')
-            toast.success(`Fees synced successfully: ${result?.feeResult || 'Updated'}`)
+            toast.success(`Fees synced successfully: ${result?.feeSync || 'Updated'}`)
 
             // Refetch finance transactions
             if (order.store_id) {
