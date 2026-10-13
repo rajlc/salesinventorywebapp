@@ -113,7 +113,13 @@ export async function GET(request: NextRequest) {
             const pageData = response.data.data || []
 
             if (pageData.length > 0) {
-                allTransactions = [...allTransactions, ...pageData]
+                const cleanPageData = pageData.map((t: any) => ({
+                    ...t,
+                    amount: typeof t.amount === 'string' ? t.amount.replace(/,/g, '').trim() : t.amount,
+                    VAT_in_amount: typeof t.VAT_in_amount === 'string' ? t.VAT_in_amount.replace(/,/g, '').trim() : t.VAT_in_amount,
+                    WHT_amount: typeof t.WHT_amount === 'string' ? t.WHT_amount.replace(/,/g, '').trim() : t.WHT_amount
+                }))
+                allTransactions = [...allTransactions, ...cleanPageData]
 
                 // If we got less than requested, we are done
                 if (pageData.length < limit) {

@@ -17,17 +17,18 @@ import {
     DialogTitle,
     DialogTrigger,
 } from '@/components/ui-shim'
-import { Search, Eye, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText } from 'lucide-react'
+import { Search, Eye, RefreshCw, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText } from 'lucide-react'
 import Link from 'next/link'
-import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats, getDailyCommissionAlerts } from '@/features/sales/actions/report-actions'
+import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats, getDailyCommissionAlerts, syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
 import { format, startOfWeek, endOfWeek, getWeek } from 'date-fns'
 import { BulkSyncButton } from './bulk-sync-button'
 import { DailyBreakdownModal } from './daily-breakdown-modal'
-import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, keepPreviousData, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { useFiscalYears, useActiveFiscalYear } from '@/features/settings/hooks/useFiscalYears'
 import { fetchDarazPayoutStatus } from '@/features/sales/actions/daraz-finance-service'
 import { getStatementBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
+import { toast } from 'sonner'
 
 // Helper component for Limit Selector using props
 function LimitSelector({ currentLimit, onLimitChange }: { currentLimit: number, onLimitChange: (limit: number) => void }) {
@@ -241,6 +242,25 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
     const searchParams = useSearchParams()
     const pathname = usePathname()
     const router = useRouter()
+    const queryClient = useQueryClient()
+    const [syncingOrderNumber, setSyncingOrderNumber] = useState<string | null>(null)
+
+    const handleSyncSingleOrder = async (orderNumber: string) => {
+        if (!orderNumber || syncingOrderNumber) return
+        setSyncingOrderNumber(orderNumber)
+        try {
+            const result = await syncOrderPurchaseCost(orderNumber)
+            toast.success(`Fee synced for #${orderNumber}: ${result?.feeSync || 'Updated'}`)
+            await queryClient.invalidateQueries({ queryKey: ['profit-tracker'] })
+            await queryClient.invalidateQueries({ queryKey: ['daily-profit-stats'] })
+            await queryClient.invalidateQueries({ queryKey: ['complete-date-stats'] })
+        } catch (err: any) {
+            console.error('Failed to sync order fee:', err)
+            toast.error(`Sync failed for #${orderNumber}: ${err.message}`)
+        } finally {
+            setSyncingOrderNumber(null)
+        }
+    }
 
     const [page, setPage] = useState(() => {
         if (typeof window === 'undefined') return 1
@@ -962,7 +982,7 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                     <TableHead className="text-right w-28 text-[11px] font-bold uppercase">Purchase Cost</TableHead>
                                     <TableHead className="text-center w-48 min-w-[190px] text-[11px] font-bold uppercase">Commission</TableHead>
                                     <TableHead className="text-right w-28 text-[11px] font-bold uppercase">Profit</TableHead>
-                                    <TableHead className="text-center w-16 text-[11px] font-bold uppercase">Action</TableHead>
+                                    <TableHead className="text-center w-20 text-[11px] font-bold uppercase">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
@@ -1096,7 +1116,10 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                                                 <div className="flex flex-col">
                                                                     <Link
                                                                         href={`/dashboard/sales/daraz/profit-tracker/${o.order_primary_id}`}
-                                                                        className="font-semibold text-blue-600 dark:text-blue-400 hover:underline font-mono"
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        className="font-semibold text-blue-600 dark:text-blue-400 hover:underline font-mono inline-flex items-center gap-1 group"
+                                                                        title="Open order details in new tab"
                                                                     >
                                                                         {o.order_number}
                                                                     </Link>
@@ -1223,13 +1246,26 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                                                             </TableCell>
 
                                                             <TableCell className="text-center py-3">
-                                                                <Link
-                                                                    href={`/dashboard/sales/daraz/profit-tracker/${o.order_primary_id}`}
-                                                                    className="p-1.5 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-full transition-colors text-blue-600 dark:text-blue-400 inline-flex items-center justify-center"
-                                                                    title="View Details"
-                                                                >
-                                                                    <Eye className="h-4 w-4" />
-                                                                </Link>
+                                                                <div className="flex items-center justify-center gap-1">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleSyncSingleOrder(o.order_number)}
+                                                                        disabled={syncingOrderNumber === o.order_number}
+                                                                        className="p-1.5 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 hover:text-emerald-700 dark:hover:text-emerald-300 rounded-full transition-colors text-emerald-600 dark:text-emerald-400 inline-flex items-center justify-center border border-transparent hover:border-emerald-200 dark:hover:border-emerald-800 disabled:opacity-50"
+                                                                        title="Sync Fee for this order"
+                                                                    >
+                                                                        <RefreshCw className={`h-3.5 w-3.5 ${syncingOrderNumber === o.order_number ? 'animate-spin text-emerald-600' : ''}`} />
+                                                                    </button>
+                                                                    <Link
+                                                                        href={`/dashboard/sales/daraz/profit-tracker/${o.order_primary_id}`}
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        className="p-1.5 hover:bg-blue-50 dark:hover:bg-blue-950/40 hover:text-blue-700 dark:hover:text-blue-300 rounded-full transition-colors text-blue-600 dark:text-blue-400 inline-flex items-center justify-center border border-transparent hover:border-blue-200 dark:hover:border-blue-800"
+                                                                        title="Open Order Details in New Window"
+                                                                    >
+                                                                        <Eye className="h-4 w-4" />
+                                                                    </Link>
+                                                                </div>
                                                             </TableCell>
                                                         </TableRow>
                                                     )

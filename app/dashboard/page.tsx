@@ -48,7 +48,7 @@ export default async function DashboardPage() {
     const totalReturnsCount = darazToday.returnedDelivered + darazToday.customerReturnDelivered
 
     return (
-        <div className="space-y-5 font-sans max-w-7xl mx-auto pb-6 text-slate-800 dark:text-zinc-200">
+        <div className="space-y-5 font-sans w-full max-w-[1600px] pb-6 text-slate-800 dark:text-zinc-200">
             {/* DYNAMIC TIME-BASED HEADER & LIGHT BLACK FISCAL YEAR PILL */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-zinc-800">
                 <div>

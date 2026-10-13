@@ -155,7 +155,7 @@ export default function OrderDetailsPage() {
                 const type = (t.transaction_type || t.fee_type || '').toLowerCase()
                 return feeTypeKeywords.some(k => name.includes(k) || type.includes(k))
             })
-            .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount || 0)), 0)
+            .reduce((sum, t) => sum + Math.abs(parseFloat(String(t.amount || 0).replace(/,/g, '').trim()) || 0), 0)
 
         return total
     }

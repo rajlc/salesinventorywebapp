@@ -98,7 +98,13 @@ export async function fetchDarazFinanceTransactions(orderId: string, storeId: st
             const pageData = response.data.data || []
 
             if (pageData.length > 0) {
-                allTransactions = [...allTransactions, ...pageData]
+                const cleanPageData = pageData.map((t: any) => ({
+                    ...t,
+                    amount: typeof t.amount === 'string' ? t.amount.replace(/,/g, '').trim() : t.amount,
+                    VAT_in_amount: typeof t.VAT_in_amount === 'string' ? t.VAT_in_amount.replace(/,/g, '').trim() : t.VAT_in_amount,
+                    WHT_amount: typeof t.WHT_amount === 'string' ? t.WHT_amount.replace(/,/g, '').trim() : t.WHT_amount
+                }))
+                allTransactions = [...allTransactions, ...cleanPageData]
 
                 // If we got less than requested, we are done
                 if (pageData.length < limit) {
@@ -239,6 +245,12 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
 
         // Prepare for DB Upsert with composite unique key
         const effectiveStoreId = tokenData.store_id || matchedStore?.id || storeIdentifier
+        const cleanNumber = (val: any) => {
+            if (val === null || val === undefined || val === '') return 0
+            if (typeof val === 'number') return isNaN(val) ? 0 : val
+            const num = parseFloat(String(val).replace(/,/g, '').trim())
+            return isNaN(num) ? 0 : num
+        }
         const rows = allTransactions.map((t: any, idx: number) => {
             const uniqueKey = [t.transaction_number, t.fee_type || '', t.fee_name || '', t.orderItem_no || t.reference || idx].join('_')
             return {
@@ -246,9 +258,9 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
                 store_id: effectiveStoreId,
                 transaction_type: t.transaction_type,
                 fee_name: t.fee_name,
-                amount: parseFloat(t.amount || 0),
-                vat_amount: parseFloat(t.vat_amount || 0),
-                wht_amount: parseFloat(t.wht_amount || 0),
+                amount: cleanNumber(t.amount),
+                vat_amount: cleanNumber(t.vat_amount || t.VAT_in_amount),
+                wht_amount: cleanNumber(t.wht_amount || t.WHT_amount),
                 statement: t.statement || null,
                 transaction_date: t.transaction_date,
                 order_no: t.order_no || null,
@@ -803,6 +815,12 @@ export async function fetchDarazStatementLineItems(
 
                 if (transactions.length > 0) {
                     // Save to DB in batches of 500 for future fast lookups
+                    const cleanNum = (val: any) => {
+                        if (val === null || val === undefined || val === '') return 0
+                        if (typeof val === 'number') return isNaN(val) ? 0 : val
+                        const num = parseFloat(String(val).replace(/,/g, '').trim())
+                        return isNaN(num) ? 0 : num
+                    }
                     const rows = transactions.map((t: any, idx: number) => {
                         const uniqueKey = [t.transaction_number || t.orderItem_id || t.order_no || idx, t.fee_type || '', t.fee_name || '', t.orderItem_no || t.reference || idx].join('_')
                         return {
@@ -810,9 +828,9 @@ export async function fetchDarazStatementLineItems(
                             store_id: storeId || tokenData.store_id,
                             transaction_type: t.transaction_type,
                             fee_name: t.fee_name,
-                            amount: parseFloat(t.amount || 0),
-                            vat_amount: parseFloat(t.vat_amount || 0),
-                            wht_amount: parseFloat(t.wht_amount || 0),
+                            amount: cleanNum(t.amount),
+                            vat_amount: cleanNum(t.vat_amount || t.VAT_in_amount),
+                            wht_amount: cleanNum(t.wht_amount || t.WHT_amount),
                             statement: t.statement || period || statementNumber,
                             transaction_date: t.transaction_date,
                             order_no: t.order_no || null,

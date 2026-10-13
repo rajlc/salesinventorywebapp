@@ -1092,6 +1092,13 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
             // Helper to get fee total from transactions by keywords
             // CRITICAL: Sum ALL amounts (positive and negative) to handle reversals/refunds
             // Fees are negative in API. We want Cost (Positive). So we negate the sum.
+            const parseAmount = (val: any): number => {
+                if (val === null || val === undefined || val === '') return 0
+                if (typeof val === 'number') return isNaN(val) ? 0 : val
+                const num = parseFloat(String(val).replace(/,/g, '').trim())
+                return isNaN(num) ? 0 : num
+            }
+
             const getFinanceTotal = (keywords: string[]) => {
                 if (!transactions || !transactions.length) return 0
                 return transactions
@@ -1100,7 +1107,7 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                         const type = (t.transaction_type || t.fee_type || '').toLowerCase()
                         return keywords.some(k => name.includes(k) || type.includes(k))
                     })
-                    .reduce((sum: number, t: any) => sum - parseFloat(t.amount || 0), 0)
+                    .reduce((sum: number, t: any) => sum - parseAmount(t.amount), 0)
             }
 
             const hasFinance = transactions && transactions.length > 0
@@ -1119,7 +1126,7 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                 })
 
                 if (feeTransactions.length > 0) {
-                    finalFee = feeTransactions.reduce((sum: number, t: any) => sum - parseFloat(t.amount || 0), 0)
+                    finalFee = feeTransactions.reduce((sum: number, t: any) => sum - parseAmount(t.amount), 0)
                 } else {
                     const val_free_ship = getFinanceTotal(['free shipping', 'free_shipping'])
                     const val_voucher = getFinanceTotal(['co-funded', 'cofunded', 'co_funded'])

@@ -240,13 +240,13 @@ function DashboardLayout({
                 <main className={`
                     flex-1 
                     ${(isMobileMode && pathname === '/dashboard') || pathname === '/dashboard/purchase/daily-purchase-list' ? 'overflow-hidden' : 'overflow-y-auto'}
-                    ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname === '/dashboard/purchase/analytics' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname?.startsWith('/dashboard/inventory/stock-ledger') ? 'pt-0' : 'mt-16 md:mt-0'} 
-                    ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname === '/dashboard/sales/daraz/profit-tracker' ? 'h-full' : 'h-[calc(100vh-4rem)] md:h-full'}
+                    ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname === '/dashboard/purchase/analytics' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname?.startsWith('/dashboard/inventory/stock-ledger') || pathname?.startsWith('/dashboard/sales/daraz/profit-tracker') ? 'pt-0' : 'mt-16 md:mt-0'} 
+                    ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname?.startsWith('/dashboard/sales/daraz/profit-tracker') ? 'h-full' : 'h-[calc(100vh-4rem)] md:h-full'}
                     pointer-events-auto
                 `}>
                     {/* Desktop Top Header Bar - Only show on Dashboard menu */}
                     {pathname === '/dashboard' && (
-                        <header className="hidden md:flex h-14 bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800/80 px-6 items-center justify-between sticky top-0 z-30 shadow-2xs">
+                        <header className="hidden md:flex h-14 bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800/80 px-5 items-center justify-between sticky top-0 z-30 shadow-2xs">
                             <div className="flex items-center gap-3">
                                 {headerTitle ? (
                                     typeof headerTitle === 'string' ? (
@@ -265,7 +265,21 @@ function DashboardLayout({
                         </header>
                     )}
 
-                    <div className={`${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname === '/dashboard/sales/daraz/profit-tracker' ? 'p-0 h-full' : 'px-4 pb-4 pt-1 md:p-8'} ${isMobileMode ? 'pb-24' : ''}`}>
+                    <div className={`${
+                        pathname === '/dashboard/purchase/inventory-price-reports' ||
+                        pathname === '/dashboard/purchase/analytics' ||
+                        pathname === '/dashboard/purchase/daily-purchase-list' ||
+                        pathname?.startsWith('/dashboard/suppliers') ||
+                        pathname === '/dashboard/purchase/buy-sell-suppliers' ||
+                        pathname === '/dashboard/sales/daraz/status-sync' ||
+                        pathname === '/dashboard/sales/daraz/order-sync' ||
+                        pathname === '/dashboard/sales/daraz/dashboard' ||
+                        pathname?.startsWith('/dashboard/sales/daraz/profit-tracker')
+                            ? 'p-0 h-full'
+                            : pathname === '/dashboard'
+                            ? 'px-3 py-3 md:px-5 md:py-4'
+                            : 'px-4 pb-4 pt-1 md:p-8'
+                    } ${isMobileMode ? 'pb-24' : ''}`}>
                         {isMobileMode && pathname === '/dashboard' ? (
                             <MobileDashboard />
                         ) : (
