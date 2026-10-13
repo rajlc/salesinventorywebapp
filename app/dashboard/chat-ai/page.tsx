@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 import {
     syncDarazChatSessions,
+    syncDarazChatMessages,
     sendChatMessage,
     getChatSettings,
     updateChatSettings,
@@ -322,6 +323,7 @@ function ChatAiDashboardContent() {
     const [loadingSessions, setLoadingSessions] = useState(false)
     const [loadingMessages, setLoadingMessages] = useState(false)
     const [syncing, setSyncing] = useState(false)
+    const [syncingSingleSession, setSyncingSingleSession] = useState(false)
 
     // Right sidebar (Customer details / context) state
     const [customerOrders, setCustomerOrders] = useState<any[]>([])
@@ -565,11 +567,37 @@ function ChatAiDashboardContent() {
 
             if (error) {
                 console.error(error)
-            } else {
-                setMessages(data || [])
+                setMessages([])
+                setLoadingMessages(false)
+            } else if (data && data.length > 0) {
+                setMessages(data)
+                setLoadingMessages(false)
                 setTimeout(() => scrollToBottom('auto'), 50)
+            } else {
+                // If local messages are empty (e.g. purged by older retention policy), auto-fetch from Daraz up to 30 days
+                if (activeStoreId && activeSessionId) {
+                    try {
+                        const syncRes = await syncDarazChatMessages(activeStoreId, activeSessionId)
+                        if (syncRes.success) {
+                            const { data: refetched } = await supabase
+                                .from('daraz_chat_messages')
+                                .select('*')
+                                .eq('session_id', activeSessionId)
+                                .order('send_time', { ascending: true })
+                            setMessages(refetched || [])
+                            setTimeout(() => scrollToBottom('auto'), 50)
+                        } else {
+                            setMessages([])
+                        }
+                    } catch (syncErr) {
+                        console.error('Auto sync failed for session:', syncErr)
+                        setMessages([])
+                    }
+                } else {
+                    setMessages([])
+                }
+                setLoadingMessages(false)
             }
-            setLoadingMessages(false)
         }
         fetchMessages()
 
@@ -677,6 +705,34 @@ function ChatAiDashboardContent() {
             toast.error(errorMsg)
         } finally {
             setSyncing(false)
+        }
+    }
+
+    // Sync messages for current session directly from Daraz API (retains up to 30 days)
+    const handleSyncSingleSession = async (sessionIdToSync: string) => {
+        if (!activeStoreId || !sessionIdToSync || syncingSingleSession) return
+        setSyncingSingleSession(true)
+        toast.info('Syncing chat history from Daraz...')
+        try {
+            const result = await syncDarazChatMessages(activeStoreId, sessionIdToSync)
+            if (result.success) {
+                toast.success('Chat history synced!')
+                const { data } = await supabase
+                    .from('daraz_chat_messages')
+                    .select('*')
+                    .eq('session_id', sessionIdToSync)
+                    .order('send_time', { ascending: true })
+                if (data) {
+                    setMessages(data)
+                    setTimeout(() => scrollToBottom('auto'), 50)
+                }
+            } else {
+                toast.error(result.error || 'Failed to sync messages for this customer.')
+            }
+        } catch (err: any) {
+            toast.error(err?.message || 'Failed to sync customer chat.')
+        } finally {
+            setSyncingSingleSession(false)
         }
     }
 
@@ -1764,6 +1820,17 @@ function ChatAiDashboardContent() {
                                             </div>
                                         </div>
                                     </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => handleSyncSingleSession(activeSession.session_id)}
+                                            disabled={syncingSingleSession || loadingMessages}
+                                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-200 bg-zinc-100 hover:bg-orange-50 dark:bg-zinc-800 dark:hover:bg-orange-950/40 hover:text-orange-600 dark:hover:text-orange-400 border border-zinc-200 dark:border-zinc-700 rounded-md transition shadow-xs disabled:opacity-50"
+                                            title="Sync chat history from Daraz (retains up to 30 days)"
+                                        >
+                                            <RefreshCw className={`w-3.5 h-3.5 ${syncingSingleSession ? 'animate-spin text-orange-500' : ''}`} />
+                                            <span>{syncingSingleSession ? 'Syncing...' : 'Sync History'}</span>
+                                        </button>
+                                    </div>
                                 </div>
 
                                 {/* Messages Viewport */}
@@ -1774,8 +1841,16 @@ function ChatAiDashboardContent() {
                                             <span className="text-sm text-zinc-500">Loading chat history...</span>
                                         </div>
                                     ) : messages.length === 0 ? (
-                                        <div className="flex items-center justify-center h-full text-zinc-400 text-xs">
-                                            No messages yet. Send a message to start the conversation!
+                                        <div className="flex flex-col items-center justify-center h-full text-zinc-400 text-xs gap-3">
+                                            <p className="text-zinc-500 dark:text-zinc-400">No messages cached locally yet.</p>
+                                            <button
+                                                onClick={() => handleSyncSingleSession(activeSession.session_id)}
+                                                disabled={syncingSingleSession}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-500 rounded-lg shadow-sm transition disabled:opacity-50 cursor-pointer"
+                                            >
+                                                <RefreshCw className={`w-3.5 h-3.5 ${syncingSingleSession ? 'animate-spin' : ''}`} />
+                                                <span>Sync 30-Day Chat History</span>
+                                            </button>
                                         </div>
                                     ) : (
                                         messages.filter((msg) => {

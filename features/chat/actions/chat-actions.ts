@@ -312,31 +312,63 @@ export async function syncDarazChatSessions(storeId: string) {
             return { success: false, reason: 'Disconnected' }
         }
 
-        const timestamp = Date.now().toString()
-        // Fetch sessions updated in the last 7 days
-        const sevenDaysAgo = (Date.now() - 7 * 24 * 60 * 60 * 1000).toString()
-        const params: Record<string, unknown> = {
-            app_key: appKey,
-            access_token: accessToken,
-            timestamp,
-            sign_method: 'sha256',
-            start_time: sevenDaysAgo,
-            page_size: '50'
-        }
-
         const apiPath = '/im/session/list'
-        params.sign = signRequest(apiPath, params, appSecret)
+        const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000
+        let currentStartTime = Date.now().toString()
+        let lastSessionId: string | undefined = undefined
+        const sessionList: any[] = []
+        let pageCount = 0
 
-        console.log(`[ChatSync] Syncing sessions for store ${storeId}...`)
-        const response = await axios.get(`${API_URL}${apiPath}`, { params, timeout: 10000 })
+        // Fetch sessions updated in the last 30 days (paginating backwards)
+        while (pageCount < 5) {
+            const pageTimestamp = Date.now().toString()
+            const params: Record<string, unknown> = {
+                app_key: appKey,
+                access_token: accessToken,
+                timestamp: pageTimestamp,
+                sign_method: 'sha256',
+                start_time: currentStartTime,
+                page_size: '50'
+            }
+            if (lastSessionId) {
+                params.last_session_id = lastSessionId
+            }
+            params.sign = signRequest(apiPath, params, appSecret)
 
-        if (response.data.code !== "0" && response.data.code !== 0) {
-            throw new Error(`Daraz API Error: ${response.data.message || response.data.msg}`)
+            console.log(`[ChatSync] Syncing sessions page ${pageCount + 1} for store ${storeId}...`)
+            const response = await axios.get(`${API_URL}${apiPath}`, { params, timeout: 10000 })
+
+            if (response.data.code !== "0" && response.data.code !== 0) {
+                if (pageCount === 0) {
+                    throw new Error(`Daraz API Error: ${response.data.message || response.data.msg}`)
+                }
+                break
+            }
+
+            const list = response.data.data?.session_list || []
+            if (list.length === 0) break
+
+            sessionList.push(...list)
+
+            const oldest = list[list.length - 1]
+            const oldestTime = parseInt(String(oldest?.last_message_time || '0'))
+            if (oldestTime && oldestTime < thirtyDaysAgoMs) {
+                break
+            }
+
+            const hasMore = response.data.data?.has_more === 'true' || response.data.data?.has_more === true
+            if (!hasMore || !response.data.data?.next_start_time) {
+                break
+            }
+
+            currentStartTime = String(response.data.data.next_start_time)
+            lastSessionId = response.data.data.last_session_id
+            pageCount++
         }
 
-        const sessionList = response.data.data?.session_list || []
-        console.log(`[ChatSync] Retrieved ${sessionList.length} sessions from Daraz.`)
+        console.log(`[ChatSync] Retrieved ${sessionList.length} sessions from Daraz across ${pageCount} page(s).`)
 
+        let processedSessionIndex = 0
         for (const session of sessionList) {
             // Self-heal buyer ID from session ID if undefined
             let buyerId = String(session.buyer_id || '');
@@ -395,8 +427,12 @@ export async function syncDarazChatSessions(storeId: string) {
                 continue
             }
 
-            // Sync messages for this session
-            await syncDarazChatMessages(storeId, session.session_id)
+            // Sync messages for the top 20 most recent sessions during full session sync to keep sync responsive;
+            // remaining sessions will sync on demand when opened by the user
+            if (processedSessionIndex < 20) {
+                await syncDarazChatMessages(storeId, session.session_id)
+            }
+            processedSessionIndex++
         }
 
         try {
@@ -412,31 +448,64 @@ export async function syncDarazChatSessions(storeId: string) {
     }
 }
 
-// 3. Fetch/Sync Messages for a single Session from Daraz API
+// 3. Fetch/Sync Messages for a single Session from Daraz API (pulls up to 30 days of chat history)
 export async function syncDarazChatMessages(storeId: string, sessionId: string) {
     try {
         const { appKey, appSecret, accessToken } = await getStoreTokenAndSecret(storeId)
         const supabase = await createAdminClient()
 
-        const timestamp = Date.now().toString()
-        // According to Daraz IM API documentation: when requesting the first page, start_time must be the current timestamp
-        const params: Record<string, unknown> = {
-            app_key: appKey,
-            access_token: accessToken,
-            timestamp,
-            sign_method: 'sha256',
-            session_id: sessionId,
-            start_time: timestamp,
-            page_size: '50'
-        }
-
         const apiPath = '/im/message/list'
-        params.sign = signRequest(apiPath, params, appSecret)
+        const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000
+        let currentStartTime = Date.now().toString()
+        let lastMsgId: string | undefined = undefined
+        const messageList: any[] = []
+        let msgPageCount = 0
 
-        const response = await axios.get(`${API_URL}${apiPath}`, { params, timeout: 10000 })
+        // Paginate backwards to retrieve up to 30 days of message history
+        while (msgPageCount < 5) {
+            const pageTimestamp = Date.now().toString()
+            const params: Record<string, unknown> = {
+                app_key: appKey,
+                access_token: accessToken,
+                timestamp: pageTimestamp,
+                sign_method: 'sha256',
+                session_id: sessionId,
+                start_time: currentStartTime,
+                page_size: '50'
+            }
+            if (lastMsgId) {
+                params.last_message_id = lastMsgId
+            }
+            params.sign = signRequest(apiPath, params, appSecret)
 
-        if (response.data.code !== "0" && response.data.code !== 0) {
-            throw new Error(`Daraz API Error: ${response.data.message || response.data.msg}`)
+            const response = await axios.get(`${API_URL}${apiPath}`, { params, timeout: 10000 })
+
+            if (response.data.code !== "0" && response.data.code !== 0) {
+                if (msgPageCount === 0) {
+                    throw new Error(`Daraz API Error: ${response.data.message || response.data.msg}`)
+                }
+                break
+            }
+
+            const pageMessages = response.data.data?.message_list || []
+            if (pageMessages.length === 0) break
+
+            messageList.push(...pageMessages)
+
+            const oldest = pageMessages[pageMessages.length - 1]
+            const oldestTime = parseInt(String(oldest?.send_time || '0'))
+            if (oldestTime && oldestTime < thirtyDaysAgoMs) {
+                break
+            }
+
+            const hasMore = response.data.data?.has_more === 'true' || response.data.data?.has_more === true
+            if (!hasMore || !response.data.data?.next_start_time) {
+                break
+            }
+
+            currentStartTime = String(response.data.data.next_start_time)
+            lastMsgId = response.data.data.last_message_id
+            msgPageCount++
         }
 
         // Extract buyer and seller IDs from sessionId for self-healing
@@ -451,11 +520,11 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
             else if (parts[3] === '2') sessionSellerId = parts[2];
         }
 
-        const messageList = response.data.data?.message_list || []
-        
         let newMessagesCached = 0
         for (const msg of messageList) {
             const sendTime = msg.send_time ? new Date(parseInt(String(msg.send_time))).toISOString() : new Date().toISOString()
+            const sendTimeMs = new Date(sendTime).getTime()
+            if (sendTimeMs < thirtyDaysAgoMs) continue // Keep within 30 days
             
             // Check if message already exists to avoid overwriting user/system tags
             const { data: existingMsg } = await supabase

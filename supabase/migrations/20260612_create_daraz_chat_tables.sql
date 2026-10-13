@@ -100,15 +100,15 @@ CREATE POLICY "auth_full_access_delayed_messages" ON public.daraz_delayed_messag
 CREATE OR REPLACE FUNCTION public.clean_daraz_chat_messages()
 RETURNS VOID AS $$
 BEGIN
-    -- Delete untagged messages older than 48 hours
+    -- Delete untagged messages older than 30 days
     DELETE FROM public.daraz_chat_messages
     WHERE (tags IS NULL OR cardinality(tags) = 0)
-      AND send_time < NOW() - INTERVAL '48 hours';
+      AND send_time < NOW() - INTERVAL '30 days';
 
-    -- Delete tagged messages older than 15 days
+    -- Delete tagged messages older than 60 days
     DELETE FROM public.daraz_chat_messages
     WHERE (tags IS NOT NULL AND cardinality(tags) > 0)
-      AND send_time < NOW() - INTERVAL '15 days';
+      AND send_time < NOW() - INTERVAL '60 days';
 END;
 $$ LANGUAGE plpgsql;
 
