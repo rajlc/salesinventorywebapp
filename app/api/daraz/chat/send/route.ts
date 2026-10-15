@@ -4,25 +4,33 @@ import { sendChatMessage } from '@/features/chat/actions/chat-actions'
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json().catch(() => ({}))
-        const { storeId, sessionId, message, text } = body
+        const { storeId, sessionId, message, text, templateId } = body
 
+        const tId = String(templateId || '1')
         const content = (message || text || '').trim()
 
-        if (!storeId || !sessionId || !content) {
+        if (!storeId || !sessionId) {
             return NextResponse.json(
-                { error: 'storeId, sessionId, and message content are required' },
+                { error: 'storeId and sessionId are required' },
                 { status: 400 }
             )
         }
 
-        console.log(`[API-ChatSend] Sending message to Daraz for store ${storeId}, session ${sessionId}`)
+        if (tId === '1' && !content) {
+            return NextResponse.json(
+                { error: 'message content is required for text messages' },
+                { status: 400 }
+            )
+        }
 
-        // Template ID '1' is standard text message
+        console.log(`[API-ChatSend] Sending message (template ${tId}) to Daraz for store ${storeId}, session ${sessionId}`)
+
+        // Template ID '1' is standard text, '10010' is follow invitation card
         const result = await sendChatMessage(
             String(storeId),
             String(sessionId),
-            '1',
-            content,
+            tId,
+            tId === '1' ? content : undefined,
             undefined,
             undefined,
             false // manual reply
