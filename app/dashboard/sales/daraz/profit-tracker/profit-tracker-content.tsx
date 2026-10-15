@@ -17,7 +17,7 @@ import {
     DialogTitle,
     DialogTrigger,
 } from '@/components/ui-shim'
-import { Search, Eye, RefreshCw, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText } from 'lucide-react'
+import { Search, Eye, RefreshCw, AlertTriangle, ClipboardList, LayoutGrid, Calendar, BarChart3, List, FileSpreadsheet, FileText, Clock } from 'lucide-react'
 import Link from 'next/link'
 import { getProfitTrackerData, getDailyProfitStats, getSellerAccounts, getCompleteDateStats, getDailyCommissionAlerts, syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
 import { format, startOfWeek, endOfWeek, getWeek } from 'date-fns'
@@ -1328,8 +1328,27 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
                 {/* 3. DAILY DETAILS VIEW */}
                 {activeSubTab === 'daily' && (
                     <Card className="overflow-hidden border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm">
-                        <div className="p-4 border-b border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-800/40">
-                            <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">Daily Profit Summary</h3>
+                        <div className="p-4 border-b border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-800/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div>
+                                <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100 flex items-center gap-2 flex-wrap">
+                                    <span>Daily Profit Summary</span>
+                                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/60 px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                                        <Clock className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                        Auto-Sync: Daily 9:00 PM NPT
+                                    </span>
+                                </h3>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                    Daraz finance fees and costs automatically sync daily at 9:00 PM Nepal Time to compute exact profits.
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2 self-start sm:self-auto">
+                                <BulkSyncButton
+                                    date={format(new Date(), 'yyyy-MM-dd')}
+                                    sellerAccount={sellerAccount === 'All' ? undefined : sellerAccount}
+                                    label="Sync Today's Fees Now"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/50 border border-emerald-300 dark:border-emerald-800 rounded-xl transition-all shadow-sm active:scale-[0.98]"
+                                />
+                            </div>
                         </div>
                         <div className="overflow-x-auto">
                             <Table>

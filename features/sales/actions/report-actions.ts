@@ -1023,11 +1023,11 @@ export async function getMonthlyFinancialBreakdownDetails(params: {
 }
 
 // Sync/Lock Purchase Cost for an Order
-export async function syncOrderPurchaseCost(orderNumber: string) {
+export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: string) {
     const supabase = await createAdminClient()
 
     // 1. Fetch Order Items & Meta for Finance Sync
-    const { data: order, error } = await supabase
+    let orderQuery = supabase
         .from('daraz_orders')
         .select(`
         id,
@@ -1039,7 +1039,13 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
         items:daraz_order_items(id, product_id, purchase_cost, seller_sku, product_name)
     `)
         .eq('order_number', orderNumber)
-        .single()
+
+    if (storeIdParam) {
+        orderQuery = orderQuery.eq('store_id', storeIdParam)
+    }
+
+    const { data: ordersList, error } = await orderQuery.limit(1)
+    const order = ordersList?.[0]
 
     if (error || !order) {
         throw new Error(`Order ${orderNumber} not found in DB`)
@@ -1145,10 +1151,16 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
                 console.log(`[SYNC DEBUG] Order ${orderNumber} (ID: ${targetId}): Found ${transactions?.length || 0} txns. Total Fee: ${finalFee}`)
 
                 // Save to database
-                const { error: updateError } = await supabase
+                let updateQuery = supabase
                     .from('daraz_orders')
                     .update({ daraz_fees: finalFee, store_id: storeId })
                     .eq('order_number', orderNumber)
+
+                if (storeId) {
+                    updateQuery = updateQuery.eq('store_id', storeId)
+                }
+
+                const { error: updateError } = await updateQuery
 
                 if (updateError) {
                     console.error(`[SYNC ERROR] Failed to update ${orderNumber}:`, updateError)
@@ -1268,7 +1280,11 @@ export async function syncOrderPurchaseCost(orderNumber: string) {
         }
     }
 
-    revalidatePath('/dashboard/sales/daraz/profit-tracker')
+    try {
+        revalidatePath('/dashboard/sales/daraz/profit-tracker')
+    } catch {
+        // Ignored when invoked outside request context (e.g. background cron)
+    }
     return {
         success: true,
         orderNumber,
@@ -1288,6 +1304,7 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
 
         let selectFields = `
             id,
+            store_id,
             order_number,
             invoice_number,
             order_status,
@@ -1505,6 +1522,7 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
 
             return {
                 order_primary_id: o.id,
+                store_id: o.store_id,
                 order_number: o.order_number,
                 invoice_number: o.invoice_number,
                 order_status: o.order_status,
@@ -1817,3 +1835,132 @@ export async function getCompleteDateStats(params: GetOrderReportParams) {
         return {};
     }
 }
+
+// ============================================================================
+// AUTOMATED DAILY PROFIT & DARAZ FEES SYNC (CRON TRIGGERED)
+// ============================================================================
+export interface DailyProfitSyncOptions {
+    targetDate?: string           // YYYY-MM-DD (Defaults to today in Asia/Kathmandu)
+    includeYesterday?: boolean   // Also check & sync unsynced orders from yesterday
+    sellerAccount?: string       // Optional store filter
+    concurrency?: number         // Parallel sync batch size (default: 4)
+}
+
+export async function syncDailyOrdersProfitFees(options: DailyProfitSyncOptions = {}) {
+    const startTime = Date.now()
+    const concurrency = Math.max(1, Math.min(options.concurrency || 4, 8))
+
+    // 1. Determine target date in Nepal Time (Asia/Kathmandu: UTC+5:45)
+    const nepalDateFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kathmandu' })
+    const todayNepal = nepalDateFormatter.format(new Date())
+    const targetDate = options.targetDate || todayNepal
+
+    console.log(`[DAILY PROFIT CRON] Running automated bulk sync for Nepal date: ${targetDate} (Current Nepal Time: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kathmandu' })})`)
+
+    // 2. Fetch all delivered orders for the target date
+    const targetDayResult = await getDailyOrdersForDate({
+        dateStr: targetDate,
+        sellerAccount: options.sellerAccount
+    })
+
+    const targetDayOrders = targetDayResult.orders || []
+    console.log(`[DAILY PROFIT CRON] Found ${targetDayOrders.length} delivered orders for ${targetDate}`)
+
+    // 3. Optionally fetch unsynced orders from previous day to catch delayed Daraz finance entries
+    let yesterdayUnsyncedOrders: any[] = []
+    if (options.includeYesterday !== false) {
+        const [y, m, d] = targetDate.split('-').map(Number)
+        const prevDayObj = new Date(Date.UTC(y, m - 1, d - 1))
+        const prevDayStr = prevDayObj.toISOString().split('T')[0]
+
+        try {
+            const prevDayResult = await getDailyOrdersForDate({
+                dateStr: prevDayStr,
+                sellerAccount: options.sellerAccount
+            })
+            yesterdayUnsyncedOrders = (prevDayResult.orders || []).filter(o => o.sync_status !== 'synced')
+            if (yesterdayUnsyncedOrders.length > 0) {
+                console.log(`[DAILY PROFIT CRON] Found ${yesterdayUnsyncedOrders.length} unsynced orders from previous day (${prevDayStr}) to recover`)
+            }
+        } catch (prevErr: any) {
+            console.warn(`[DAILY PROFIT CRON] Warning checking previous day orders:`, prevErr.message)
+        }
+    }
+
+    // Combine targets (avoid duplicates)
+    const seenMap = new Set<string>()
+    const allOrdersToSync: Array<{ order_number: string, store_id?: string, seller_account?: string }> = []
+
+    for (const ord of [...targetDayOrders, ...yesterdayUnsyncedOrders]) {
+        const key = `${ord.order_number}_${ord.store_id || ''}`
+        if (!seenMap.has(key) && ord.order_number) {
+            seenMap.add(key)
+            allOrdersToSync.push({
+                order_number: ord.order_number,
+                store_id: ord.store_id,
+                seller_account: ord.seller_account
+            })
+        }
+    }
+
+    if (allOrdersToSync.length === 0) {
+        return {
+            success: true,
+            targetDate,
+            processedCount: 0,
+            syncedCount: 0,
+            failedCount: 0,
+            elapsed_ms: Date.now() - startTime,
+            message: `No delivered orders found to sync for ${targetDate}.`
+        }
+    }
+
+    // 4. Process in concurrent batches
+    let successCount = 0
+    let failedCount = 0
+    let totalDeductions = 0
+    const logs: Array<{ orderNumber: string, status: 'success' | 'failed', fee?: number, message: string }> = []
+
+    for (let i = 0; i < allOrdersToSync.length; i += concurrency) {
+        const batch = allOrdersToSync.slice(i, i + concurrency)
+        await Promise.all(
+            batch.map(async (ord) => {
+                try {
+                    const res = await syncOrderPurchaseCost(ord.order_number, ord.store_id)
+                    successCount++
+                    const feeVal = typeof res.fee === 'number' ? res.fee : 0
+                    totalDeductions += feeVal
+                    logs.push({
+                        orderNumber: ord.order_number,
+                        status: 'success',
+                        fee: feeVal,
+                        message: res.feeSync || 'Synced'
+                    })
+                } catch (err: any) {
+                    failedCount++
+                    logs.push({
+                        orderNumber: ord.order_number,
+                        status: 'failed',
+                        message: err.message || 'Unknown error'
+                    })
+                }
+            })
+        )
+    }
+
+    const elapsed = Date.now() - startTime
+    console.log(`[DAILY PROFIT CRON] Completed bulk sync for ${targetDate}: ${successCount} synced, ${failedCount} failed in ${elapsed}ms`)
+
+    return {
+        success: true,
+        targetDate,
+        nepalTime: new Date().toLocaleString('en-US', { timeZone: 'Asia/Kathmandu' }),
+        totalTargetOrders: allOrdersToSync.length,
+        syncedCount: successCount,
+        failedCount,
+        totalDarazFeesCalculated: Math.round(totalDeductions * 100) / 100,
+        elapsed_ms: elapsed,
+        logs
+    }
+}
+

@@ -47,6 +47,7 @@ next-env.d.ts
 !package.json
 !package-lock.json
 !tsconfig.json
+!vercel.json
 !eslint.config.mjs
 
 # Scratch/debug scripts (may contain hardcoded API keys)
