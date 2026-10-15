@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache'
 import crypto from 'crypto'
 import axios from 'axios'
 import { getProductQAs, type ProductQA } from './product-qa-actions'
+import { sendUrgentPushNotification } from './push-notification-actions'
 
 import { DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS, DEFAULT_CUTOFF_PHRASES, isClosingAcknowledgment, type EffectiveAiConfig } from '../constants'
 
@@ -1051,6 +1052,23 @@ export async function toggleSessionUrgent(sessionId: string, isUrgent: boolean, 
             .eq('session_id', sessionId)
 
         if (error) throw error
+
+        if (isUrgent) {
+            const { data: session } = await supabase
+                .from('daraz_chat_sessions')
+                .select('store_id, title')
+                .eq('session_id', sessionId)
+                .maybeSingle()
+            if (session) {
+                sendUrgentPushNotification(
+                    session.store_id,
+                    sessionId,
+                    session.title || 'Daraz Customer',
+                    reason || 'Marked as urgent'
+                ).catch(e => console.warn('[ToggleUrgent] Push notify warning:', e))
+            }
+        }
+
         try { revalidatePath('/dashboard/chat-ai') } catch {}
         return { success: true }
     } catch (err: any) {
@@ -1257,6 +1275,15 @@ Instructions:
             .update(updatePayload)
             .eq('session_id', sessionId)
 
+        if (aiJson.is_urgent) {
+            sendUrgentPushNotification(
+                storeId,
+                sessionId,
+                session?.title || 'Daraz Customer',
+                updatePayload.urgent_reason
+            ).catch(e => console.warn('[AI Analysis] Push notify warning:', e))
+        }
+
         try { revalidatePath('/dashboard/chat-ai') } catch {}
 
         return {
@@ -1449,6 +1476,13 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                     updated_at: new Date().toISOString()
                 })
                 .eq('session_id', sessionId)
+
+            sendUrgentPushNotification(
+                storeId,
+                sessionId,
+                session?.title || 'Daraz Customer',
+                reason
+            ).catch(e => console.warn('[Handover1] Push notify warning:', e))
 
             const ackReply = "Hajur, tapai ko request hami le note gareka xau. Hamro team le parcel dispatch garnu aghi tapailai direct call/contact garnecha. / Thank you, we have noted your request. Our support team will review and contact you before dispatch."
             await sendChatMessage(storeId, sessionId, '1', ackReply, undefined, undefined, true)
@@ -1749,6 +1783,13 @@ Response:`
                             updated_at: new Date().toISOString()
                         })
                         .eq('session_id', sessionId)
+
+                    sendUrgentPushNotification(
+                        storeId,
+                        sessionId,
+                        session?.title || 'Daraz Customer',
+                        handoverReason
+                    ).catch(e => console.warn('[Handover2] Push notify warning:', e))
                 }
 
                 console.log(`[AutoReply] AI response generated (Handover: ${isHandover}): "${cleanReply}"`)
