@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from '@/components/ui-shim'
 import { toast } from 'sonner'
-import { Save, Brain, Key, Cpu, ShieldCheck, FileText, RefreshCw, Info } from 'lucide-react'
+import { Save, Brain, Key, Cpu, ShieldCheck, FileText, RefreshCw, Info, Image as ImageIcon, Sparkles, Layers, Check } from 'lucide-react'
 
 const TEMPLATE_VARIABLES = [
     { key: '{productName}', desc: 'Raw product name entered by user' },
@@ -15,6 +15,14 @@ const TEMPLATE_VARIABLES = [
     { key: '{imageUrl}', desc: 'URL of the first product image' },
 ]
 
+const IMAGE_TEMPLATE_VARIABLES = [
+    { key: '{productName}', desc: 'Product title / name for subject identification' },
+    { key: '{categoryPath}', desc: 'Daraz category path (e.g. Toys, Kitchen, Electronics)' },
+    { key: '{price}', desc: 'Product price in NPR' },
+]
+
+import { DEFAULT_IMAGE_PROMPTS } from '@/lib/daraz/image-studio-constants'
+
 export default function AiIntegrationPage() {
     const [loading, setLoading] = useState(false)
     const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini')
@@ -24,6 +32,17 @@ export default function AiIntegrationPage() {
     const [listingPrompt, setListingPrompt] = useState('')
     const [promptLoaded, setPromptLoaded] = useState(false)
     const [testingKey, setTestingKey] = useState(false)
+
+    // Image Generation Studio state
+    const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'cloudflare' | 'zero-cost'>('gemini-imagen')
+    const [imageApiKey, setImageApiKey] = useState('')
+    const [inheritGeminiKey, setInheritGeminiKey] = useState(true)
+    const [imagePrompts, setImagePrompts] = useState({
+        slot1: DEFAULT_IMAGE_PROMPTS.slot1,
+        slot2: DEFAULT_IMAGE_PROMPTS.slot2,
+        slot3: DEFAULT_IMAGE_PROMPTS.slot3,
+        slot4: DEFAULT_IMAGE_PROMPTS.slot4,
+    })
 
     useEffect(() => {
         fetchSettings()
@@ -47,6 +66,19 @@ export default function AiIntegrationPage() {
                 setListingPrompt(data.listingPrompt)
                 setPromptLoaded(true)
             }
+            if (data.imageSettings) {
+                if (data.imageSettings.provider) setImageProvider(data.imageSettings.provider)
+                if (data.imageSettings.apiKey) setImageApiKey(data.imageSettings.apiKey)
+                if (data.imageSettings.inheritGeminiKey !== undefined) setInheritGeminiKey(data.imageSettings.inheritGeminiKey)
+                if (data.imageSettings.prompts) {
+                    setImagePrompts({
+                        slot1: data.imageSettings.prompts.slot1 || DEFAULT_IMAGE_PROMPTS.slot1,
+                        slot2: data.imageSettings.prompts.slot2 || DEFAULT_IMAGE_PROMPTS.slot2,
+                        slot3: data.imageSettings.prompts.slot3 || DEFAULT_IMAGE_PROMPTS.slot3,
+                        slot4: data.imageSettings.prompts.slot4 || DEFAULT_IMAGE_PROMPTS.slot4,
+                    })
+                }
+            }
         } catch (error) {
             console.error('Failed to load AI settings:', error)
         }
@@ -63,13 +95,19 @@ export default function AiIntegrationPage() {
                     geminiApiKey,
                     openaiApiKey,
                     apiKey: provider === 'gemini' ? geminiApiKey : openaiApiKey,
-                    listingPrompt
+                    listingPrompt,
+                    imageSettings: {
+                        provider: imageProvider,
+                        apiKey: imageApiKey,
+                        inheritGeminiKey,
+                        prompts: imagePrompts
+                    }
                 }),
                 headers: { 'Content-Type': 'application/json' }
             })
 
             if (!res.ok) throw new Error('Failed to save settings')
-            toast.success('AI Integration settings saved successfully')
+            toast.success('AI Integration and Image Studio settings saved successfully')
         } catch (error) {
             toast.error('Failed to save settings')
         } finally {
@@ -122,17 +160,17 @@ export default function AiIntegrationPage() {
     }
 
     return (
-        <div className="space-y-6 max-w-3xl">
+        <div className="space-y-6 max-w-4xl pb-12">
             <div>
                 <h1 className="text-2xl font-bold tracking-tight">AI Integration</h1>
-                <p className="text-sm text-gray-500">Configure your AI provider, API credentials, and listing generation prompt used for Daraz product listings.</p>
+                <p className="text-sm text-gray-500">Configure your text listing generator and AI Product Image Studio for Daraz.</p>
             </div>
 
             {/* AI Provider & Model */}
             <Card>
                 <CardHeader className="flex flex-row items-center gap-2 pb-2">
                     <Brain size={18} className="text-orange-600" />
-                    <CardTitle className="text-base font-semibold">AI Provider &amp; Model</CardTitle>
+                    <CardTitle className="text-base font-semibold">AI Provider &amp; Model (Text &amp; Listing Generation)</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     {/* Provider Toggle Tabs */}
@@ -268,17 +306,246 @@ export default function AiIntegrationPage() {
                 </CardContent>
             </Card>
 
+            {/* ── NEW: Product Image Generation (AI Studio) ─────────────────── */}
+            <Card className="border-indigo-100 dark:border-indigo-950/50 shadow-sm">
+                <CardHeader className="flex flex-row items-center gap-2 pb-2 bg-gradient-to-r from-indigo-50/50 via-purple-50/30 to-transparent dark:from-indigo-950/20">
+                    <ImageIcon className="text-indigo-600 dark:text-indigo-400" size={20} />
+                    <div>
+                        <CardTitle className="text-base text-indigo-950 dark:text-indigo-200">
+                            Product Image Generation (AI Studio)
+                        </CardTitle>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                            Configure AI image enhancement and custom prompt instructions for the 4 Daraz product image types.
+                        </p>
+                    </div>
+                </CardHeader>
+                <CardContent className="space-y-6 pt-4">
+                    {/* Image Engine / Provider Selection */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 uppercase tracking-wide">
+                            Image Generation Engine
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => setImageProvider('gemini-imagen')}
+                                className={`p-3 rounded-lg border text-left transition-all ${
+                                    imageProvider === 'gemini-imagen'
+                                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30 ring-1 ring-indigo-500'
+                                        : 'border-gray-200 dark:border-zinc-800 hover:border-gray-300'
+                                }`}
+                            >
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-indigo-900 dark:text-indigo-300">Google Imagen 3</span>
+                                    {imageProvider === 'gemini-imagen' && <Check size={14} className="text-indigo-600" />}
+                                </div>
+                                <p className="text-[11px] text-gray-500 leading-tight">
+                                    Uses Gemini API key. High-definition lifestyle and side-by-side product scene generation.
+                                </p>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setImageProvider('cloudflare')}
+                                className={`p-3 rounded-lg border text-left transition-all ${
+                                    imageProvider === 'cloudflare'
+                                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30 ring-1 ring-indigo-500'
+                                        : 'border-gray-200 dark:border-zinc-800 hover:border-gray-300'
+                                }`}
+                            >
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-indigo-900 dark:text-indigo-300">Cloudflare Workers AI</span>
+                                    {imageProvider === 'cloudflare' && <Check size={14} className="text-indigo-600" />}
+                                </div>
+                                <p className="text-[11px] text-gray-500 leading-tight">
+                                    Free daily tier (up to 10k neurons/day). Open-source Stable Diffusion &amp; Inpainting.
+                                </p>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setImageProvider('zero-cost')}
+                                className={`p-3 rounded-lg border text-left transition-all ${
+                                    imageProvider === 'zero-cost'
+                                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30 ring-1 ring-indigo-500'
+                                        : 'border-gray-200 dark:border-zinc-800 hover:border-gray-300'
+                                }`}
+                            >
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300">Zero-Cost Studio Only</span>
+                                    {imageProvider === 'zero-cost' && <Check size={14} className="text-emerald-600" />}
+                                </div>
+                                <p className="text-[11px] text-gray-500 leading-tight">
+                                    100% Free forever. Pure white background removal, 1000x1000 canvas, and sharp filters with NPR 0 API cost.
+                                </p>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Image Generation API Key (if not Zero-Cost) */}
+                    {imageProvider !== 'zero-cost' && (
+                        <div className="space-y-2 bg-gray-50 dark:bg-zinc-800/50 p-3 rounded-lg border dark:border-zinc-700">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                                    Image Generation API Credentials
+                                </label>
+                                {imageProvider === 'gemini-imagen' && (
+                                    <label className="flex items-center gap-1.5 text-xs text-indigo-700 dark:text-indigo-400 font-medium cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={inheritGeminiKey}
+                                            onChange={(e) => setInheritGeminiKey(e.target.checked)}
+                                            className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
+                                        />
+                                        <span>Use Google Gemini API Key from above</span>
+                                    </label>
+                                )}
+                            </div>
+
+                            {(!inheritGeminiKey || imageProvider === 'cloudflare') && (
+                                <Input
+                                    type="password"
+                                    placeholder={imageProvider === 'gemini-imagen' ? 'Gemini API Key...' : 'Cloudflare API Token...'}
+                                    value={imageApiKey}
+                                    onChange={(e) => setImageApiKey(e.target.value)}
+                                    className="w-full text-xs"
+                                />
+                            )}
+                        </div>
+                    )}
+
+                    {/* Image Template Variables Helper */}
+                    <div className="bg-indigo-50/50 dark:bg-indigo-950/20 p-2.5 rounded-lg border border-indigo-100 dark:border-indigo-900/30 text-xs">
+                        <span className="font-semibold text-indigo-900 dark:text-indigo-300">Available Variables in Prompts:</span>
+                        <div className="flex flex-wrap gap-2 mt-1">
+                            {IMAGE_TEMPLATE_VARIABLES.map(v => (
+                                <span key={v.key} className="inline-flex items-center gap-1 text-[11px] text-gray-600 dark:text-zinc-400">
+                                    <code className="text-indigo-600 dark:text-indigo-400 bg-white dark:bg-zinc-900 px-1 py-0.5 rounded border border-indigo-200 dark:border-zinc-800 font-mono">
+                                        {v.key}
+                                    </code>
+                                    <span>{v.desc}</span>
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* The 4 Image Compartments */}
+                    <div className="space-y-4">
+                        <h4 className="text-xs font-bold text-gray-700 dark:text-zinc-300 uppercase tracking-wide flex items-center gap-1.5">
+                            <Layers size={14} className="text-indigo-600" />
+                            4 Image Slots Instructions &amp; Prompts
+                        </h4>
+
+                        {/* Compartment 1: Main Cover Image */}
+                        <div className="border border-gray-200 dark:border-zinc-800 rounded-lg p-3 bg-white dark:bg-zinc-900 space-y-2">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                                    <span className="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 inline-flex items-center justify-center text-[11px]">1</span>
+                                    <span>Image 1: Main Cover Image (Pure White Studio)</span>
+                                    <span className="text-[10px] font-semibold bg-emerald-100 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">
+                                        100% Free / Daraz SEO
+                                    </span>
+                                </label>
+                                <span className="text-[10px] text-gray-400">{imagePrompts.slot1.length} chars</span>
+                            </div>
+                            <textarea
+                                value={imagePrompts.slot1}
+                                onChange={(e) => setImagePrompts(prev => ({ ...prev, slot1: e.target.value }))}
+                                rows={3}
+                                className="w-full p-2.5 border rounded-md text-xs font-mono bg-gray-50 dark:bg-zinc-800/50 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed"
+                                placeholder="Instruction for cover image..."
+                            />
+                            <p className="text-[10px] text-gray-500">
+                                Daraz requires a clean white background for search catalog thumbnails. This runs via fast background isolation + white canvas.
+                            </p>
+                        </div>
+
+                        {/* Compartment 2: Side-by-Side / Multi-Angle */}
+                        <div className="border border-gray-200 dark:border-zinc-800 rounded-lg p-3 bg-white dark:bg-zinc-900 space-y-2">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                                    <span className="w-5 h-5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 inline-flex items-center justify-center text-[11px]">2</span>
+                                    <span>Image 2: Product Side-by-Side / Multi-Angle View</span>
+                                    <span className="text-[10px] font-semibold bg-indigo-100 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-400 px-1.5 py-0.5 rounded">
+                                        AI Studio Angle
+                                    </span>
+                                </label>
+                                <span className="text-[10px] text-gray-400">{imagePrompts.slot2.length} chars</span>
+                            </div>
+                            <textarea
+                                value={imagePrompts.slot2}
+                                onChange={(e) => setImagePrompts(prev => ({ ...prev, slot2: e.target.value }))}
+                                rows={3}
+                                className="w-full p-2.5 border rounded-md text-xs font-mono bg-gray-50 dark:bg-zinc-800/50 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed"
+                                placeholder="Instruction for side-by-side / angle image..."
+                            />
+                            <p className="text-[10px] text-gray-500">
+                                Generates an angle profile or side-by-side presentation showing product depth and packaging details.
+                            </p>
+                        </div>
+
+                        {/* Compartment 3: Refined Texture & Detail */}
+                        <div className="border border-gray-200 dark:border-zinc-800 rounded-lg p-3 bg-white dark:bg-zinc-900 space-y-2">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                                    <span className="w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 inline-flex items-center justify-center text-[11px]">3</span>
+                                    <span>Image 3: Refined Texture &amp; Detail Image</span>
+                                    <span className="text-[10px] font-semibold bg-emerald-100 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">
+                                        100% Free / Sharp Filter
+                                    </span>
+                                </label>
+                                <span className="text-[10px] text-gray-400">{imagePrompts.slot3.length} chars</span>
+                            </div>
+                            <textarea
+                                value={imagePrompts.slot3}
+                                onChange={(e) => setImagePrompts(prev => ({ ...prev, slot3: e.target.value }))}
+                                rows={3}
+                                className="w-full p-2.5 border rounded-md text-xs font-mono bg-gray-50 dark:bg-zinc-800/50 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed"
+                                placeholder="Instruction for refined detail image..."
+                            />
+                            <p className="text-[10px] text-gray-500">
+                                Sharpens product textures, enhances color vibrancy, and provides high-contrast close-up clarity.
+                            </p>
+                        </div>
+
+                        {/* Compartment 4: Product Use-Case / Lifestyle */}
+                        <div className="border border-gray-200 dark:border-zinc-800 rounded-lg p-3 bg-white dark:bg-zinc-900 space-y-2">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                                    <span className="w-5 h-5 rounded-full bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 inline-flex items-center justify-center text-[11px]">4</span>
+                                    <span>Image 4: Product Use-Case &amp; Lifestyle Scene</span>
+                                    <span className="text-[10px] font-semibold bg-purple-100 dark:bg-purple-950/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">
+                                        Generative AI Lifestyle
+                                    </span>
+                                </label>
+                                <span className="text-[10px] text-gray-400">{imagePrompts.slot4.length} chars</span>
+                            </div>
+                            <textarea
+                                value={imagePrompts.slot4}
+                                onChange={(e) => setImagePrompts(prev => ({ ...prev, slot4: e.target.value }))}
+                                rows={3}
+                                className="w-full p-2.5 border rounded-md text-xs font-mono bg-gray-50 dark:bg-zinc-800/50 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed"
+                                placeholder="Instruction for lifestyle use-case image..."
+                            />
+                            <p className="text-[10px] text-gray-500">
+                                Places the product in real-world everyday use (kitchen, desk, living room, gym) based on the category.
+                            </p>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
+
             {/* Listing Prompt Template */}
             <Card>
                 <CardHeader className="flex flex-row items-center gap-2 pb-2">
                     <FileText className="text-orange-500" size={20} />
-                    <CardTitle className="text-base">Daraz Listing Generation Prompt</CardTitle>
+                    <CardTitle className="text-base">Daraz Listing Generation Prompt (Titles, Description, Highlights)</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-zinc-800 rounded-lg p-3 text-xs text-blue-700 dark:text-blue-400 flex gap-2">
                         <Info size={14} className="shrink-0 mt-0.5" />
                         <div>
-                            <p className="font-semibold mb-1">This prompt is sent to the AI when generating product listings.</p>
+                            <p className="font-semibold mb-1">This prompt is sent to the AI when generating product text listings.</p>
                             <p>Edit it to change the tone, language, content structure, or SEO strategy. Changes apply immediately on the next generate click — no code change needed.</p>
                         </div>
                     </div>
@@ -308,7 +575,7 @@ export default function AiIntegrationPage() {
                         <textarea
                             value={listingPrompt}
                             onChange={(e) => setListingPrompt(e.target.value)}
-                            rows={24}
+                            rows={20}
                             className="w-full p-3 border rounded-md text-xs font-mono bg-white dark:bg-zinc-900 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500 resize-y leading-relaxed"
                             placeholder="Loading prompt template..."
                         />

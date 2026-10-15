@@ -11,6 +11,7 @@ import { supabase } from '@/lib/supabase/client'
 import CategoryPicker from './CategoryPicker'
 import DynamicAttributesForm from './DynamicAttributesForm'
 import SearchableSupplierSelect from './SearchableSupplierSelect'
+import DarazAiStudioModal from './DarazAiStudioModal'
 
 interface NewListingTabProps {
     prefilledData?: any
@@ -129,6 +130,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(new Set())
     const [bulkGenerating, setBulkGenerating] = useState(false)
     const [bulkPushing, setBulkPushing] = useState(false)
+
+    // ── AI Product Image Studio State ───────────────────────────────────────
+    const [aiStudioDraft, setAiStudioDraft] = useState<DraftListing | null>(null)
+    const [isAiStudioOpen, setIsAiStudioOpen] = useState(false)
+    const [aiStudioContext, setAiStudioContext] = useState<'draft-row' | 'gallery-modal' | 'edit-form'>('draft-row')
 
     // ── Helper: Draft Classification ───────────────────────────────────────
     const getDraftClassification = useCallback((draft: DraftListing): 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed' => {
@@ -1060,6 +1066,98 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             console.error('Patch draft failed:', err)
         }
     }, [editingDraftId])
+
+    // ── AI Studio Handlers ──────────────────────────────────────────────────
+    const handleOpenAiStudioForDraft = (draft: DraftListing) => {
+        setAiStudioDraft(draft)
+        setAiStudioContext('draft-row')
+        setIsAiStudioOpen(true)
+    }
+
+    const handleOpenAiStudioFromGallery = () => {
+        if (!imageModalDraft) return
+        setAiStudioDraft(imageModalDraft)
+        setAiStudioContext('gallery-modal')
+        setIsAiStudioOpen(true)
+    }
+
+    const handleOpenAiStudioFromEditForm = () => {
+        const primaryTitle = Object.values(titlesPerStore)[0] || titlesPerStore['__manual__'] || rawName || 'Product'
+        const virtualDraft: DraftListing = {
+            id: editingDraftId || 'edit-form-current',
+            raw_name: rawName || 'Product',
+            title: primaryTitle,
+            images: images || [],
+            target_stores: selectedStores || [],
+            status: 'draft',
+            category_path: categoryPath || '',
+            price: sellingPrice || undefined
+        }
+        setAiStudioDraft(virtualDraft)
+        setAiStudioContext('edit-form')
+        setIsAiStudioOpen(true)
+    }
+
+    const handleApplyStudioImages = async (appliedUrls: string[], mode: 'replace' | 'append') => {
+        if (!appliedUrls || appliedUrls.length === 0) return
+
+        if (aiStudioContext === 'draft-row') {
+            const targetDraft = aiStudioDraft
+            if (!targetDraft) return
+            const currentImgs = targetDraft.images || []
+            const newImages = mode === 'replace'
+                ? appliedUrls
+                : [...appliedUrls, ...currentImgs].slice(0, 8)
+
+            try {
+                const res = await fetch('/api/daraz/drafts', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: targetDraft.id, images: newImages })
+                })
+                const json = await res.json()
+                if (!res.ok || json.error) throw new Error(json.error || 'Failed to update draft images')
+
+                setDrafts(prev => prev.map(d => d.id === targetDraft.id ? { ...d, images: newImages } : d))
+            } catch (err: any) {
+                console.error('[AIStudio] Failed to save draft images:', err)
+                alert('Failed to save images: ' + err.message)
+            }
+        } else if (aiStudioContext === 'gallery-modal') {
+            const currentModalImgs = modalImages || []
+            const newImages = mode === 'replace'
+                ? appliedUrls
+                : [...appliedUrls, ...currentModalImgs].slice(0, 8)
+
+            setModalImages(newImages)
+            if (imageModalDraft) {
+                try {
+                    const res = await fetch('/api/daraz/drafts', {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: imageModalDraft.id, images: newImages })
+                    })
+                    const json = await res.json()
+                    if (!res.ok || json.error) throw new Error(json.error || 'Failed to update draft images')
+
+                    setDrafts(prev => prev.map(d => d.id === imageModalDraft.id ? { ...d, images: newImages } : d))
+                } catch (err: any) {
+                    console.error('[AIStudio] Failed to save gallery modal images:', err)
+                    alert('Failed to save images: ' + err.message)
+                }
+            }
+        } else if (aiStudioContext === 'edit-form') {
+            const currentImgs = images || []
+            const newImages = mode === 'replace'
+                ? appliedUrls
+                : [...appliedUrls, ...currentImgs].slice(0, 8)
+
+            setImages(newImages)
+            if (editingDraftId) {
+                patchDraft({ images: newImages })
+            }
+        }
+    }
 
     const [draftSavedSuccess, setDraftSavedSuccess] = useState(false)
 
@@ -2492,6 +2590,20 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             <span className="italic text-gray-400 text-xs">AI Content Not Generated</span>
                                                         )}
                                                     </div>
+                                                    <div className="mt-1.5 flex items-center gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handleOpenAiStudioForDraft(draft)
+                                                            }}
+                                                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-gradient-to-r from-orange-500/10 to-amber-500/10 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-900/40 hover:bg-orange-500 hover:text-white transition-all shadow-2xs group/btn cursor-pointer"
+                                                            title="Generate pure white studio cover & AI lifestyle scenes"
+                                                        >
+                                                            <Sparkles size={11} className="text-orange-500 group-hover/btn:text-white transition-colors" />
+                                                            AI Image Studio
+                                                        </button>
+                                                    </div>
                                                 </div>
 
                                                 {/* Column 2: Category & Attributes + Edit Icon */}
@@ -2850,6 +2962,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 {modalImages.length}/8
                                             </span>
                                         </h3>
+                                        {modalImages.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={handleOpenAiStudioFromGallery}
+                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold text-white bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 rounded-md transition-all shadow-xs cursor-pointer"
+                                                title="Transform with AI Studio"
+                                            >
+                                                <Sparkles size={12} />
+                                                AI Studio
+                                            </button>
+                                        )}
                                         {modalImages.length > 0 && (
                                             <button
                                                 type="button"
@@ -3598,6 +3721,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         </div>
                     </div>
                 )}
+
+                {/* ── AI Product Image Studio Modal ─────────────────────────── */}
+                <DarazAiStudioModal
+                    isOpen={isAiStudioOpen}
+                    onClose={() => setIsAiStudioOpen(false)}
+                    rawImages={aiStudioDraft?.images || []}
+                    productName={aiStudioDraft?.title || aiStudioDraft?.raw_name || 'Product'}
+                    categoryPath={aiStudioDraft?.category_path || ''}
+                    price={aiStudioDraft?.price || ''}
+                    onApplyImages={handleApplyStudioImages}
+                />
                 </div>
             </div>
         )
@@ -4310,14 +4444,25 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         {/* Images — Draggable + Primary Badge */}
                         <div className="space-y-2">
-                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
-                                Product Images <span className="text-red-500 font-bold">* (Add min 3)</span>
-                                {images[0] && aiModel === 'gpt-4o' && (
-                                    <span className="text-[10px] bg-orange-100 text-orange-700 dark:bg-orange-950/20 px-1.5 py-0.5 rounded font-semibold">
-                                        AI Vision: Reading image ✓
-                                    </span>
-                                )}
-                            </label>
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                    Product Images <span className="text-red-500 font-bold">* (Add min 3)</span>
+                                    {images[0] && aiModel === 'gpt-4o' && (
+                                        <span className="text-[10px] bg-orange-100 text-orange-700 dark:bg-orange-950/20 px-1.5 py-0.5 rounded font-semibold">
+                                            AI Vision: Reading image ✓
+                                        </span>
+                                    )}
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={handleOpenAiStudioFromEditForm}
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold text-white bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 rounded-md transition-all shadow-xs cursor-pointer"
+                                    title="Open AI Studio to generate white cover & lifestyle images"
+                                >
+                                    <Sparkles size={12} />
+                                    AI Image Studio
+                                </button>
+                            </div>
                             <p className="text-xs text-gray-400">Drag to reorder. First image is your <strong>primary listing image</strong>.</p>
                             <div className="flex flex-wrap gap-3">
                                 {images.map((img, idx) => (
@@ -5357,6 +5502,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         </div>
                     </div>
             </form>
+
+            {/* ── AI Product Image Studio Modal (Edit / Add Mode) ───────── */}
+            <DarazAiStudioModal
+                isOpen={isAiStudioOpen}
+                onClose={() => setIsAiStudioOpen(false)}
+                rawImages={aiStudioDraft?.images || images || []}
+                productName={aiStudioDraft?.title || aiStudioDraft?.raw_name || rawName || 'Product'}
+                categoryPath={aiStudioDraft?.category_path || categoryPath || ''}
+                price={aiStudioDraft?.price || sellingPrice || ''}
+                onApplyImages={handleApplyStudioImages}
+            />
 
             <datalist id="variant-color-options">
                 {COMMON_COLORS.map(color => (

@@ -1,5 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { DEFAULT_IMAGE_PROMPTS } from '@/lib/daraz/image-studio-constants'
 
 const DEFAULT_PROMPT = `You are an expert e-commerce product listing optimizer for Daraz Nepal.
 
@@ -57,10 +58,29 @@ export async function GET() {
             .eq('key', 'daraz_listing_prompt')
             .maybeSingle()
 
-        const currentModel = aiRow?.value?.model || 'gemini-1.5-flash'
+        // Load image AI settings
+        const { data: imgRow } = await supabase
+            .from('app_settings')
+            .select('value')
+            .eq('key', 'daraz_image_ai_settings')
+            .maybeSingle()
+
+        const currentModel = aiRow?.value?.model || 'gemini-3.5-flash'
         const isGemini = currentModel.startsWith('gemini')
         const geminiKey = aiRow?.value?.geminiApiKey || (isGemini ? aiRow?.value?.apiKey : '') || process.env.GEMINI_API_KEY || ''
         const openaiKey = aiRow?.value?.openaiApiKey || (!isGemini ? aiRow?.value?.apiKey : '') || process.env.OPENAI_API_KEY || ''
+
+        const imageSettings = {
+            provider: imgRow?.value?.provider || 'gemini-imagen',
+            apiKey: imgRow?.value?.apiKey || '',
+            inheritGeminiKey: imgRow?.value?.inheritGeminiKey !== false,
+            prompts: {
+                slot1: imgRow?.value?.prompts?.slot1 || DEFAULT_IMAGE_PROMPTS.slot1,
+                slot2: imgRow?.value?.prompts?.slot2 || DEFAULT_IMAGE_PROMPTS.slot2,
+                slot3: imgRow?.value?.prompts?.slot3 || DEFAULT_IMAGE_PROMPTS.slot3,
+                slot4: imgRow?.value?.prompts?.slot4 || DEFAULT_IMAGE_PROMPTS.slot4,
+            }
+        }
 
         return NextResponse.json({
             provider: aiRow?.value?.provider || (isGemini ? 'gemini' : 'openai'),
@@ -68,16 +88,23 @@ export async function GET() {
             apiKey: isGemini ? geminiKey : openaiKey,
             geminiApiKey: geminiKey,
             openaiApiKey: openaiKey,
-            listingPrompt: promptRow?.value?.prompt || DEFAULT_PROMPT
+            listingPrompt: promptRow?.value?.prompt || DEFAULT_PROMPT,
+            imageSettings
         })
     } catch (error: any) {
         return NextResponse.json({
             provider: 'gemini',
-            model: 'gemini-1.5-flash',
+            model: 'gemini-3.5-flash',
             apiKey: '',
             geminiApiKey: '',
             openaiApiKey: '',
-            listingPrompt: DEFAULT_PROMPT
+            listingPrompt: DEFAULT_PROMPT,
+            imageSettings: {
+                provider: 'gemini-imagen',
+                apiKey: '',
+                inheritGeminiKey: true,
+                prompts: DEFAULT_IMAGE_PROMPTS
+            }
         })
     }
 }
@@ -89,7 +116,7 @@ export async function POST(request: Request) {
 
         // Save model + API key
         if (body.model !== undefined || body.apiKey !== undefined || body.geminiApiKey !== undefined) {
-            const selectedModel = body.model || 'gemini-1.5-flash'
+            const selectedModel = body.model || 'gemini-3.5-flash'
             const selectedProvider = body.provider || (selectedModel.startsWith('gemini') ? 'gemini' : 'openai')
             const isGemini = selectedProvider === 'gemini'
             const geminiKey = body.geminiApiKey !== undefined ? body.geminiApiKey : (isGemini ? body.apiKey : '')
@@ -124,6 +151,19 @@ export async function POST(request: Request) {
                 }, { onConflict: 'key' })
 
             if (promptError) throw promptError
+        }
+
+        // Save Image AI settings if provided
+        if (body.imageSettings !== undefined) {
+            const { error: imgError } = await supabase
+                .from('app_settings')
+                .upsert({
+                    key: 'daraz_image_ai_settings',
+                    value: body.imageSettings,
+                    updated_at: new Date().toISOString()
+                }, { onConflict: 'key' })
+
+            if (imgError) throw imgError
         }
 
         return NextResponse.json({ success: true })
