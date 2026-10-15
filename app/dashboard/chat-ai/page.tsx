@@ -94,6 +94,7 @@ interface ChatSession {
     is_urgent?: boolean
     urgent_reason?: string | null
     ai_paused_until?: string | null
+    created_at?: string | null
 }
 
 interface ChatMessage {
@@ -246,6 +247,15 @@ const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: stri
         )
     }
 )
+
+
+export const getSessionTimeMs = (s: ChatSession): number => {
+    const raw = s.last_message_time || s.updated_at || s.created_at
+    if (!raw) return 0
+    const rawStr = String(raw).trim()
+    const d = /^\d+$/.test(rawStr) ? new Date(parseInt(rawStr, 10)) : new Date(rawStr)
+    return isNaN(d.getTime()) ? 0 : d.getTime()
+}
 
 function ChatAiDashboardContent() {
     const searchParams = useSearchParams()
@@ -502,16 +512,17 @@ function ChatAiDashboardContent() {
             if (error) {
                 console.error(error)
             } else {
-                setSessions(data || [])
-                if (data && data.length > 0 && !activeSessionId) {
-                    setActiveSessionId(data[0].session_id)
+                const sorted = (data || []).slice().sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
+                setSessions(sorted)
+                if (sorted && sorted.length > 0 && !activeSessionId) {
+                    setActiveSessionId(sorted[0].session_id)
                 }
             }
             setLoadingSessions(false)
         }
         fetchSessions()
 
-        // Realtime Subscription for Session List updates
+        // Realtime Subscription for Session List updates & incoming messages
         const channel = supabase
             .channel(`realtime:sessions:${activeStoreId}`)
             .on('postgres_changes', {
@@ -524,24 +535,58 @@ function ChatAiDashboardContent() {
                     setSessions(prev => {
                         if (prev.some(s => s.session_id === payload.new.session_id)) return prev
                         const newSession = payload.new as ChatSession
-                        return [newSession, ...prev].sort((a, b) => {
-                            const timeA = a.last_message_time ? new Date(a.last_message_time).getTime() : 0
-                            const timeB = b.last_message_time ? new Date(b.last_message_time).getTime() : 0
-                            return timeB - timeA
-                        })
+                        const without = prev.filter(s => s.session_id !== newSession.session_id)
+                        return [newSession, ...without].sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
                     })
                 } else if (payload.eventType === 'UPDATE') {
                     setSessions(prev => {
-                        const updated = prev.map(s => s.session_id === payload.new.session_id ? { ...s, ...payload.new } as ChatSession : s)
-                        return updated.sort((a, b) => {
-                            const timeA = a.last_message_time ? new Date(a.last_message_time).getTime() : 0
-                            const timeB = b.last_message_time ? new Date(b.last_message_time).getTime() : 0
-                            return timeB - timeA
-                        })
+                        const existing = prev.find(s => s.session_id === payload.new.session_id)
+                        const updated = { ...(existing || {}), ...payload.new } as ChatSession
+                        const without = prev.filter(s => s.session_id !== payload.new.session_id)
+                        return [updated, ...without].sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
                     })
                 } else if (payload.eventType === 'DELETE') {
                     setSessions(prev => prev.filter(s => s.session_id !== payload.old.session_id))
                 }
+            })
+            .on('postgres_changes', {
+                event: 'INSERT',
+                schema: 'public',
+                table: 'daraz_chat_messages',
+            }, (payload) => {
+                const newMsg = payload.new as any
+                if (!newMsg || !newMsg.session_id) return
+
+                let summary = ''
+                try {
+                    const p = typeof newMsg.content === 'string' ? JSON.parse(newMsg.content) : newMsg.content
+                    summary = p.txt || p.text || p.data?.text || ''
+                } catch {
+                    summary = String(newMsg.content || '')
+                }
+
+                const nowISO = new Date().toISOString()
+
+                setSessions(prev => {
+                    const existing = prev.find(s => s.session_id === newMsg.session_id)
+                    if (!existing) {
+                        fetchSessions()
+                        return prev
+                    }
+
+                    const updated: ChatSession = {
+                        ...existing,
+                        last_message_time: nowISO,
+                        last_message_summary: summary || existing.last_message_summary,
+                        unread_count: String(newMsg.from_account_type) === '1' && newMsg.session_id !== activeSessionId
+                            ? (existing.unread_count || 0) + 1
+                            : (newMsg.session_id === activeSessionId ? 0 : existing.unread_count),
+                        updated_at: nowISO
+                    }
+
+                    const without = prev.filter(s => s.session_id !== newMsg.session_id)
+                    return [updated, ...without].sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
+                })
             })
             .subscribe()
 
@@ -656,7 +701,7 @@ function ChatAiDashboardContent() {
         return storeSettings[storeId]?.messaging_enabled !== false
     }
 
-    // Filter sessions based on search, tags, connection status, and unread filter
+    // Filter sessions based on search, tags, connection status, and unread filter (strictly sorted by latest message)
     const filteredSessions = sessions.filter(session => {
         // Hide sessions if store is disconnected
         if (!isStoreConnected(session.store_id)) return false
@@ -675,7 +720,7 @@ function ChatAiDashboardContent() {
         }
 
         return true
-    })
+    }).sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
 
     // Sync chats manual trigger
     const handleSync = async () => {
