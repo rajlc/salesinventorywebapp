@@ -56,6 +56,7 @@ import { DeletionReasonModal } from '@/features/sales/components/DeletionReasonM
 import { AdminDeleteConfirm } from '@/features/sales/components/AdminDeleteConfirm'
 import { PartialReturnModal } from '@/features/sales/components/PartialReturnModal'
 import { QuickPlanButton } from '@/features/sales/components/QuickPlanButton'
+import { DarazOrderDetailModal } from '@/features/sales/components/DarazOrderDetailModal'
 import { toast } from 'sonner'
 import { PermissionGuard } from '@/components/permissions/PermissionGuard'
 import { usePermissions } from '@/lib/permissions/PermissionContext'
@@ -231,6 +232,7 @@ export default function DarazSalesEntryPage() {
     // Partial Return State
     const [isPartialReturnOpen, setIsPartialReturnOpen] = useState(false)
     const [selectedOrderForReturn, setSelectedOrderForReturn] = useState<any>(null)
+    const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<any | null>(null)
 
     const handleOpenPartialReturn = (order: any) => {
         setSelectedOrderForReturn(order)
@@ -295,11 +297,13 @@ export default function DarazSalesEntryPage() {
     })
     const stockInfo = stockInfoData || {}
 
-    // Query for active purchase plans
+    // Query for active purchase plans (cached and throttled)
     const { data: activePlanProductIds = [] } = useQuery({
         queryKey: ['active-purchase-plans'],
         queryFn: () => getActivePlanProductIds(),
-        refetchInterval: 30000
+        refetchInterval: 60000,
+        staleTime: 60000,
+        refetchOnWindowFocus: false
     })
 
     // DUPLICATE ORDER LOGIC:
@@ -1281,16 +1285,19 @@ export default function DarazSalesEntryPage() {
                                                                     {new Date(order.order_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}
                                                                 </td>
 
-                                                                {/* Invoice Number Link */}
+                                                                {/* Invoice Number Link - Opens Instant Details Popup */}
                                                                 <td className="py-2 px-2.5 whitespace-nowrap">
                                                                     <button
-                                                                        onClick={() => router.push(`/dashboard/sales/daraz/order/${order.id}?from=sales-entry`)}
-                                                                        onMouseEnter={() => queryClient.prefetchQuery({
-                                                                            queryKey: ['daraz-order', order.id],
-                                                                            queryFn: () => getDarazOrderById(order.id)
-                                                                        })}
+                                                                        onClick={() => setSelectedOrderForDetail(order)}
+                                                                        onMouseEnter={() => {
+                                                                            queryClient.setQueryData(['daraz-order', order.id], (old: any) => old || order)
+                                                                            queryClient.prefetchQuery({
+                                                                                queryKey: ['daraz-order', order.id],
+                                                                                queryFn: () => getDarazOrderById(order.id)
+                                                                            })
+                                                                        }}
                                                                         className="inline-flex items-center gap-1 font-mono text-sm font-bold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 hover:underline cursor-pointer"
-                                                                        title="View Order Details"
+                                                                        title="View Order Details in Popup"
                                                                     >
                                                                         <span>{order.invoice_number}</span>
                                                                         <ExternalLink size={11} className="opacity-60" />
@@ -1571,6 +1578,18 @@ export default function DarazSalesEntryPage() {
                     isOpen={isPartialReturnOpen}
                     order={selectedOrderForReturn}
                     onClose={() => setIsPartialReturnOpen(false)}
+                />
+
+                {/* Instant Order Details Popup Modal */}
+                <DarazOrderDetailModal
+                    isOpen={!!selectedOrderForDetail}
+                    orderId={selectedOrderForDetail?.id || null}
+                    initialOrder={selectedOrderForDetail}
+                    onClose={() => setSelectedOrderForDetail(null)}
+                    onOrderUpdated={() => {
+                        queryClient.invalidateQueries({ queryKey: ['daraz-orders'] })
+                        queryClient.invalidateQueries({ queryKey: ['daraz-order-stats'] })
+                    }}
                 />
             </div>
         </PermissionGuard>

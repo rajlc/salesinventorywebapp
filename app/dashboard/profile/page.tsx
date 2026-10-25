@@ -8,6 +8,7 @@ import { getExpenses } from '@/features/expenses/actions/expense-actions'
 import { getReminders } from '@/features/reminders/actions/reminder-actions'
 
 import { ProfileHeader } from '@/features/profile/components/ProfileHeader'
+import { AssignedWorkspaces } from '@/features/profile/components/AssignedWorkspaces'
 import { ProfileDetails } from '@/features/profile/components/ProfileDetails'
 import { TaskList } from '@/features/profile/components/TaskList'
 import { ActivityLog } from '@/features/profile/components/ActivityLog'
@@ -40,6 +41,9 @@ export default async function ProfilePage() {
                 </div>
 
                 <ProfileHeader user={profile} />
+
+                {/* Assigned Workspaces / Quick Launchpad */}
+                <AssignedWorkspaces />
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
                     {/* Left Column: Personal Info & Security */}

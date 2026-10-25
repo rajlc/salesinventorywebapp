@@ -1,5 +1,5 @@
 import Link from "next/link"
-import { createClient } from "@/lib/supabase/server"
+import { getAuthenticatedUser } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
 import { HomeNavbar } from "@/components/home/HomeNavbar"
 import {
@@ -14,8 +14,7 @@ import {
 } from "lucide-react"
 
 export default async function Home() {
-    const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
+    const user = await getAuthenticatedUser()
 
     if (user) {
         redirect("/dashboard")

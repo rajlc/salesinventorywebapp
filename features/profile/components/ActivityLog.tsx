@@ -116,14 +116,15 @@ function getSecondaryInfo(log: any): string | null {
 
 export function ActivityLog({ logs }: ActivityLogProps) {
     return (
-        <Card>
-            <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                    <Activity className="h-5 w-5" />
-                    Recent Activity
-                </CardTitle>
-            </CardHeader>
-            <CardContent>
+        <Card className="h-full bg-white dark:bg-zinc-900 border border-slate-200/80 dark:border-zinc-800 shadow-sm rounded-2xl overflow-hidden flex flex-col justify-between">
+            <div>
+                <CardHeader className="flex flex-row items-center justify-between p-5 md:p-6 border-b border-slate-100 dark:border-zinc-800">
+                    <CardTitle className="text-base md:text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                        <Activity className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+                        Recent Activity
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="p-5 md:p-6">
                 <div className="space-y-3">
                     {logs.length === 0 ? (
                         <p className="text-gray-500 text-center py-4">No activity logs found</p>
@@ -159,6 +160,7 @@ export function ActivityLog({ logs }: ActivityLogProps) {
                     )}
                 </div>
             </CardContent>
+            </div>
         </Card>
     )
 }

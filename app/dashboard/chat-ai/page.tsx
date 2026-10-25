@@ -249,7 +249,7 @@ const ChatInputBar = forwardRef<ChatInputBarHandle, { onSendMessage: (text: stri
 )
 
 
-export const getSessionTimeMs = (s: ChatSession): number => {
+const getSessionTimeMs = (s: ChatSession): number => {
     const raw = s.last_message_time || s.updated_at || s.created_at
     if (!raw) return 0
     const rawStr = String(raw).trim()

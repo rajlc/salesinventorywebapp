@@ -198,7 +198,7 @@ export function StaffListItem({ user, serialNumber, pageRoles, onUpdate }: Staff
                     </select>
                 ) : (
                     <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-700 rounded border border-blue-200 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-800 capitalize">
-                        {user.role.replace('_', ' ')}
+                        {(user.role || 'user').replace('_', ' ')}
                     </span>
                 )}
             </td>

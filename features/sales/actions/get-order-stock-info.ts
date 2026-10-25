@@ -27,29 +27,43 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
 
     const supabase = await createClient()
 
-    // 1. Fetch all order items for the given orders
-    const { data: orderItems, error: itemsError } = await supabase
-        .from('daraz_order_items')
-        .select(`
-            order_id,
-            product_id,
-            quantity,
-            product:products!inner(
-                id,
-                id,
-                product_name,
-                image_url,
-                product_type
-            )
-        `)
-        .in('order_id', orderIds)
-
-    if (itemsError) {
-        console.error('Error fetching order items:', itemsError)
-        return {}
+    // 1. Fetch all order items for the given orders (chunked to prevent URL length overflow)
+    const CHUNK_SIZE = 50
+    const chunks: string[][] = []
+    for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
+        chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
     }
 
-    if (!orderItems || orderItems.length === 0) {
+    const chunkResults = await Promise.all(
+        chunks.map(chunk =>
+            supabase
+                .from('daraz_order_items')
+                .select(`
+                    order_id,
+                    product_id,
+                    quantity,
+                    product:products(
+                        id,
+                        product_name,
+                        image_url,
+                        product_type
+                    )
+                `)
+                .in('order_id', chunk)
+        )
+    )
+
+    const orderItems: any[] = []
+    for (const res of chunkResults) {
+        if (res.error) {
+            console.error('Error fetching order items chunk:', res.error)
+        }
+        if (res.data) {
+            orderItems.push(...res.data)
+        }
+    }
+
+    if (orderItems.length === 0) {
         return {}
     }
 
@@ -124,22 +138,32 @@ async function calculateProductStocks(rawProductIds: string[]): Promise<Map<stri
 
     const supabase = await createClient()
 
-    // Query only the uncached products
-    const { data: stocks, error } = await supabase
-        .from('stock_ledger_view')
-        .select('id, total_stock')
-        .in('id', missingIds)
-
-    if (error) {
-        console.error('Error fetching stock_ledger_view:', error)
-        return stockMap
+    // Query only the uncached products in chunks to prevent URL length overflow
+    const CHUNK_SIZE = 50
+    const chunks: string[][] = []
+    for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
+        chunks.push(missingIds.slice(i, i + CHUNK_SIZE))
     }
 
-    stocks?.forEach(item => {
-        const stockVal = Number(item.total_stock) || 0
-        stockMap.set(item.id, stockVal)
-        stockCache.set(item.id, { stock: stockVal, timestamp: now })
-    })
+    const chunkResults = await Promise.all(
+        chunks.map(chunk =>
+            supabase
+                .from('stock_ledger_view')
+                .select('id, total_stock')
+                .in('id', chunk)
+        )
+    )
+
+    for (const res of chunkResults) {
+        if (res.error) {
+            console.error('Error fetching stock_ledger_view chunk:', res.error)
+        }
+        res.data?.forEach(item => {
+            const stockVal = Number(item.total_stock) || 0
+            stockMap.set(item.id, stockVal)
+            stockCache.set(item.id, { stock: stockVal, timestamp: now })
+        })
+    }
 
     return stockMap
 }

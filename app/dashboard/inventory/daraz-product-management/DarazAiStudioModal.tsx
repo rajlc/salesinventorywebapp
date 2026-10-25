@@ -86,6 +86,7 @@ export default function DarazAiStudioModal({
     const [regeneratingSlot, setRegeneratingSlot] = useState<number | null>(null)
     const [isApplying, setIsApplying] = useState<boolean>(false)
     const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+    const [cachedCutoutBase64, setCachedCutoutBase64] = useState<string | null>(null)
 
     if (!isOpen) return null
 
@@ -117,31 +118,47 @@ export default function DarazAiStudioModal({
         }
 
         setStep('generating')
-        setStatusMessage('Reading original camera capture...')
+        setStatusMessage('Isolating product & removing background clutter...')
+
+        let activeCutout = cachedCutoutBase64
+        if (!activeCutout) {
+            try {
+                const { removeBackground } = await import('@imgly/background-removal')
+                const blob = await removeBackground(currentRawUrl, {
+                    progress: (key: string) => {
+                        if (key.includes('fetch')) {
+                            setStatusMessage('Loading AI isolation model (first run)...')
+                        } else {
+                            setStatusMessage('Separating product from hand & shop shelves...')
+                        }
+                    }
+                })
+                activeCutout = await new Promise<string>((resolve) => {
+                    const reader = new FileReader()
+                    reader.onloadend = () => resolve(reader.result as string)
+                    reader.readAsDataURL(blob)
+                })
+                setCachedCutoutBase64(activeCutout)
+            } catch (bgErr) {
+                console.warn('[AIStudio] Client background removal notice:', bgErr)
+            }
+        }
+
+        setStatusMessage('Compositing 1000×1000 studio white cover & scenes...')
 
         try {
-            // Simulated gradual status messages for smooth UX
-            const statusTimer1 = setTimeout(() => {
-                setStatusMessage('Generating Pure White Studio Cover (Slot 1)...')
-            }, 1200)
-            const statusTimer2 = setTimeout(() => {
-                setStatusMessage('Processing AI perspective & texture refinement...')
-            }, 3000)
-
             const res = await fetch('/api/daraz/products/ai-image-generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     rawImageUrl: currentRawUrl,
+                    cutoutBase64: activeCutout,
                     productName,
                     categoryPath,
                     price,
                     selectedSlots
                 })
             })
-
-            clearTimeout(statusTimer1)
-            clearTimeout(statusTimer2)
 
             const data = await res.json()
             if (!res.ok || !data.success) {
@@ -169,6 +186,7 @@ export default function DarazAiStudioModal({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     rawImageUrl: currentRawUrl,
+                    cutoutBase64: cachedCutoutBase64,
                     productName,
                     categoryPath,
                     price,
@@ -309,7 +327,10 @@ export default function DarazAiStudioModal({
                                     <button
                                         key={idx}
                                         type="button"
-                                        onClick={() => setSelectedRawImageIdx(idx)}
+                                        onClick={() => {
+                                            setSelectedRawImageIdx(idx)
+                                            setCachedCutoutBase64(null)
+                                        }}
                                         className={`relative w-7 h-7 rounded border-2 overflow-hidden transition-all ${
                                             selectedRawImageIdx === idx
                                                 ? 'border-orange-500 scale-105 shadow-xs'
@@ -568,8 +589,14 @@ export default function DarazAiStudioModal({
                                                         <div className="relative rounded-lg overflow-hidden border border-gray-100 dark:border-zinc-800 aspect-square group bg-gray-50 dark:bg-zinc-800">
                                                             <img
                                                                 src={url}
-                                                                alt={`Slot ${slotId}`}
+                                                                alt={`Studio View ${slotId}`}
                                                                 className="w-full h-full object-cover"
+                                                                onError={(e) => {
+                                                                    const target = e.currentTarget
+                                                                    if (!target.src.includes('/api/daraz/image-proxy')) {
+                                                                        target.src = `/api/daraz/image-proxy?url=${encodeURIComponent(url)}`
+                                                                    }
+                                                                }}
                                                             />
                                                             {isRegenerating && (
                                                                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white text-xs gap-1">
@@ -732,6 +759,12 @@ export default function DarazAiStudioModal({
                             src={lightboxUrl}
                             alt="Full preview"
                             className="max-h-[85vh] max-w-full rounded-lg object-contain border border-white/20 shadow-2xl"
+                            onError={(e) => {
+                                const target = e.currentTarget
+                                if (!target.src.includes('/api/daraz/image-proxy')) {
+                                    target.src = `/api/daraz/image-proxy?url=${encodeURIComponent(lightboxUrl)}`
+                                }
+                            }}
                         />
                         <button
                             type="button"

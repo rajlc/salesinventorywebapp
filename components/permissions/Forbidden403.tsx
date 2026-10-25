@@ -1,7 +1,13 @@
+'use client'
+
 import { AlertCircle, ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
+import { usePermissions } from '@/lib/permissions/PermissionContext'
 
 export function Forbidden403() {
+    const { userRole } = usePermissions()
+    const isAdmin = userRole === 'admin'
+
     return (
         <div className="flex-1 flex flex-col items-center justify-center p-8 bg-gray-50 dark:bg-zinc-900 h-full min-h-[400px]">
             <div className="text-center">
@@ -13,11 +19,11 @@ export function Forbidden403() {
                     You do not have permission to view this page. If you believe this is an error, please contact your administrator.
                 </p>
                 <Link
-                    href="/dashboard"
+                    href={isAdmin ? "/dashboard" : "/dashboard/profile"}
                     className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
                 >
                     <ArrowLeft size={16} />
-                    Back to Dashboard
+                    {isAdmin ? "Back to Dashboard" : "Back to Profile"}
                 </Link>
             </div>
         </div>

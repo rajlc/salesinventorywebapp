@@ -7,7 +7,7 @@ import Link from "next/link"
 import { LogOut, LayoutDashboard, Settings, ShoppingCart, Calculator, Shield, Menu, MoreVertical, ChevronDown, ChevronRight, FileText, AlertTriangle, History, BarChart2, Package, ShoppingBag, User, Plus, Camera as CameraIcon, Wallet, MessageSquare } from "lucide-react"
 import { logout } from "@/features/auth/actions/auth-actions"
 import { useRouter, usePathname } from "next/navigation"
-import { useState, useEffect } from "react"
+import React, { useState, useEffect } from "react"
 
 import dynamic from 'next/dynamic'
 import { createContext, useContext } from "react"
@@ -22,9 +22,10 @@ const MobileFooter = dynamic(() => import('@/components/dashboard/MobileFooter')
 
 import { DashboardContext } from "./context"
 
-import { PermissionProvider } from '@/lib/permissions/PermissionContext'
+import { PermissionProvider, usePermissions } from '@/lib/permissions/PermissionContext'
 import { PermissionFilteredNav } from '@/components/permissions/PermissionFilteredNav'
 import ChequeNotificationBell from "@/components/dashboard/ChequeNotificationBell"
+import { resolvePermittedPage, PermittedPageItem } from '@/lib/permissions/page-permissions'
 
 export default function DashboardLayoutWrapper(props: any) {
     return (
@@ -52,6 +53,55 @@ function DashboardLayout({
     const [headerAction, setHeaderAction] = useState<React.ReactNode | null>(null)
     const queryClient = useQueryClient()
     const { isMobileMode } = useMobileMode()
+    const { userRole, permissions, hasPermission, isLoading: isPermissionsLoading, isMounted } = usePermissions()
+    const isAdmin = userRole === 'admin'
+
+    // Deduplicate non-admin permitted pages for direct sidebar buttons
+    const permittedSidebarItems = React.useMemo(() => {
+        if (isAdmin) return []
+        const seenUrls = new Set<string>()
+        const list: PermittedPageItem[] = []
+
+        for (const p of permissions) {
+            const main = (p.main_page_role || '').toLowerCase().trim()
+            // Exclude Chat & Review since it is managed by the dedicated Chat & AI sidebar group
+            if (main.includes('chat') || main.includes('review')) {
+                continue
+            }
+            const item = resolvePermittedPage(p.main_page_role || '', p.sub_page_role, p.permission_type)
+            if (!seenUrls.has(item.href)) {
+                seenUrls.add(item.href)
+                list.push(item)
+            }
+        }
+        return list
+    }, [isAdmin, permissions])
+
+    // Dynamically filter Chat & AI sub-items based on user role and permissions
+    const permittedChatSubItems = React.useMemo(() => {
+        if (isAdmin || userRole === 'editor') {
+            return [
+                { label: 'Chat', href: '/dashboard/chat-ai?tab=chat' },
+                { label: 'AI & Automation', href: '/dashboard/chat-ai?tab=settings' },
+                { label: 'Product Q&A', href: '/dashboard/chat-ai/products' },
+                { label: 'Reviews', href: '/dashboard/chat-ai/reviews' }
+            ]
+        }
+        const items: { label: string; href: string }[] = []
+        if (hasPermission('Chat & Review', 'Chat')) {
+            items.push({ label: 'Chat', href: '/dashboard/chat-ai?tab=chat' })
+        }
+        if (hasPermission('Chat & Review', 'AI & Automation')) {
+            items.push({ label: 'AI & Automation', href: '/dashboard/chat-ai?tab=settings' })
+        }
+        if (hasPermission('Chat & Review', 'Product Q&A')) {
+            items.push({ label: 'Product Q&A', href: '/dashboard/chat-ai/products' })
+        }
+        if (hasPermission('Chat & Review', 'Reviews')) {
+            items.push({ label: 'Reviews', href: '/dashboard/chat-ai/reviews' })
+        }
+        return items
+    }, [isAdmin, userRole, hasPermission])
 
     const handleLogout = async () => {
         await logout()
@@ -65,6 +115,27 @@ function DashboardLayout({
         setHeaderTitle(null)
         setHeaderAction(null)
     }, [pathname])
+
+    // Non-admin staff cannot view /dashboard. Automatically route them to their permitted workspace page.
+    useEffect(() => {
+        if (pathname === '/dashboard' && isMounted && !isPermissionsLoading && userRole && userRole !== 'admin') {
+            if (hasPermission('Inventory')) {
+                router.replace('/dashboard/inventory')
+            } else if (hasPermission('Daraz')) {
+                router.replace('/dashboard/sales')
+            } else if (hasPermission('Purchase')) {
+                router.replace('/dashboard/purchase')
+            } else if (hasPermission('Suppliers')) {
+                router.replace('/dashboard/suppliers')
+            } else if (hasPermission('Accounts')) {
+                router.replace('/dashboard/account')
+            } else if (hasPermission('Settings')) {
+                router.replace('/dashboard/settings')
+            } else {
+                router.replace('/dashboard/profile')
+            }
+        }
+    }, [pathname, isMounted, isPermissionsLoading, userRole, hasPermission, router])
 
     return (
         <DashboardContext.Provider value={{ isMobileMenuOpen, setIsMobileMenuOpen, isCollapsed, setHeaderTitle, setHeaderAction }}>
@@ -137,87 +208,128 @@ function DashboardLayout({
                             </div>
 
                             <nav className={`flex-1 overflow-y-auto ${isCollapsed ? 'p-2' : 'p-4'}`}>
-                                <div onClick={closeMobileMenu}>
-                                    <NavItem href="/dashboard" icon={<LayoutDashboard size={20} />} isCollapsed={isCollapsed}>
-                                        Dashboard
-                                    </NavItem>
-                                </div>
+                                {isAdmin ? (
+                                    <>
+                                        <PermissionFilteredNav adminOnly>
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem href="/dashboard" icon={<LayoutDashboard size={20} />} isCollapsed={isCollapsed}>
+                                                    Dashboard
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
 
-                                {/* Inventory with Sub-menu */}
-                                <PermissionFilteredNav mainRole="Inventory">
-                                    <div onClick={closeMobileMenu}>
-                                        <NavItem href="/dashboard/inventory" icon={<Calculator size={20} />} isCollapsed={isCollapsed}>
-                                            Inventory Management
-                                        </NavItem>
-                                    </div>
-                                </PermissionFilteredNav>
+                                        {/* Inventory with Sub-menu */}
+                                        <PermissionFilteredNav mainRole="Inventory">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem href="/dashboard/inventory" icon={<Calculator size={20} />} isCollapsed={isCollapsed}>
+                                                    Inventory Management
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
 
-                                <PermissionFilteredNav mainRole="Daraz">
-                                    <div className="space-y-1">
+                                        <PermissionFilteredNav mainRole="Daraz">
+                                            <div className="space-y-1">
+                                                <div onClick={closeMobileMenu}>
+                                                    <NavItem href="/dashboard/sales" icon={<ShoppingCart size={20} />} isCollapsed={isCollapsed}>
+                                                        Sales & Orders
+                                                    </NavItem>
+                                                </div>
+                                            </div>
+                                        </PermissionFilteredNav>
+
+                                        <PermissionFilteredNav mainRole="Chat & Review">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem 
+                                                    href="/dashboard/chat-ai?tab=chat" 
+                                                    icon={<MessageSquare size={20} />} 
+                                                    isCollapsed={isCollapsed}
+                                                    subItems={[
+                                                        { label: 'Chat', href: '/dashboard/chat-ai?tab=chat' },
+                                                        { label: 'AI & Automation', href: '/dashboard/chat-ai?tab=settings' },
+                                                        { label: 'Product Q&A', href: '/dashboard/chat-ai/products' },
+                                                        { label: 'Reviews', href: '/dashboard/chat-ai/reviews' }
+                                                    ]}
+                                                >
+                                                    Chat & AI
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
+
+                                        <PermissionFilteredNav mainRole="Purchase">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem
+                                                    href="/dashboard/purchase"
+                                                    icon={<ShoppingBag size={20} />}
+                                                    isCollapsed={isCollapsed}
+                                                >
+                                                    Purchasing
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
+
+                                        <PermissionFilteredNav mainRole="Suppliers">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem href="/dashboard/suppliers" icon={<Package size={20} />} isCollapsed={isCollapsed}>
+                                                    Suppliers
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
+
+                                        <PermissionFilteredNav mainRole="Accounts">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem href="/dashboard/account" icon={<Wallet size={20} />} isCollapsed={isCollapsed}>
+                                                    Finance & Accounts
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
+
                                         <div onClick={closeMobileMenu}>
-                                            <NavItem href="/dashboard/sales" icon={<ShoppingCart size={20} />} isCollapsed={isCollapsed}>
-                                                Sales & Orders
+                                            <NavItem href="/dashboard/profile" icon={<User size={20} />} isCollapsed={isCollapsed}>
+                                                My Profile
                                             </NavItem>
                                         </div>
+
+                                        <PermissionFilteredNav mainRole="Settings">
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem href="/dashboard/settings" icon={<Settings size={20} />} isCollapsed={isCollapsed}>
+                                                    Settings
+                                                </NavItem>
+                                            </div>
+                                        </PermissionFilteredNav>
+                                    </>
+                                ) : (
+                                    <>
+                                        {/* Non-admin staff navigation: Direct buttons for all assigned permissions */}
+                                        {permittedSidebarItems.map((item) => (
+                                            <div key={item.id} onClick={closeMobileMenu}>
+                                                <NavItem href={item.href} icon={item.icon} isCollapsed={isCollapsed}>
+                                                    {item.title}
+                                                </NavItem>
+                                            </div>
+                                        ))}
+
+                                        {/* Chat & AI: only show if user has permission for at least one sub-item */}
+                                        {permittedChatSubItems.length > 0 && (
+                                            <div onClick={closeMobileMenu}>
+                                                <NavItem 
+                                                    href={permittedChatSubItems[0].href} 
+                                                    icon={<MessageSquare size={20} />} 
+                                                    isCollapsed={isCollapsed}
+                                                    subItems={permittedChatSubItems}
+                                                >
+                                                    Chat & AI
+                                                </NavItem>
+                                            </div>
+                                        )}
+
+                                        {/* My Profile */}
                                         <div onClick={closeMobileMenu}>
-                                            <NavItem 
-                                                href="/dashboard/chat-ai?tab=chat" 
-                                                icon={<MessageSquare size={20} />} 
-                                                isCollapsed={isCollapsed}
-                                                subItems={[
-                                                    { label: 'Chat', href: '/dashboard/chat-ai?tab=chat' },
-                                                    { label: 'AI & Automation', href: '/dashboard/chat-ai?tab=settings' },
-                                                    { label: 'Product Q&A', href: '/dashboard/chat-ai/products' },
-                                                    { label: 'Reviews', href: '/dashboard/chat-ai/reviews' }
-                                                ]}
-                                            >
-                                                Chat & AI
+                                            <NavItem href="/dashboard/profile" icon={<User size={20} />} isCollapsed={isCollapsed}>
+                                                My Profile
                                             </NavItem>
                                         </div>
-                                    </div>
-                                </PermissionFilteredNav>
-
-                                <PermissionFilteredNav mainRole="Purchase">
-                                    <div onClick={closeMobileMenu}>
-                                        <NavItem
-                                            href="/dashboard/purchase"
-                                            icon={<ShoppingBag size={20} />}
-                                            isCollapsed={isCollapsed}
-                                        >
-                                            Purchasing
-                                        </NavItem>
-                                    </div>
-                                </PermissionFilteredNav>
-
-                                <PermissionFilteredNav mainRole="Suppliers">
-                                    <div onClick={closeMobileMenu}>
-                                        <NavItem href="/dashboard/suppliers" icon={<Package size={20} />} isCollapsed={isCollapsed}>
-                                            Suppliers
-                                        </NavItem>
-                                    </div>
-                                </PermissionFilteredNav>
-
-                                <PermissionFilteredNav mainRole="Accounts">
-                                    <div onClick={closeMobileMenu}>
-                                        <NavItem href="/dashboard/account" icon={<Wallet size={20} />} isCollapsed={isCollapsed}>
-                                            Finance & Accounts
-                                        </NavItem>
-                                    </div>
-                                </PermissionFilteredNav>
-
-                                <div onClick={closeMobileMenu}>
-                                    <NavItem href="/dashboard/profile" icon={<User size={20} />} isCollapsed={isCollapsed}>
-                                        My Profile
-                                    </NavItem>
-                                </div>
-
-                                <PermissionFilteredNav mainRole="Settings">
-                                    <div onClick={closeMobileMenu}>
-                                        <NavItem href="/dashboard/settings" icon={<Settings size={20} />} isCollapsed={isCollapsed}>
-                                            Settings
-                                        </NavItem>
-                                    </div>
-                                </PermissionFilteredNav>
+                                    </>
+                                )}
                             </nav>
 
                             {/* Sidebar Footer: Dark Mode removed, only Logout */}
@@ -244,8 +356,8 @@ function DashboardLayout({
                     ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname?.startsWith('/dashboard/sales/daraz/profit-tracker') ? 'h-full' : 'h-[calc(100vh-4rem)] md:h-full'}
                     pointer-events-auto
                 `}>
-                    {/* Desktop Top Header Bar - Only show on Dashboard menu */}
-                    {pathname === '/dashboard' && (
+                    {/* Desktop Top Header Bar - Only show on Dashboard menu for admin */}
+                    {pathname === '/dashboard' && userRole === 'admin' && (
                         <header className="hidden md:flex h-14 bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800/80 px-5 items-center justify-between sticky top-0 z-30 shadow-2xs">
                             <div className="flex items-center gap-3">
                                 {headerTitle ? (
@@ -280,7 +392,14 @@ function DashboardLayout({
                             ? 'px-3 py-3 md:px-5 md:py-4'
                             : 'px-4 pb-4 pt-1 md:p-8'
                     } ${isMobileMode ? 'pb-24' : ''}`}>
-                        {isMobileMode && pathname === '/dashboard' ? (
+                        {pathname === '/dashboard' && isMounted && !isPermissionsLoading && userRole !== 'admin' ? (
+                            <div className="flex items-center justify-center h-full min-h-[400px]">
+                                <div className="text-center">
+                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                                    <p className="text-[15px] text-gray-500">Redirecting to your workspace...</p>
+                                </div>
+                            </div>
+                        ) : isMobileMode && pathname === '/dashboard' ? (
                             <MobileDashboard />
                         ) : (
                             children

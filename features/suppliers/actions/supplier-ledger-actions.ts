@@ -82,43 +82,55 @@ export async function getSupplierLedger({
     const supplierIds = suppliers.map(s => s.id)
     if (supplierIds.length === 0) return { ledger: [] }
 
-    // 3. Batch Fetch Purchases & Transactions with ORDER BY ID for deterministic range pagination
-    let allPurchases: any[] = []
-    let pPage = 0
-    const pageSize = 1000
+    // 3. Batch Fetch Purchases & Transactions concurrently with ORDER BY ID for deterministic range pagination
+    const fetchPurchases = async () => {
+        let purchases: any[] = []
+        let pPage = 0
+        const pageSize = 1000
 
-    while (true) {
-        const { data, error } = await supabase
-            .from('purchases')
-            .select('supplier_id, purchase_date, purchase_type, payment_type, total_amount')
-            .in('supplier_id', supplierIds)
-            .lte('purchase_date', endDate)
-            .order('id', { ascending: true })
-            .range(pPage * pageSize, (pPage + 1) * pageSize - 1)
+        while (true) {
+            const { data, error } = await supabase
+                .from('purchases')
+                .select('supplier_id, purchase_date, purchase_type, payment_type, total_amount')
+                .in('supplier_id', supplierIds)
+                .lte('purchase_date', endDate)
+                .order('id', { ascending: true })
+                .range(pPage * pageSize, (pPage + 1) * pageSize - 1)
 
-        if (error || !data || data.length === 0) break
-        allPurchases = allPurchases.concat(data)
-        if (data.length < pageSize) break
-        pPage++
+            if (error || !data || data.length === 0) break
+            purchases = purchases.concat(data)
+            if (data.length < pageSize) break
+            pPage++
+        }
+        return purchases
     }
 
-    let allTransactions: any[] = []
-    let tPage = 0
+    const fetchTransactions = async () => {
+        let transactions: any[] = []
+        let tPage = 0
+        const pageSize = 1000
 
-    while (true) {
-        const { data, error } = await supabase
-            .from('supplier_transactions')
-            .select('supplier_id, transaction_date, transaction_type, amount')
-            .in('supplier_id', supplierIds)
-            .lte('transaction_date', endDate)
-            .order('id', { ascending: true })
-            .range(tPage * pageSize, (tPage + 1) * pageSize - 1)
+        while (true) {
+            const { data, error } = await supabase
+                .from('supplier_transactions')
+                .select('supplier_id, transaction_date, transaction_type, amount')
+                .in('supplier_id', supplierIds)
+                .lte('transaction_date', endDate)
+                .order('id', { ascending: true })
+                .range(tPage * pageSize, (tPage + 1) * pageSize - 1)
 
-        if (error || !data || data.length === 0) break
-        allTransactions = allTransactions.concat(data)
-        if (data.length < pageSize) break
-        tPage++
+            if (error || !data || data.length === 0) break
+            transactions = transactions.concat(data)
+            if (data.length < pageSize) break
+            tPage++
+        }
+        return transactions
     }
+
+    const [allPurchases, allTransactions] = await Promise.all([
+        fetchPurchases(),
+        fetchTransactions()
+    ])
 
     // 4. In-Memory Aggregation matching getSupplierStats logic 100%
     const ledgerMap = new Map<string, {
@@ -199,6 +211,70 @@ export async function getSupplierLedger({
     })
 
     return { ledger: results }
+}
+
+/**
+ * High-performance aggregate calculation of pending supplier due balance across all suppliers.
+ * Cash/online purchases net to 0, so only due purchases and transactions are fetched.
+ * Avoids loading all suppliers and 50,000+ purchase rows into memory.
+ */
+export async function getPendingSupplierDue({
+    fiscalYearId
+}: {
+    fiscalYearId?: string
+}): Promise<number> {
+    const supabase = await createClient()
+
+    // 1. Get Fiscal Year End Date
+    let endDate: string
+
+    if (fiscalYearId) {
+        const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('id', fiscalYearId).maybeSingle()
+        if (!fy) return 0
+        endDate = fy.end_date
+    } else {
+        const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('is_active', true).maybeSingle()
+        if (!fy) return 0
+        endDate = fy.end_date
+    }
+
+    // 2. Fetch only due purchases and transactions up to endDate concurrently
+    const [purchasesRes, transactionsRes] = await Promise.all([
+        supabase
+            .from('purchases')
+            .select('purchase_type, total_amount')
+            .ilike('payment_type', 'due')
+            .lte('purchase_date', endDate),
+        supabase
+            .from('supplier_transactions')
+            .select('transaction_type, amount')
+            .lte('transaction_date', endDate)
+    ])
+
+    let balance = 0
+
+    const purchases = purchasesRes.data || []
+    for (const p of purchases) {
+        const amt = Number(p.total_amount) || 0
+        const type = (p.purchase_type || 'Buy').toLowerCase()
+        if (type === 'buy') {
+            balance += amt
+        } else if (type === 'sell') {
+            balance -= amt
+        }
+    }
+
+    const transactions = transactionsRes.data || []
+    for (const t of transactions) {
+        const amt = Number(t.amount) || 0
+        if (t.transaction_type === 'Received') {
+            balance += amt
+        } else if (t.transaction_type === 'Paid') {
+            balance -= amt
+        }
+    }
+
+    return balance
 }
 
 

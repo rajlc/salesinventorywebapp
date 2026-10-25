@@ -233,25 +233,29 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
     // We search products where any of seller_sku 1-4 matches OR id in product IDs
     let matchedProducts: any[] = []
     if (skuList.length > 0 || productIdList.length > 0) {
-        // Query products by ID
-        const idPromise: Promise<any> = productIdList.length > 0
-            ? Promise.resolve(
-                supabase
-                    .from('products')
-                    .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
-                    .in('id', productIdList)
-                    .eq('is_deleted', false)
-            )
-            : Promise.resolve({ data: [] })
+        // Query products by ID (chunked by 50 to prevent URL length overflow)
+        const idChunks: string[][] = []
+        const CHUNK_SIZE = 50
+        for (let i = 0; i < productIdList.length; i += CHUNK_SIZE) {
+            idChunks.push(productIdList.slice(i, i + CHUNK_SIZE))
+        }
 
-        // Query products by SKU matching
+        const idPromises = idChunks.map(chunk =>
+            supabase
+                .from('products')
+                .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
+                .in('id', chunk)
+                .eq('is_deleted', false)
+        )
+
+        // Query products by SKU matching (batch size 15 for safe URL lengths)
         const skuPromises: Promise<any>[] = []
-        const BATCH = 20
+        const BATCH = 15
         for (let i = 0; i < skuList.length; i += BATCH) {
             const batch = skuList.slice(i, i + BATCH)
             const orConditions = batch
                 .map(s => {
-                    const clean = s.replace(/"/g, '')
+                    const clean = s.replace(/["\\]/g, '')
                     return `seller_sku1.eq."${clean}",seller_sku2.eq."${clean}",seller_sku3.eq."${clean}",seller_sku4.eq."${clean}"`
                 })
                 .join(',')
@@ -267,13 +271,10 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
             )
         }
 
-        const [idRes, ...skuResults] = await Promise.all([idPromise, ...skuPromises])
+        const allResults = await Promise.all([...idPromises, ...skuPromises])
         const productMapById = new Map<string, any>()
 
-        if (idRes.data) {
-            idRes.data.forEach((p: any) => productMapById.set(p.id, p))
-        }
-        for (const res of skuResults) {
+        for (const res of allResults) {
             if (res.data) {
                 res.data.forEach((p: any) => productMapById.set(p.id, p))
             }
@@ -382,36 +383,46 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
     })
 
     if (missingIds.length > 0) {
-        const [viewRes, purchasesRes] = await Promise.all([
-            // Latest prices from inventory_price_reports_view (matches Average Sales Price page)
-            supabase
-                .from('inventory_price_reports_view')
-                .select('product_id, last_price, est_price')
-                .in('product_id', missingIds),
-            // Direct purchase history
-            supabase
-                .from('purchases')
-                .select('product_id, unit_amount, purchase_date')
-                .in('product_id', missingIds)
-                .gt('unit_amount', 0)
-                .order('purchase_date', { ascending: false })
-        ])
+        const CHUNK_SIZE = 50
+        const idChunks: string[][] = []
+        for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
+            idChunks.push(missingIds.slice(i, i + CHUNK_SIZE))
+        }
 
-        viewRes.data?.forEach((vp: any) => {
-            const price = Number(vp.last_price || vp.est_price || 0)
-            if (price > 0) {
-                viewPurchasesMap.set(vp.product_id, price)
-                cachedViewPurchasesMap.set(vp.product_id, { price, time: nowTime })
-            }
-        })
+        const chunkPromises = idChunks.map(chunk =>
+            Promise.all([
+                supabase
+                    .from('inventory_price_reports_view')
+                    .select('product_id, last_price, est_price')
+                    .in('product_id', chunk),
+                supabase
+                    .from('purchases')
+                    .select('product_id, unit_amount, purchase_date')
+                    .in('product_id', chunk)
+                    .gt('unit_amount', 0)
+                    .order('purchase_date', { ascending: false })
+            ])
+        )
 
-        purchasesRes.data?.forEach((pu: any) => {
-            if (!latestPurchasesMap.has(pu.product_id)) {
-                const price = Number(pu.unit_amount)
-                latestPurchasesMap.set(pu.product_id, price)
-                cachedPurchasesMap.set(pu.product_id, { price, time: nowTime })
-            }
-        })
+        const chunkResults = await Promise.all(chunkPromises)
+
+        for (const [viewRes, purchasesRes] of chunkResults) {
+            viewRes.data?.forEach((vp: any) => {
+                const price = Number(vp.last_price || vp.est_price || 0)
+                if (price > 0) {
+                    viewPurchasesMap.set(vp.product_id, price)
+                    cachedViewPurchasesMap.set(vp.product_id, { price, time: nowTime })
+                }
+            })
+
+            purchasesRes.data?.forEach((pu: any) => {
+                if (!latestPurchasesMap.has(pu.product_id)) {
+                    const price = Number(pu.unit_amount)
+                    latestPurchasesMap.set(pu.product_id, price)
+                    cachedPurchasesMap.set(pu.product_id, { price, time: nowTime })
+                }
+            })
+        }
     }
 
     // Helper to resolve single item base price from view -> purchases -> wholesale -> product est_price

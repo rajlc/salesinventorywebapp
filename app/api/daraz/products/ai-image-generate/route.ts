@@ -13,7 +13,7 @@ async function getImageBuffer(urlOrBase64: string): Promise<Buffer> {
 
     const response = await axios.get(urlOrBase64, {
         responseType: 'arraybuffer',
-        timeout: 15000,
+        timeout: 25000,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
@@ -23,7 +23,7 @@ async function getImageBuffer(urlOrBase64: string): Promise<Buffer> {
 
 // Helper: Upload buffer to Supabase storage 'mobile-captures'
 async function uploadToStorage(supabase: any, buffer: Buffer, prefix: string): Promise<string> {
-    const fileName = `studio_${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.jpg`
+    const fileName = `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.jpg`
     const { error } = await supabase.storage
         .from('mobile-captures')
         .upload(fileName, buffer, {
@@ -33,7 +33,6 @@ async function uploadToStorage(supabase: any, buffer: Buffer, prefix: string): P
 
     if (error) {
         console.warn(`[AIStudioStorage] Upload failed for ${fileName}:`, error.message)
-        // Fallback to data URL if storage upload has issue
         return `data:image/jpeg;base64,${buffer.toString('base64')}`
     }
 
@@ -44,23 +43,118 @@ async function uploadToStorage(supabase: any, buffer: Buffer, prefix: string): P
     return publicUrl
 }
 
-// ── Slot 1: Pure White Studio Cover Image (100% Free / Daraz SEO) ────────────
-async function generateCoverImage(rawBuffer: Buffer): Promise<Buffer> {
-    // 1. Resize & center subject onto 1000x1000 square with pure white #FFFFFF
-    // Daraz requires 1:1 ratio, min 330x330, recommended 1000x1000
-    const processed = await sharp(rawBuffer)
-        .rotate() // auto-orient from EXIF
-        .resize({
-            width: 900,
-            height: 900,
-            fit: 'inside',
-            withoutEnlargement: false,
-        })
+// ── Slot 1: Pure White Studio Cover Image (100% Daraz SEO Compliant) ─────────
+async function generateCoverImage(subjectBuffer: Buffer, isCutout: boolean): Promise<Buffer> {
+    let input = subjectBuffer
+    if (isCutout) {
+        try {
+            input = await sharp(subjectBuffer).trim().toBuffer()
+        } catch {
+            input = subjectBuffer
+        }
+    }
+
+    const resized = await sharp(input)
+        .rotate()
+        .resize({ width: 800, height: 800, fit: 'inside' })
+        .toBuffer()
+
+    const { width = 800, height = 800 } = await sharp(resized).metadata()
+    const top = Math.round((1000 - height) / 2) - 15
+    const left = Math.round((1000 - width) / 2)
+
+    // Soft realistic ground contact shadow beneath product
+    const shadowSvg = Buffer.from(
+        `<svg width="${width + 60}" height="40" xmlns="http://www.w3.org/2000/svg">` +
+        `<ellipse cx="${(width + 60) / 2}" cy="20" rx="${width * 0.38}" ry="12" fill="rgba(0,0,0,0.18)" filter="blur(6px)" />` +
+        `</svg>`
+    )
+
+    return sharp({
+        create: {
+            width: 1000,
+            height: 1000,
+            channels: 3,
+            background: { r: 255, g: 255, b: 255 }
+        }
+    })
+    .composite([
+        { input: shadowSvg, top: Math.min(960, top + height - 18), left: Math.max(0, left - 30) },
+        { input: resized, top: Math.max(0, top), left: Math.max(0, left) }
+    ])
+    .modulate({ brightness: 1.03, saturation: 1.08 })
+    .jpeg({ quality: 95 })
+    .toBuffer()
+}
+
+// ── Slot 2: Side-by-Side / Multi-Angle Showcase ──────────────────────────────
+async function generateSideBySideImage(subjectBuffer: Buffer, isCutout: boolean): Promise<Buffer> {
+    let input = subjectBuffer
+    if (isCutout) {
+        try {
+            input = await sharp(subjectBuffer).trim().toBuffer()
+        } catch {
+            input = subjectBuffer
+        }
+    }
+
+    const mainView = await sharp(input)
+        .rotate()
+        .resize({ width: 560, height: 680, fit: 'inside' })
+        .toBuffer()
+    const mainMeta = await sharp(mainView).metadata()
+
+    // Secondary perspective: focused zoom callout
+    const detailCrop = await sharp(input)
+        .rotate()
+        .resize({ width: 380, height: 420, fit: 'cover', position: 'top' })
+        .modulate({ brightness: 1.05, saturation: 1.1 })
+        .sharpen({ sigma: 1.5 })
+        .toBuffer()
+
+    const detailFramed = await sharp(detailCrop)
+        .extend({ top: 6, bottom: 6, left: 6, right: 6, background: '#FFFFFF' })
+        .toBuffer()
+    const framedMeta = await sharp(detailFramed).metadata()
+
+    const topMain = Math.round((1000 - (mainMeta.height || 600)) / 2)
+    const topDetail = Math.round((1000 - (framedMeta.height || 420)) / 2) - 25
+
+    return sharp({
+        create: {
+            width: 1000,
+            height: 1000,
+            channels: 3,
+            background: { r: 248, g: 249, b: 251 }
+        }
+    })
+    .composite([
+        { input: mainView, top: Math.max(0, topMain), left: 50 },
+        { input: detailFramed, top: Math.max(0, topDetail), left: 550 }
+    ])
+    .jpeg({ quality: 95 })
+    .toBuffer()
+}
+
+// ── Slot 3: Refined Texture & Macro Detail ───────────────────────────────────
+async function generateRefinedImage(subjectBuffer: Buffer, isCutout: boolean): Promise<Buffer> {
+    let input = subjectBuffer
+    if (isCutout) {
+        try {
+            input = await sharp(subjectBuffer).trim().toBuffer()
+        } catch {
+            input = subjectBuffer
+        }
+    }
+
+    const processed = await sharp(input)
+        .rotate()
+        .resize({ width: 900, height: 900, fit: 'inside' })
+        .modulate({ brightness: 1.06, saturation: 1.15 })
+        .sharpen({ sigma: 2.0, m1: 1.5, m2: 0.8 })
         .toBuffer()
 
     const { width = 900, height = 900 } = await sharp(processed).metadata()
-
-    // Create a 1000x1000 pure white canvas and composite the product in the center
     const left = Math.round((1000 - width) / 2)
     const top = Math.round((1000 - height) / 2)
 
@@ -73,62 +167,71 @@ async function generateCoverImage(rawBuffer: Buffer): Promise<Buffer> {
         }
     })
     .composite([
-        {
-            input: processed,
-            top: Math.max(0, top),
-            left: Math.max(0, left)
-        }
+        { input: processed, top: Math.max(0, top), left: Math.max(0, left) }
     ])
-    .modulate({
-        brightness: 1.03,
-        saturation: 1.08
-    })
-    .jpeg({ quality: 92 })
+    .jpeg({ quality: 96 })
     .toBuffer()
 }
 
-// ── Slot 3: Refined Texture & Detail Image (100% Free / Sharp Filter) ─────────
-async function generateRefinedImage(rawBuffer: Buffer): Promise<Buffer> {
-    // Applies unsharp mask, enhanced clarity, and contrast leveling
-    const processed = await sharp(rawBuffer)
+// ── Slot 4: Modern Studio Pedestal / Lifestyle Showcase ──────────────────────
+async function generateLifestyleImage(subjectBuffer: Buffer, isCutout: boolean): Promise<Buffer> {
+    let input = subjectBuffer
+    if (isCutout) {
+        try {
+            input = await sharp(subjectBuffer).trim().toBuffer()
+        } catch {
+            input = subjectBuffer
+        }
+    }
+
+    // Modern studio cylinder podium with soft ambient lighting
+    const podiumSvg = Buffer.from(
+        '<svg width="1000" height="1000" xmlns="http://www.w3.org/2000/svg">' +
+        '<defs>' +
+        '  <radialGradient id="bg" cx="50%" cy="30%" r="70%">' +
+        '    <stop offset="0%" stop-color="#F3F4F6"/>' +
+        '    <stop offset="100%" stop-color="#E5E7EB"/>' +
+        '  </radialGradient>' +
+        '  <linearGradient id="podiumTop" x1="0%" y1="0%" x2="100%" y2="100%">' +
+        '    <stop offset="0%" stop-color="#FFFFFF"/>' +
+        '    <stop offset="100%" stop-color="#F3F4F6"/>' +
+        '  </linearGradient>' +
+        '  <linearGradient id="podiumBase" x1="0%" y1="0%" x2="0%" y2="100%">' +
+        '    <stop offset="0%" stop-color="#E5E7EB"/>' +
+        '    <stop offset="100%" stop-color="#D1D5DB"/>' +
+        '  </linearGradient>' +
+        '</defs>' +
+        '<rect width="1000" height="1000" fill="url(#bg)"/>' +
+        '<ellipse cx="500" cy="850" rx="360" ry="60" fill="rgba(0,0,0,0.06)" filter="blur(15px)"/>' +
+        '<rect x="220" y="780" width="560" height="80" rx="20" fill="url(#podiumBase)"/>' +
+        '<ellipse cx="500" cy="780" rx="280" ry="45" fill="url(#podiumTop)"/>' +
+        '</svg>'
+    )
+
+    const podiumBase = await sharp(podiumSvg).png().toBuffer()
+    const product = await sharp(input)
         .rotate()
-        .resize({
-            width: 920,
-            height: 920,
-            fit: 'inside'
-        })
-        .sharpen({
-            sigma: 1.5,
-            m1: 1.2,
-            m2: 0.5
-        })
-        .modulate({
-            brightness: 1.05,
-            saturation: 1.15
-        })
+        .resize({ width: 720, height: 600, fit: 'inside' })
         .toBuffer()
+    const { width = 720, height = 600 } = await sharp(product).metadata()
 
-    const { width = 920, height = 920 } = await sharp(processed).metadata()
-    const left = Math.round((1000 - width) / 2)
-    const top = Math.round((1000 - height) / 2)
+    const shadowSvg = Buffer.from(
+        `<svg width="${width + 40}" height="35" xmlns="http://www.w3.org/2000/svg">` +
+        `<ellipse cx="${(width + 40) / 2}" cy="17" rx="${width * 0.42}" ry="10" fill="rgba(0,0,0,0.22)" filter="blur(7px)"/>` +
+        `</svg>`
+    )
 
-    return sharp({
-        create: {
-            width: 1000,
-            height: 1000,
-            channels: 3,
-            background: { r: 250, g: 250, b: 252 } // clean studio off-white
-        }
-    })
-    .composite([
-        {
-            input: processed,
-            top: Math.max(0, top),
-            left: Math.max(0, left)
-        }
-    ])
-    .jpeg({ quality: 94 })
-    .toBuffer()
+    const productBottomY = 780
+    const productTopY = Math.max(20, productBottomY - height + 15)
+    const productLeftX = Math.round((1000 - width) / 2)
+
+    return sharp(podiumBase)
+        .composite([
+            { input: shadowSvg, top: productBottomY - 15, left: Math.max(0, productLeftX - 20) },
+            { input: product, top: productTopY, left: Math.max(0, productLeftX) }
+        ])
+        .jpeg({ quality: 95 })
+        .toBuffer()
 }
 
 // ── Call Google Imagen 3 API ─────────────────────────────────────────────────
@@ -159,7 +262,7 @@ async function callGoogleImagen(promptText: string, apiKey: string): Promise<Buf
             return Buffer.from(base64Bytes, 'base64')
         }
     } catch (err: any) {
-        console.warn('[AIStudio-Imagen] Google Imagen 3 generation notice:', err.response?.data?.error?.message || err.message)
+        console.warn('[AIStudio-Imagen] Google Imagen 3 notice:', err.response?.data?.error?.message || err.message)
     }
     return null
 }
@@ -169,14 +272,15 @@ export async function POST(req: NextRequest) {
         const body = await req.json()
         const {
             rawImageUrl,
+            cutoutBase64,
             productName = 'Product',
             categoryPath = 'E-commerce Item',
             price = '',
             selectedSlots = [1, 2, 3, 4]
         } = body
 
-        if (!rawImageUrl) {
-            return NextResponse.json({ error: 'rawImageUrl is required' }, { status: 400 })
+        if (!rawImageUrl && !cutoutBase64) {
+            return NextResponse.json({ error: 'rawImageUrl or cutoutBase64 is required' }, { status: 400 })
         }
 
         const supabase = await createAdminClient()
@@ -209,7 +313,6 @@ export async function POST(req: NextRequest) {
             slot4: imgSettings.prompts?.slot4 || DEFAULT_IMAGE_PROMPTS.slot4,
         }
 
-        // Interpolate variables
         const interpolate = (template: string) => {
             return template
                 .replace(/\{productName\}/g, productName)
@@ -217,8 +320,16 @@ export async function POST(req: NextRequest) {
                 .replace(/\{price\}/g, String(price || ''))
         }
 
-        // Download raw mobile image
-        const rawBuffer = await getImageBuffer(rawImageUrl)
+        // Determine subject buffer: prefer transparent cutout if available
+        let subjectBuffer: Buffer
+        let isCutout = false
+
+        if (cutoutBase64) {
+            subjectBuffer = await getImageBuffer(cutoutBase64)
+            isCutout = true
+        } else {
+            subjectBuffer = await getImageBuffer(rawImageUrl)
+        }
 
         const results: Record<number, string> = {}
 
@@ -227,43 +338,39 @@ export async function POST(req: NextRequest) {
             selectedSlots.map(async (slot: number) => {
                 try {
                     if (slot === 1) {
-                        // Slot 1: Pure White Studio Cover Image (100% Free)
-                        const coverBuf = await generateCoverImage(rawBuffer)
-                        results[1] = await uploadToStorage(supabase, coverBuf, 'cover_slot1')
-                    } else if (slot === 3) {
-                        // Slot 3: Refined Texture & Detail Image (100% Free)
-                        const detailBuf = await generateRefinedImage(rawBuffer)
-                        results[3] = await uploadToStorage(supabase, detailBuf, 'detail_slot3')
+                        // Slot 1: Pure White Studio Cover Image
+                        const coverBuf = await generateCoverImage(subjectBuffer, isCutout)
+                        results[1] = await uploadToStorage(supabase, coverBuf, 'daraz_prod_white_cover')
                     } else if (slot === 2) {
                         // Slot 2: Side-by-Side / Multi-Angle View
-                        const prompt2 = interpolate(prompts.slot2)
                         let slot2Buf: Buffer | null = null
-
                         if (provider === 'gemini-imagen' && geminiApiKey) {
+                            const prompt2 = interpolate(prompts.slot2)
                             slot2Buf = await callGoogleImagen(prompt2, geminiApiKey)
                         }
 
-                        // Fallback: If AI generation not enabled or failed, create studio side presentation
                         if (!slot2Buf) {
-                            slot2Buf = await generateCoverImage(rawBuffer)
+                            slot2Buf = await generateSideBySideImage(subjectBuffer, isCutout)
                         }
 
-                        results[2] = await uploadToStorage(supabase, slot2Buf, 'angle_slot2')
+                        results[2] = await uploadToStorage(supabase, slot2Buf, 'daraz_prod_perspective_view')
+                    } else if (slot === 3) {
+                        // Slot 3: Refined Texture & Macro Detail
+                        const detailBuf = await generateRefinedImage(subjectBuffer, isCutout)
+                        results[3] = await uploadToStorage(supabase, detailBuf, 'daraz_prod_texture_detail')
                     } else if (slot === 4) {
-                        // Slot 4: Lifestyle & Use-Case Scene
-                        const prompt4 = interpolate(prompts.slot4)
+                        // Slot 4: Modern Studio Pedestal / Lifestyle Scene
                         let slot4Buf: Buffer | null = null
-
                         if (provider === 'gemini-imagen' && geminiApiKey) {
+                            const prompt4 = interpolate(prompts.slot4)
                             slot4Buf = await callGoogleImagen(prompt4, geminiApiKey)
                         }
 
-                        // Fallback: If AI generation not enabled or failed, create studio refine presentation
                         if (!slot4Buf) {
-                            slot4Buf = await generateRefinedImage(rawBuffer)
+                            slot4Buf = await generateLifestyleImage(subjectBuffer, isCutout)
                         }
 
-                        results[4] = await uploadToStorage(supabase, slot4Buf, 'lifestyle_slot4')
+                        results[4] = await uploadToStorage(supabase, slot4Buf, 'daraz_prod_studio_showcase')
                     }
                 } catch (err: any) {
                     console.error(`[AIStudio] Error processing slot ${slot}:`, err.message)

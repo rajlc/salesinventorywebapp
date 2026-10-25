@@ -75,19 +75,31 @@ export async function getStockValuation(page = 1, limit = 50, search = ''): Prom
 
     const productIds = allProducts.map(p => p.id)
 
-    // 2. Fetch Prices (Chunked)
-    const RELATED_CHUNK_SIZE = 50
+    // 2. Fetch Prices (Parallelized Chunks)
+    const RELATED_CHUNK_SIZE = 100
+    const chunks: string[][] = []
+    for (let i = 0; i < productIds.length; i += RELATED_CHUNK_SIZE) {
+        chunks.push(productIds.slice(i, i + RELATED_CHUNK_SIZE))
+    }
+
+    const chunkResults = await Promise.all(
+        chunks.map(async chunk => {
+            const [prices, extras] = await Promise.all([
+                supabase.from('inventory_price_reports_view').select('product_id, average_price').in('product_id', chunk),
+                supabase.from('products').select('id, est_price').in('id', chunk)
+            ])
+            return {
+                prices: prices.data || [],
+                extras: extras.data || []
+            }
+        })
+    )
+
     const allPriceReports: any[] = []
     const allProductsExtra: any[] = []
-
-    for (let i = 0; i < productIds.length; i += RELATED_CHUNK_SIZE) {
-        const chunk = productIds.slice(i, i + RELATED_CHUNK_SIZE)
-        const [prices, extras] = await Promise.all([
-            supabase.from('inventory_price_reports_view').select('product_id, average_price').in('product_id', chunk),
-            supabase.from('products').select('id, est_price').in('id', chunk)
-        ])
-        if (prices.data) allPriceReports.push(...prices.data)
-        if (extras.data) allProductsExtra.push(...extras.data)
+    for (const res of chunkResults) {
+        allPriceReports.push(...res.prices)
+        allProductsExtra.push(...res.extras)
     }
 
     const priceMap = new Map<string, number>()

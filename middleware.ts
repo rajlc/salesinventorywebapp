@@ -121,20 +121,6 @@ export async function middleware(request: NextRequest) {
         return NextResponse.next({ request: { headers: request.headers } })
     }
 
-    // ── Bypass prefetch requests ──────────────────────────────────────────
-    // Next.js Link prefetching sends 'next-router-prefetch' or 'purpose: prefetch'.
-    // Bypassing remote auth roundtrips for prefetch prevents dozens of duplicate
-    // calls from flooding Supabase Auth and stalling real user navigations.
-    const isPrefetch =
-        request.headers.get('next-router-prefetch') === '1' ||
-        request.headers.get('purpose') === 'prefetch' ||
-        request.headers.get('sec-purpose') === 'prefetch' ||
-        request.nextUrl.searchParams.has('_rsc')
-
-    if (isPrefetch) {
-        return response
-    }
-
     // Only /dashboard and login/auth routes need Supabase auth checks
     const isDashboardRoute = pathname.startsWith('/dashboard')
     const isAuthRoute = ['/login', '/request-access'].includes(pathname)
@@ -143,27 +129,93 @@ export async function middleware(request: NextRequest) {
         return response
     }
 
-    // Fast-path: If accessing /dashboard with NO Supabase session cookies at all,
-    // redirect to /login immediately without wasting seconds on a remote network call.
-    const hasAuthCookie = request.cookies.getAll().some(
+    // Check for Supabase auth cookie presence
+    const allCookies = request.cookies.getAll()
+    const hasAuthCookie = allCookies.some(
         c => c.name.startsWith('sb-') && c.name.includes('-auth-token')
     )
 
-    if (isDashboardRoute && !hasAuthCookie) {
-        return NextResponse.redirect(new URL('/login', request.url))
-    }
-
-    // Fast-path for Next.js internal RSC navigations and Server Actions when auth cookie is present:
-    // The user already has an active session cookie. Bypassing remote Supabase Auth network roundtrips
-    // on internal route clicks and server actions makes page transitions instant (0ms) and saves 300ms - 1,500ms per click.
-    const isInternalNavigation =
-        request.headers.get('rsc') === '1' ||
-        request.headers.has('next-router-state-tree')
-
-    if ((request.headers.has('next-action') || isInternalNavigation) && hasAuthCookie) {
+    // Fast-path 1: No auth cookies at all
+    if (!hasAuthCookie) {
+        if (isDashboardRoute) {
+            return NextResponse.redirect(new URL('/login', request.url))
+        }
+        // Accessing /login or /request-access with no cookies -> instant 0ms response, no remote network call!
         return response
     }
 
+    // Helper to decode JWT exp from session cookies in 0ms (pure CPU base64 decode, no network call)
+    const getAuthTokenExp = (): number | null => {
+        try {
+            const authCookies = allCookies
+                .filter(c => c.name.startsWith('sb-') && c.name.includes('-auth-token'))
+                .sort((a, b) => a.name.localeCompare(b.name))
+
+            if (authCookies.length === 0) return null
+
+            let combined = authCookies.map(c => c.value).join('')
+            if (!combined) return null
+
+            if (combined.startsWith('base64-')) {
+                combined = Buffer.from(combined.slice(7), 'base64').toString('utf8')
+            } else {
+                try {
+                    combined = decodeURIComponent(combined)
+                } catch {}
+            }
+
+            let parsed: any = null
+            try {
+                parsed = JSON.parse(combined)
+            } catch {
+                return null
+            }
+
+            let accessToken: string | null = null
+            if (Array.isArray(parsed) && typeof parsed[0] === 'string') {
+                accessToken = parsed[0]
+            } else if (parsed && typeof parsed.access_token === 'string') {
+                accessToken = parsed.access_token
+            }
+
+            if (!accessToken) return null
+
+            const parts = accessToken.split('.')
+            if (parts.length !== 3) return null
+
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'))
+            return typeof payload.exp === 'number' ? payload.exp : null
+        } catch {
+            return null
+        }
+    }
+
+    const tokenExp = getAuthTokenExp()
+    const nowSec = Math.floor(Date.now() / 1000)
+    // If the token is valid for more than 120 seconds, we do NOT need to contact the remote Supabase Auth server!
+    const isTokenFresh = tokenExp !== null && (tokenExp - nowSec) > 120
+
+    // Fast-path 2: Token is completely fresh and valid
+    if (isTokenFresh) {
+        if (isAuthRoute) {
+            // Already logged in with fresh token -> redirect to /dashboard
+            return NextResponse.redirect(new URL('/dashboard', request.url))
+        }
+        // Navigating dashboard with fresh token -> instant 0ms transition!
+        return response
+    }
+
+    // ── Bypass router prefetch requests from consuming refresh tokens ──────────────
+    const isPrefetch =
+        request.headers.get('next-router-prefetch') === '1' ||
+        request.headers.get('purpose') === 'prefetch' ||
+        request.headers.get('sec-purpose') === 'prefetch'
+
+    if (isPrefetch) {
+        return response
+    }
+
+    // ── Token is expiring (<= 120s), expired, or needs refresh ───────────────────
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
@@ -220,65 +272,39 @@ export async function middleware(request: NextRequest) {
     }
 
     let user = null
-    let isTokenInvalid = false
 
     try {
-        // Race against an 8-second timeout so that a slow/unavailable Supabase
-        // cannot hang every page request indefinitely.
+        // Refresh session using getUser()
         const authResult = await Promise.race([
             supabase.auth.getUser().catch((err: any) => ({ data: { user: null }, error: err })),
             new Promise<{ data: { user: null }; error?: any }>((resolve) =>
-                setTimeout(() => resolve({ data: { user: null }, error: new Error('Auth timeout') }), 8000)
+                setTimeout(() => resolve({ data: { user: null }, error: new Error('Auth timeout') }), 6000)
             )
         ])
 
         user = authResult.data?.user || null
-        const error = (authResult as any).error
-
-        if (error) {
-            const errCode = (error as any).code || ''
-            const errMsg = ((error as any).message || '').toLowerCase()
-            const errStatus = (error as any).status || 0
-
-            if (
-                errCode === 'refresh_token_not_found' ||
-                errCode === 'bad_jwt' ||
-                errStatus === 400 ||
-                errMsg.includes('refresh token') ||
-                errMsg.includes('invalid token')
-            ) {
-                isTokenInvalid = true
-                console.warn('[Middleware] Stale/invalid auth token detected. Cleaning session cookies.')
-                clearAuthCookies(response)
-            } else if (errMsg !== 'auth timeout') {
-                console.warn('[Middleware] Auth check notice:', error.message || error)
-            }
-        }
     } catch (e: any) {
-        console.warn('[Middleware] Auth check exception:', e?.message || e)
-        isTokenInvalid = true
-        clearAuthCookies(response)
+        console.warn('[Middleware] Auth check notice:', e?.message || e)
     }
 
     // Protected Routes Logic
-    if (pathname.startsWith('/dashboard')) {
+    if (isDashboardRoute) {
         if (!user) {
             const redirectResponse = createRedirect('/login')
-            if (isTokenInvalid) {
-                clearAuthCookies(redirectResponse)
-            }
+            clearAuthCookies(redirectResponse)
             return redirectResponse
         }
+        return response
     }
 
     // Auth Routes Logic (Don't let logged-in users see login page)
-    if (['/login', '/request-access'].includes(pathname)) {
+    if (isAuthRoute) {
         if (user) {
             return createRedirect('/dashboard')
         }
-        if (isTokenInvalid) {
-            clearAuthCookies(response)
-        }
+        // If expired on login page, clean dead cookies
+        clearAuthCookies(response)
+        return response
     }
 
     return response

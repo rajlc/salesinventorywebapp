@@ -184,15 +184,48 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
     if (error) throw error
 
     // Transform and Aggegrate
-    // Fetch items for these orders to get statuses
+    // Fetch items for these orders to get statuses (chunked by 50 to prevent URL length overflow)
     const orderIds = data?.map((o: any) => o.id) || []
-    const { data: allItems } = await supabase
-        .from('daraz_order_items')
-        .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
-        .in('order_id', orderIds)
+    let allItems: any[] = []
+    if (orderIds.length > 0) {
+        const CHUNK_SIZE = 50
+        const chunks: string[][] = []
+        for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
+            chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
+        }
+
+        const chunkResults = await Promise.all(
+            chunks.map(chunk =>
+                supabase
+                    .from('daraz_order_items')
+                    .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
+                    .in('order_id', chunk)
+            )
+        )
+
+        chunkResults.forEach(res => {
+            if (res.data) allItems.push(...res.data)
+        })
+    }
 
     const rawOrders = data?.map((order: any) => {
-        const orderItems = allItems?.filter((i: any) => i.order_id === order.id) || []
+        let orderItems = allItems.filter((i: any) => i.order_id === order.id)
+
+        // Fallback: If no rows in daraz_order_items table yet, normalize order.items_detail from Daraz sync
+        if (orderItems.length === 0 && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
+            orderItems = order.items_detail.map((i: any) => ({
+                id: String(i.order_item_id || i.id || ''),
+                order_id: order.id,
+                item_status: i.status || order.order_status,
+                quantity: Number(i.quantity) || 1,
+                product_id: null,
+                product_name: i.name,
+                seller_sku: i.sku || i.shop_sku,
+                amount: Number(i.paid_price || i.item_price || 0),
+                total_amount: Number(i.paid_price || i.item_price || 0)
+            }))
+            allItems.push(...orderItems)
+        }
 
         // Calculate item statuses - use item_status if set, otherwise fallback to main order status
         // Expand based on item quantity to show one status badge per unit
@@ -213,7 +246,7 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
     }) || []
 
     // Calculate exact dynamic profit, receivable or invalid status based on Daraz fees and purchasing prices
-    const orders = await calculateOrderProfitsForOrders(rawOrders, allItems || [])
+    const orders = await calculateOrderProfitsForOrders(rawOrders, allItems)
 
     return {
         orders,
@@ -249,14 +282,13 @@ export async function getAllDarazOrders(params: {
         .select('*', { count: 'exact' })
         .or('deleted.is.null,deleted.eq.false') // Show only non-deleted orders
 
-    // Filter Logic: Hide "Cancel" orders UNLESS they are printed
-    // We construct a filter that says: status is NOT Cancel OR (status IS Cancel AND printed is true)
-    // The database column is 'is_printed' (covers both invoice/awb printing status)
-    // Logic: (order_status.neq.Cancel, is_printed.eq.true)
+    // Filter Logic: Hide "Cancel" and "Unpaid" orders from the order list
     // UNLESS ignoreStatusFilter is true (for Status Sync page)
     if (!ignoreStatusFilter) {
         if (!status || status === 'all') {
-            query = query.or('order_status.neq.Cancel,is_printed.eq.true')
+            query = query
+                .not('order_status', 'ilike', '%cancel%')
+                .not('order_status', 'ilike', '%unpaid%')
         }
     }
 
@@ -409,45 +441,85 @@ export async function getAllDarazOrders(params: {
 }
 
 // Get single order by ID with items
+// Get single order by ID with items (optimized for fast parallel lookup)
 export async function getDarazOrderById(orderId: string) {
     const supabase = await createClient()
 
-    const { data: order, error: orderError } = await supabase
-        .from('daraz_orders_with_totals')
-        .select('*')
-        .eq('id', orderId)
-        .single()
+    // Query base table and items in parallel using indexed primary key / foreign key lookups
+    const [orderRes, itemsRes] = await Promise.all([
+        supabase
+            .from('daraz_orders')
+            .select('*')
+            .eq('id', orderId)
+            .maybeSingle(),
+        supabase
+            .from('daraz_order_items')
+            .select('*, product:products(product_id)')
+            .eq('order_id', orderId)
+            .order('item_sequence')
+    ])
 
-    if (orderError) throw orderError
+    let order = orderRes.data
 
-    const { data: items, error: itemsError } = await supabase
-        .from('daraz_order_items')
-        .select('*, product:products(product_id)')
-        .eq('order_id', orderId)
-        .order('item_sequence')
+    // Graceful fallback to view if base table lookup did not match
+    if (!order) {
+        const { data: viewOrder, error: viewError } = await supabase
+            .from('daraz_orders_with_totals')
+            .select('*')
+            .eq('id', orderId)
+            .single()
 
-    if (itemsError) throw itemsError
+        if (viewError) throw viewError
+        order = viewOrder
+    }
 
-    if (itemsError) throw itemsError
+    let items = itemsRes.data || []
 
-    // Fetch Store Details for Invoice
+    // Fallback: If no rows in daraz_order_items table yet, normalize from order.items_detail
+    if (items.length === 0 && Array.isArray(order?.items_detail) && order.items_detail.length > 0) {
+        items = order.items_detail.map((i: any) => ({
+            id: String(i.order_item_id || i.id || ''),
+            order_id: order.id,
+            item_status: i.status || order.order_status,
+            quantity: Number(i.quantity) || 1,
+            product_id: null,
+            product_name: i.name,
+            seller_sku: i.sku || i.shop_sku,
+            amount: Number(i.paid_price || i.item_price || 0),
+            total_amount: Number(i.paid_price || i.item_price || 0),
+            seller_account: i.seller_account || order.seller_account
+        }))
+    }
+
+    const total_quantity = items.reduce((sum: number, it: any) => sum + (Number(it.quantity) || 1), 0)
+    const grand_total = items.reduce((sum: number, it: any) => sum + (Number(it.total_amount) || (Number(it.amount || 0) * (Number(it.quantity) || 1))), 0)
+    const sellerAccount = items.length > 0 ? items[0].seller_account : (order?.seller_account || null)
+    const firstProductName = items.length > 0 ? items[0].product_name : (order?.first_product_name || null)
+
+    // Fetch Store Details for Invoice if seller_account is present
     let storeDetails = null
-    // Use the seller_account from the first item directly, as it's more reliable than product linkage
-    const sellerAccount = items.length > 0 ? items[0].seller_account : null
-
     if (sellerAccount) {
         const { data: store } = await supabase
             .from('online_stores')
             .select('company_name, address, contact, pan_vat_number')
             .eq('seller_account', sellerAccount)
-            .single()
+            .maybeSingle()
 
         if (store) {
             storeDetails = store
         }
     }
 
-    return { ...order, items, store: storeDetails }
+    return {
+        ...order,
+        items,
+        store: storeDetails,
+        total_quantity: order.total_quantity ?? total_quantity,
+        grand_total: order.grand_total ?? (grand_total > 0 ? grand_total : (order.total_amount || 0)),
+        item_count: items.length,
+        first_product_name: firstProductName,
+        seller_account: sellerAccount
+    }
 }
 
 // Update order

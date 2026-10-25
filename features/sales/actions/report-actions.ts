@@ -176,6 +176,19 @@ function calculateOrderFinancials(order: any, priceMap: Record<string, any>) {
     }
 }
 
+const getCachedPriceReportCatalog = unstable_cache(
+    async () => {
+        const supabase = await createAdminClient()
+        const { data } = await supabase
+            .from('inventory_price_reports_view')
+            .select('product_id, product_code, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4, last_price, est_price')
+            .limit(5000)
+        return data || []
+    },
+    ['inventory-price-reports-catalog-cache'],
+    { revalidate: 60 }
+)
+
 // Fetch detailed order info + inventory price info for the Details Page
 export async function getDarazOrderDetailsForReport(orderNumber: string) {
     const supabase = await createClient()
@@ -237,12 +250,9 @@ export async function getDarazOrderDetailsForReport(orderNumber: string) {
 
     // Fetch by SKU/Name if needed
     if (unlinkedSkus.length > 0 || unlinkedNames.length > 0) {
-        // Fallback: Fetch ALL price data (lightweight view) if any unlinked items exist.
+        // Fallback: Fetch price data (cached for 60s) if any unlinked items exist.
         // This guarantees we find matches without complex dynamic OR queries.
-        const { data: allProducts } = await supabase
-            .from('inventory_price_reports_view')
-            .select('product_id, product_code, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4, last_price, est_price')
-            .limit(5000)
+        const allProducts = await getCachedPriceReportCatalog()
 
         allProductsList = allProducts || []
 

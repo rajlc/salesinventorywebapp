@@ -38,17 +38,18 @@ export function TaskList({ tasks }: TaskListProps) {
     }
 
     return (
-        <Card className="h-full">
-            <CardHeader className="flex flex-row items-center justify-between">
-                <CardTitle className="flex items-center gap-2">
-                    <CheckSquare className="h-5 w-5" />
-                    My Tasks
-                </CardTitle>
-                <Button size="sm" onClick={() => setIsAdding(!isAdding)} variant="outline">
-                    <Plus className="h-4 w-4" />
-                </Button>
-            </CardHeader>
-            <CardContent>
+        <Card className="h-full bg-white dark:bg-zinc-900 border border-slate-200/80 dark:border-zinc-800 shadow-sm rounded-2xl overflow-hidden flex flex-col justify-between">
+            <div>
+                <CardHeader className="flex flex-row items-center justify-between p-5 md:p-6 border-b border-slate-100 dark:border-zinc-800">
+                    <CardTitle className="text-base md:text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                        <CheckSquare className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                        My Tasks
+                    </CardTitle>
+                    <Button size="sm" onClick={() => setIsAdding(!isAdding)} variant="outline" className="rounded-lg h-8 px-2.5 text-xs font-semibold">
+                        <Plus className="h-3.5 w-3.5 mr-1" /> Add Task
+                    </Button>
+                </CardHeader>
+                <CardContent className="p-5 md:p-6">
                 <div className="space-y-3">
                     {isAdding && (
                         <div className="flex gap-2 mb-4">
@@ -105,6 +106,7 @@ export function TaskList({ tasks }: TaskListProps) {
                     )}
                 </div>
             </CardContent>
+            </div>
         </Card>
     )
 }

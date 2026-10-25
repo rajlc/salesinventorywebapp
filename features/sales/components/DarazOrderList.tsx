@@ -867,8 +867,12 @@ export function DarazOrderList({ isEmbedded = false }: DarazOrderListProps) {
                                                         })}
                                                         className="text-[13px] font-mono text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 hover:underline cursor-pointer"
                                                     >
-                                                        <span className="md:hidden">...{order.invoice_number.slice(-5)}</span>
-                                                        <span className="hidden md:inline">{order.invoice_number}</span>
+                                                        <span className="md:hidden">
+                                                            {order.invoice_number
+                                                                ? (order.invoice_number.length > 5 ? `...${order.invoice_number.slice(-5)}` : order.invoice_number)
+                                                                : '—'}
+                                                        </span>
+                                                        <span className="hidden md:inline">{order.invoice_number || '—'}</span>
                                                     </button>
                                                 </td>
                                                 <td className="px-1.5 py-0.5 text-sm text-gray-700 dark:text-gray-300 align-top md:align-middle">

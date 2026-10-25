@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, unstable_cache } from 'next/cache'
 
 export interface PurchasePlan {
     id: string
@@ -192,33 +192,41 @@ export async function checkActiveProductPlan(productId: string): Promise<boolean
     return (count && count > 0) ? true : false
 }
 
+const getCachedActivePlanProductIds = unstable_cache(
+    async () => {
+        const supabase = await createAdminClient()
+
+        const { data } = await supabase
+            .from('purchase_plans')
+            .select('product_id')
+            .in('status', ['Pending', 'Pending Confirmation'])
+
+        if (!data || data.length === 0) return []
+
+        const planProductIds = data.map(plan => plan.product_id).filter(Boolean) as string[]
+
+        if (planProductIds.length === 0) return []
+
+        // Fetch parent combo product IDs that contain these children as components
+        const { data: combos } = await supabase
+            .from('product_combos')
+            .select('parent_product_id')
+            .in('child_product_id', planProductIds)
+
+        const parentIds = combos ? combos.map((c: any) => c.parent_product_id).filter(Boolean) as string[] : []
+
+        // Return union of child IDs and parent combo IDs
+        return Array.from(new Set([...planProductIds, ...parentIds]))
+    },
+    ['active-plan-product-ids'],
+    { revalidate: 30 }
+)
+
 /**
  * Get all active pending plan product IDs
  */
 export async function getActivePlanProductIds(): Promise<string[]> {
-    const supabase = await createClient()
-
-    const { data } = await supabase
-        .from('purchase_plans')
-        .select('product_id')
-        .in('status', ['Pending', 'Pending Confirmation'])
-
-    if (!data) return []
-
-    const planProductIds = data.map(plan => plan.product_id).filter(Boolean) as string[]
-
-    if (planProductIds.length === 0) return []
-
-    // Fetch parent combo product IDs that contain these children as components
-    const { data: combos } = await supabase
-        .from('product_combos')
-        .select('parent_product_id')
-        .in('child_product_id', planProductIds)
-
-    const parentIds = combos ? combos.map((c: any) => c.parent_product_id).filter(Boolean) as string[] : []
-
-    // Return union of child IDs and parent combo IDs
-    return Array.from(new Set([...planProductIds, ...parentIds]))
+    return getCachedActivePlanProductIds()
 }
 
 /**

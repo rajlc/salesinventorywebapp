@@ -1,8 +1,9 @@
 'use client'
 
-import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react'
+import React, { createContext, useContext, useEffect, useState, useMemo, useCallback, ReactNode } from 'react'
 import { supabase } from '@/lib/supabase/client'
 import { useQuery } from '@tanstack/react-query'
+import { getMyPermissions } from '@/features/profile/actions/profile-actions'
 
 export type UserRole = 'admin' | 'editor' | 'user' | 'new_user' | null
 
@@ -121,68 +122,90 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
         },
         enabled: !!userId,
         staleTime: 5 * 60 * 1000, // Consider fresh for 5 minutes
-        refetchOnWindowFocus: true,
+        refetchOnWindowFocus: false,
     })
 
     const role = (userProfile?.role as UserRole) || null
 
-    // Sync role to cache
+    // Sync role to localStorage cache
     useEffect(() => {
         if (role && typeof window !== 'undefined') {
-            localStorage.setItem(CACHE_ROLE_KEY, role)
-            setCachedRole(role)
+            try {
+                localStorage.setItem(CACHE_ROLE_KEY, role)
+            } catch (e) {
+                console.error('Failed to cache role', e)
+            }
         }
     }, [role])
 
     const effectiveRole = role || cachedRole
 
-    // 3. Fetch User Permissions (if restricted)
+    // 3. Fetch User Permissions (if restricted) via secure server action
     const { data: rawPermissions, isLoading: isPermissionsLoading } = useQuery({
         queryKey: ['user-permissions-context', userId],
         queryFn: async () => {
             if (!userId) return []
-            const { data, error } = await supabase
-                .from('user_permissions')
-                .select('id, user_id, main_page_role, sub_page_role, permission_type')
-                .eq('user_id', userId)
-            
-            if (error) throw error
+            const data = await getMyPermissions()
             return data
         },
-        enabled: !!userId && (effectiveRole === 'user' || effectiveRole === 'new_user' || effectiveRole === 'editor'),
+        // Fetch permissions for any non-admin user. Also fetch when effectiveRole is null
+        // (profile row may be missing) so permissions still load correctly.
+        enabled: !!userId && effectiveRole !== 'admin',
         staleTime: 5 * 60 * 1000, // Consider fresh for 5 minutes
-        refetchOnWindowFocus: true,
+        refetchOnWindowFocus: false,
     })
 
-    const permissions: UserPermission[] = (rawPermissions || []) as UserPermission[]
-
-    // Sync permissions to cache
+    // Sync permissions to localStorage cache
     useEffect(() => {
-        if (permissions && permissions.length > 0 && typeof window !== 'undefined') {
-            localStorage.setItem(CACHE_PERMS_KEY, JSON.stringify(permissions))
-            setCachedPermissions(permissions)
+        if (rawPermissions && typeof window !== 'undefined') {
+            try {
+                localStorage.setItem(CACHE_PERMS_KEY, JSON.stringify(rawPermissions))
+            } catch (e) {
+                console.error('Failed to cache permissions', e)
+            }
         }
-    }, [permissions])
+    }, [rawPermissions])
 
-    const effectivePermissions = permissions.length > 0 ? permissions : cachedPermissions
+    const effectivePermissions: UserPermission[] = useMemo(() => {
+        if (rawPermissions && Array.isArray(rawPermissions)) {
+            return rawPermissions as UserPermission[]
+        }
+        return cachedPermissions
+    }, [rawPermissions, cachedPermissions])
 
-    // If cached role is available, do not block the UI with skeletons (instant 0ms render!)
-    const isLoading = (!effectiveRole && isProfileLoading) || (!!userId && isPermissionsLoading && effectiveRole !== 'admin' && effectivePermissions.length === 0)
+    // Show loading while profile or permissions are still resolving.
+    // Specifically: if we have a userId and user is not admin, wait for permissions.
+    const isLoading = isProfileLoading
+        || (!!userId && effectiveRole !== 'admin' && isPermissionsLoading && effectivePermissions.length === 0)
 
     // Helpers
-    const hasPermission = (mainRole: string, subRole?: string) => {
+    const hasPermission = useCallback((mainRole: string, subRole?: string) => {
         if (effectiveRole === 'admin') return true
         
         // Editor, User, and New User all need explicit permissions in the database
-        return effectivePermissions.some(p => {
-            if (subRole) {
-                return p.main_page_role === mainRole && p.sub_page_role === subRole
-            }
-            return p.main_page_role === mainRole
-        })
-    }
+        const targetMain = (mainRole || '').toLowerCase().trim()
+        const targetSub = (subRole || '').toLowerCase().trim()
 
-    const canEdit = (mainRole: string, subRole?: string) => {
+        return effectivePermissions.some(p => {
+            const pMain = (p.main_page_role || '').toLowerCase().trim()
+            const pSub = (p.sub_page_role || '').toLowerCase().trim()
+
+            // Handle interchangeable role names (e.g., Accounts vs Finance)
+            const mainMatches = pMain === targetMain || 
+                (targetMain === 'accounts' && pMain === 'finance') ||
+                (targetMain === 'finance' && pMain === 'accounts')
+
+            if (!mainMatches) return false
+
+            if (targetSub) {
+                if (pSub === pMain || !pSub || pSub === 'all' || pSub === 'all pages') return true
+                return pSub === targetSub
+            }
+            return true
+        })
+    }, [effectiveRole, effectivePermissions])
+
+    const canEdit = useCallback((mainRole: string, subRole?: string) => {
         if (effectiveRole === 'admin') return true
         
         // Editor has full edit access if they have permission to the page at all
@@ -191,25 +214,39 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
         }
 
         // For user / new_user, they need specific 'edit' or 'all' permission type
+        const targetMain = (mainRole || '').toLowerCase().trim()
+        const targetSub = (subRole || '').toLowerCase().trim()
+
         const perm = effectivePermissions.find(p => {
-            if (subRole) {
-                return p.main_page_role === mainRole && p.sub_page_role === subRole
+            const pMain = (p.main_page_role || '').toLowerCase().trim()
+            const pSub = (p.sub_page_role || '').toLowerCase().trim()
+
+            const mainMatches = pMain === targetMain ||
+                (targetMain === 'accounts' && pMain === 'finance') ||
+                (targetMain === 'finance' && pMain === 'accounts')
+
+            if (!mainMatches) return false
+            if (targetSub) {
+                if (pSub === pMain || !pSub || pSub === 'all' || pSub === 'all pages') return true
+                return pSub === targetSub
             }
-            return p.main_page_role === mainRole
+            return true
         })
 
         return !!perm && (perm.permission_type === 'edit' || perm.permission_type === 'all')
-    }
+    }, [effectiveRole, effectivePermissions, hasPermission])
+
+    const contextValue = useMemo(() => ({
+        userRole: effectiveRole,
+        permissions: effectivePermissions,
+        isLoading,
+        isMounted,
+        hasPermission,
+        canEdit
+    }), [effectiveRole, effectivePermissions, isLoading, isMounted, hasPermission, canEdit])
 
     return (
-        <PermissionContext.Provider value={{
-            userRole: effectiveRole,
-            permissions: effectivePermissions,
-            isLoading,
-            isMounted,
-            hasPermission,
-            canEdit
-        }}>
+        <PermissionContext.Provider value={contextValue}>
             {children}
         </PermissionContext.Provider>
     )

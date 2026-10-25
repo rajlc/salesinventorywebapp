@@ -1,7 +1,15 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+
+export interface UserPermissionItem {
+    id: string
+    user_id: string
+    main_page_role: string | null
+    sub_page_role: string | null
+    permission_type: 'view' | 'edit' | 'all'
+}
 
 export interface UserTask {
     id: string
@@ -33,17 +41,87 @@ export async function getProfile() {
         return null
     }
 
-    const { data: profile } = await supabase
+    const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .select('*')
         .eq('id', user.id)
         .single()
 
+    // If no profile row exists, auto-create one with default role 'user'
+    if (!profile || (profileError && profileError.code === 'PGRST116')) {
+        try {
+            const admin = await createAdminClient()
+            const { data: newProfile } = await admin
+                .from('user_profiles')
+                .upsert({
+                    id: user.id,
+                    full_name: (user.user_metadata?.full_name as string) || null,
+                    role: 'user',
+                    status: 'pending',
+                })
+                .select('*')
+                .single()
+
+            return {
+                ...(newProfile || {}),
+                role: 'user',
+                email: user.email || '',
+                full_name: newProfile?.full_name || null,
+                phone_number: '',
+                address: ''
+            }
+        } catch (e) {
+            console.error('Failed to auto-create profile', e)
+            // Return minimal profile so page doesn't crash
+            return {
+                id: user.id,
+                role: 'user',
+                email: user.email || '',
+                full_name: null,
+                phone_number: '',
+                address: ''
+            }
+        }
+    }
+
     return {
         ...profile,
-        email: user.email,
+        role: profile?.role || (user.user_metadata?.role as string) || 'user',
+        email: user.email || '',
+        full_name: profile?.full_name || (user.user_metadata?.full_name as string) || null,
         phone_number: profile?.phone_number || '',
         address: profile?.address || ''
+    }
+}
+
+// Get current user permissions (safe fallback with admin client to bypass any RLS issue)
+export async function getMyPermissions(): Promise<UserPermissionItem[]> {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return []
+
+    // 1. Try standard query
+    const { data: perms } = await supabase
+        .from('user_permissions')
+        .select('id, user_id, main_page_role, sub_page_role, permission_type')
+        .eq('user_id', user.id)
+
+    if (perms && perms.length > 0) {
+        return perms as UserPermissionItem[]
+    }
+
+    // 2. Safe fallback via adminClient in case RLS limits regular users
+    try {
+        const admin = await createAdminClient()
+        const { data: adminPerms } = await admin
+            .from('user_permissions')
+            .select('id, user_id, main_page_role, sub_page_role, permission_type')
+            .eq('user_id', user.id)
+
+        return (adminPerms || []) as UserPermissionItem[]
+    } catch (err) {
+        console.error('Error fetching user permissions via admin client:', err)
+        return []
     }
 }
 
