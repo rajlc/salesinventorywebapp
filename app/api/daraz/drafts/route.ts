@@ -16,6 +16,9 @@ export async function GET() {
             ...item,
             product_link: item.attributes?.product_link || null,
             draft_type: item.attributes?.draft_type || null,
+            mrp_price: item.attributes?.mrp_price !== undefined && item.attributes?.mrp_price !== null
+                ? Number(item.attributes.mrp_price)
+                : (item.mrp_price !== undefined && item.mrp_price !== null ? Number(item.mrp_price) : null),
             campaign_price: item.campaign_price !== undefined && item.campaign_price !== null
                 ? Number(item.campaign_price)
                 : (item.attributes?.campaign_price !== undefined && item.attributes?.campaign_price !== null ? Number(item.attributes.campaign_price) : null)
@@ -110,12 +113,16 @@ export async function POST(req: NextRequest) {
         })
 
         const campaignPrice = body.campaign_price !== undefined && body.campaign_price !== null ? Number(body.campaign_price) : null
+        const mrpPrice = body.mrp_price !== undefined && body.mrp_price !== null
+            ? Number(body.mrp_price)
+            : (body.attributes?.mrp_price !== undefined && body.attributes?.mrp_price !== null ? Number(body.attributes.mrp_price) : null)
 
         const attributesPayload = {
             ...(body.attributes || {}),
             product_link: productLink,
             draft_type: draftType,
-            ...(campaignPrice !== null ? { campaign_price: campaignPrice } : {})
+            ...(campaignPrice !== null ? { campaign_price: campaignPrice } : {}),
+            ...(mrpPrice !== null ? { mrp_price: mrpPrice } : {})
         }
 
         const insertRow: Record<string, any> = {
@@ -165,6 +172,9 @@ export async function POST(req: NextRequest) {
             ...data,
             product_link: data.attributes?.product_link || null,
             draft_type: data.attributes?.draft_type || null,
+            mrp_price: data.attributes?.mrp_price !== undefined && data.attributes?.mrp_price !== null
+                ? Number(data.attributes.mrp_price)
+                : (data.mrp_price !== undefined && data.mrp_price !== null ? Number(data.mrp_price) : null),
             campaign_price: data.campaign_price !== undefined && data.campaign_price !== null
                 ? Number(data.campaign_price)
                 : (data.attributes?.campaign_price !== undefined && data.attributes?.campaign_price !== null ? Number(data.attributes.campaign_price) : null)
@@ -237,6 +247,10 @@ export async function PATCH(req: NextRequest) {
             mergedAttributes.campaign_price = fields.campaign_price !== null ? Number(fields.campaign_price) : null
         }
 
+        if (fields.mrp_price !== undefined) {
+            mergedAttributes.mrp_price = fields.mrp_price !== null ? Number(fields.mrp_price) : null
+        }
+
         const productLink = mergedAttributes.product_link || null
         const images = fields.images !== undefined ? fields.images : existing.images
         const rawName = fields.raw_name !== undefined ? fields.raw_name : existing.raw_name
@@ -296,6 +310,9 @@ export async function PATCH(req: NextRequest) {
             ...data,
             product_link: data.attributes?.product_link || null,
             draft_type: data.attributes?.draft_type || null,
+            mrp_price: data.attributes?.mrp_price !== undefined && data.attributes?.mrp_price !== null
+                ? Number(data.attributes.mrp_price)
+                : (data.mrp_price !== undefined && data.mrp_price !== null ? Number(data.mrp_price) : null),
             campaign_price: data.campaign_price !== undefined && data.campaign_price !== null
                 ? Number(data.campaign_price)
                 : (data.attributes?.campaign_price !== undefined && data.attributes?.campaign_price !== null ? Number(data.attributes.campaign_price) : null)

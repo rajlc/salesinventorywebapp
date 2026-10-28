@@ -56,6 +56,7 @@ interface DraftListing {
     supplier_id?: string
     wholesale_price?: number
     campaign_price?: number
+    mrp_price?: number
     category_commission_rate?: number
     product_link?: string
     draft_type?: 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed'
@@ -74,6 +75,7 @@ interface BulkAddRow {
     price?: number
     special_price?: number
     campaign_price?: number
+    mrp_price?: number
     supplier_id?: string
     wholesale_price?: number
     extractedCategory?: { id: number; path: string }
@@ -237,6 +239,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [selectedSupplierId, setSelectedSupplierId] = useState<string>('')
     const [wholesalePrice, setWholesalePrice] = useState<number | undefined>(undefined)
     const [campaignPrice, setCampaignPrice] = useState<number | undefined>(undefined)
+    const [mrpPrice, setMrpPrice] = useState<number | undefined>(undefined)
 
     // ── Quick Edit Modals on Card (Desktop) ─────────────────────────────────
     const [imageModalDraft, setImageModalDraft] = useState<DraftListing | null>(null)
@@ -1339,6 +1342,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 supplier_id: selectedSupplierId || null,
                 wholesale_price: wholesalePrice || null,
                 campaign_price: campaignPrice || null,
+                mrp_price: mrpPrice || null,
                 status: 'draft'
             }
 
@@ -1757,6 +1761,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     price: r.price || null,
                     special_price: r.special_price || null,
                     campaign_price: r.campaign_price || null,
+                    mrp_price: r.mrp_price || null,
                     supplier_id: r.supplier_id || null,
                     wholesale_price: r.wholesale_price || null,
                     status: 'draft'
@@ -1930,6 +1935,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setSelectedSupplierId(draft.supplier_id || '')
         setWholesalePrice(draft.wholesale_price || undefined)
         setCampaignPrice(draft.campaign_price || (draft as any).attributes?.campaign_price || undefined)
+        setMrpPrice(draft.mrp_price || (draft as any).attributes?.mrp_price || undefined)
         
         // Populate titles per store from draft.titles_per_store and draft.title fallback
         const initialTitles: Record<string, string> = { ...(draft.titles_per_store || {}) }
@@ -2135,6 +2141,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     wholesale_price: draft.wholesale_price || undefined,
                     sales_price: draft.special_price || undefined,
                     campaign_price: draft.campaign_price || (draft as any).attributes?.campaign_price || undefined,
+                    mrp_price: draft.mrp_price || (draft as any).attributes?.mrp_price || mrpPrice || undefined,
+                    mrpPrice: draft.mrp_price || (draft as any).attributes?.mrp_price || mrpPrice || undefined,
                     skus: [{
                         price: draft.price || 100,
                         specialPrice: draft.special_price || undefined,
@@ -2303,6 +2311,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     wholesale_price: wholesalePrice || undefined,
                     sales_price: specialPrice || undefined,
                     campaign_price: campaignPrice || undefined,
+                    mrp_price: mrpPrice || undefined,
+                    mrpPrice: mrpPrice || undefined,
                     skus: finalSkus,
                     images
                 })
@@ -4340,7 +4350,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             value={row.special_price || ''}
                                             onChange={(e) => {
                                                 const next = [...bulkRows]
-                                                const val = e.target.value ? Number(e.target.value) : undefined
+                                                let val = e.target.value ? Number(e.target.value) : undefined
+                                                if (val && row.mrp_price && val > row.mrp_price) {
+                                                    alert(`Sales price cannot be greater than MRP price (NPR ${row.mrp_price})`)
+                                                    val = row.mrp_price
+                                                }
                                                 next[idx].special_price = val
                                                 next[idx].price = (val && val > 0) ? val + 200 : undefined
                                                 setBulkRows(next)
@@ -4407,6 +4421,32 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 </div>
                                             )
                                         })()}
+                                    </div>
+
+                                    {/* MRP Price */}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-bold text-gray-700 dark:text-zinc-300 block">
+                                            MRP Price (NPR)
+                                            <span className="text-[10px] text-emerald-600 font-semibold ml-1">(Optional)</span>
+                                        </label>
+                                        <input
+                                            type="number"
+                                            placeholder="MRP Price"
+                                            value={row.mrp_price || ''}
+                                            onChange={(e) => {
+                                                const next = [...bulkRows]
+                                                const val = e.target.value ? Number(e.target.value) : undefined
+                                                next[idx].mrp_price = val
+                                                if (val && val > 0) {
+                                                    next[idx].special_price = val
+                                                    if (!next[idx].price || next[idx].price <= val) {
+                                                        next[idx].price = val + 200
+                                                    }
+                                                }
+                                                setBulkRows(next)
+                                            }}
+                                            className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                                        />
                                     </div>
                                 </div>
 
@@ -4665,7 +4705,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 Link a supplier and prices for internal inventory tracking and profit calculation on Daraz Average Sales Price.
                             </p>
                         </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                             {/* Supplier Dropdown */}
                             <div className="space-y-1.5">
                                 <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
@@ -4712,6 +4752,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     value={specialPrice !== undefined && specialPrice !== null ? specialPrice : ''}
                                     onChange={(e) => {
                                         const val = e.target.value ? Number(e.target.value) : undefined
+                                        if (val && mrpPrice && val > mrpPrice) {
+                                            alert(`Sales price cannot be greater than MRP price (NPR ${mrpPrice})`)
+                                            setSpecialPrice(mrpPrice)
+                                            patchDraft({ special_price: mrpPrice })
+                                            return
+                                        }
                                         setSpecialPrice(val)
                                         if (val && (!sellingPrice || sellingPrice <= val)) {
                                             setSellingPrice(val + 200)
@@ -4789,6 +4835,37 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         </div>
                                     )
                                 })()}
+                            </div>
+
+                            {/* MRP Price Input */}
+                            <div className="space-y-1.5">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 block">
+                                    MRP Price (NPR)
+                                    <span className="text-[10px] text-emerald-600 font-semibold ml-1">(Optional)</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    placeholder="e.g. 600"
+                                    value={mrpPrice !== undefined && mrpPrice !== null ? mrpPrice : ''}
+                                    onChange={(e) => {
+                                        const val = e.target.value ? Number(e.target.value) : undefined
+                                        setMrpPrice(val)
+                                        if (val) {
+                                            // auto set sales price too
+                                            setSpecialPrice(val)
+                                            if (!sellingPrice || sellingPrice <= val) {
+                                                setSellingPrice(val + 200)
+                                            }
+                                            patchDraft({ mrp_price: val, special_price: val })
+                                        } else {
+                                            patchDraft({ mrp_price: undefined })
+                                        }
+                                    }}
+                                    className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
+                                />
+                                {mrpPrice ? (
+                                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400 truncate">Max cap for Sales Price</p>
+                                ) : null}
                             </div>
                         </div>
                     </div>

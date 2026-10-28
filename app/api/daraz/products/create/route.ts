@@ -53,7 +53,9 @@ export async function POST(request: NextRequest) {
             sales_price,
             salesPrice,
             campaign_price,
-            campaignPrice
+            campaignPrice,
+            mrp_price,
+            mrpPrice
         } = body
 
         if (!storeIds && storeId) {
@@ -477,6 +479,25 @@ export async function POST(request: NextRequest) {
 
                         if (avgErr) {
                             console.error('[DarazCreate] Failed to upsert daraz_avg_prices:', avgErr.message)
+                        }
+                    }
+
+                    // Auto-insert MRP price into mrp_prices if provided
+                    const targetMrpPrice = mrp_price ?? mrpPrice ?? attributes?.mrp_price
+                    if (targetMrpPrice !== undefined && targetMrpPrice !== null && String(targetMrpPrice).trim() !== '' && !isNaN(Number(targetMrpPrice)) && Number(targetMrpPrice) > 0) {
+                        const mrpPriceNum = Number(targetMrpPrice)
+                        const effectiveName = rawProductName || name || 'Product'
+                        console.log(`[DarazCreate] Saving MRP price NPR ${mrpPriceNum} for "${effectiveName}" into mrp_prices...`)
+                        const { error: mrpErr } = await supabase
+                            .from('mrp_prices')
+                            .insert({
+                                product_name: effectiveName,
+                                inventory_id: targetProductId || null,
+                                mrp_price: mrpPriceNum,
+                                applied_date: new Date().toISOString().split('T')[0]
+                            })
+                        if (mrpErr) {
+                            console.error('[DarazCreate] Failed to insert into mrp_prices:', mrpErr.message)
                         }
                     }
                 }
