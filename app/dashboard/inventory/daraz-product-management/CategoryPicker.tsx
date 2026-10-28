@@ -1,7 +1,5 @@
-'use client'
-
-import { useState, useEffect } from 'react'
-import { Folder, Search, ChevronRight, Sparkles, Loader2 } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Folder, Search, ChevronRight, Loader2 } from 'lucide-react'
 
 interface Category {
     category_id: number
@@ -15,7 +13,6 @@ interface CategoryPickerProps {
     selectedCategoryId: number | null
     selectedCategoryPath?: string | null
     onSelectCategory: (categoryId: number, path: string) => void
-    // When set, the AI-suggested path — used to BOTH show top suggestion AND auto-select
     autoSelectCategoryPath?: string | null
 }
 
@@ -25,11 +22,21 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
 
     const [searchQuery, setSearchQuery] = useState('')
     const [searchResults, setSearchResults] = useState<Array<{ id: number; path: string }>>([])
-    const [suggestions, setSuggestions] = useState<Array<{ id: number; path: string; isAiSuggested?: boolean }>>([])
+    const [suggestions, setSuggestions] = useState<Array<{ id: number; path: string }>>([])
     const [fetchingSuggestions, setFetchingSuggestions] = useState(false)
 
     const [isBrowsing, setIsBrowsing] = useState(false)
     const [currentPath, setCurrentPath] = useState<Category[]>([])
+    const lastAutoSelectedTitleRef = useRef<string>('')
+    const initialCategoryMountedRef = useRef<boolean>(false)
+
+    // Preserve existing category on mount when editing an existing product
+    useEffect(() => {
+        if (!initialCategoryMountedRef.current && selectedCategoryId) {
+            initialCategoryMountedRef.current = true
+            lastAutoSelectedTitleRef.current = productName ? productName.trim() : ''
+        }
+    }, [selectedCategoryId, productName])
 
     // Load category tree (cached in sessionStorage)
     useEffect(() => {
@@ -57,13 +64,12 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
     }, [])
 
     // Core tree-traversal scoring function
-    // Returns best matching candidates from the category tree
     const findBestMatches = (searchPath: string, limit = 6): Array<{ id: number; path: string; score: number }> => {
         if (categories.length === 0) return []
 
         const segments = searchPath.toLowerCase().split('>').map(s => s.trim())
-        const leafName = segments[segments.length - 1]
-        const leafTokens = leafName.split(/\s+/).filter(t => t.length > 2)
+        const leafName = segments[segments.length - 1] || ''
+        const leafTokens = leafName.replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 2)
 
         const candidates: Array<{ id: number; path: string; score: number }> = []
 
@@ -74,29 +80,27 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
                 const nodePathLower = currentPathName.toLowerCase()
                 let score = 0
 
-                // Exact leaf name match = highest score
                 if (nodeLower === leafName) {
                     score = 200
-                }
-                // Leaf name contains or is contained in the target leaf
-                else if (nodeLower.includes(leafName) || leafName.includes(nodeLower)) {
+                } else if (leafName && (nodeLower.includes(leafName) || leafName.includes(nodeLower))) {
                     score = 100
-                }
-                else {
-                    // Token-level matching on the leaf node name
+                } else {
                     leafTokens.forEach(token => {
-                        const regex = new RegExp(`\\b${token}s?\\b`, 'i')
-                        if (regex.test(nodeLower)) score += 20
-                        else if (nodeLower.includes(token)) score += 8
+                        try {
+                            const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                            const regex = new RegExp(`\\b${escaped}s?\\b`, 'i')
+                            if (regex.test(nodeLower)) score += 20
+                            else if (nodeLower.includes(token)) score += 8
+                        } catch {
+                            if (nodeLower.includes(token)) score += 8
+                        }
                     })
                 }
 
-                // Bonus: parent path segment matching (improves disambiguation)
                 segments.slice(0, -1).forEach((seg, idx) => {
-                    const segTokens = seg.split(/\s+/).filter(t => t.length > 2)
+                    const segTokens = seg.replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 2)
                     segTokens.forEach(token => {
                         if (nodePathLower.includes(token)) {
-                            // Higher weight for closer parent segments
                             score += (idx === segments.length - 2) ? 15 : 5
                         }
                     })
@@ -114,9 +118,10 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
         return candidates.sort((a, b) => b.score - a.score).slice(0, limit)
     }
 
-    // Fetch category suggestions from Daraz open platform API
+    // Fetch fast category suggestions from Daraz category service
     useEffect(() => {
-        if (!productName || productName.trim().length < 3 || categories.length === 0) {
+        const cleanName = productName ? productName.trim() : ''
+        if (!cleanName || cleanName.length < 2 || cleanName.startsWith('[Image Only]')) {
             setSuggestions([])
             return
         }
@@ -124,59 +129,63 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
         const fetchSuggestions = async () => {
             setFetchingSuggestions(true)
             try {
-                const res = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(productName)}`)
+                const res = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(cleanName)}`)
                 const json = await res.json()
-                if (json.success && json.paths && json.paths.length > 0) {
-                    const matchedSuggestions: Array<{ id: number; path: string; isAiSuggested: boolean }> = []
-                    const matchedIds = new Set<number>()
-
-                    json.paths.forEach((p: string) => {
-                        const matches = findBestMatches(p, 3)
-                        matches.forEach(m => {
-                            if (!matchedIds.has(m.id)) {
-                                matchedIds.add(m.id)
-                                matchedSuggestions.push({
-                                    id: m.id,
-                                    path: m.path,
-                                    isAiSuggested: true
-                                })
-                            }
-                        })
-                    })
-
-                    setSuggestions(matchedSuggestions)
-
-                    // Auto-select the top matching category if nothing is selected
-                    if (!selectedCategoryId && matchedSuggestions.length > 0) {
-                        onSelectCategory(matchedSuggestions[0].id, matchedSuggestions[0].path)
+                if (json.success && json.suggestions && json.suggestions.length > 0) {
+                    const idToPath = new Map<number, string>()
+                    const walk = (node: Category, parent = '') => {
+                        const p = parent ? `${parent} > ${node.name}` : node.name
+                        if (node.leaf) idToPath.set(Number(node.category_id), p)
+                        else node.children?.forEach(c => walk(c, p))
                     }
-                } else {
+                    categories.forEach(r => walk(r))
+
+                    const darazSuggestions = json.suggestions.map((s: { id: number; path: string }) => ({
+                        id: Number(s.id),
+                        path: idToPath.get(Number(s.id)) || String(s.path).split('>').map(x => x.trim()).join(' > '),
+                    }))
+                    setSuggestions(darazSuggestions)
+
+                    // Auto-select the top matching category if nothing is selected OR if product title changed
+                    if (darazSuggestions.length > 0) {
+                        const isNewTitle = lastAutoSelectedTitleRef.current !== cleanName
+                        if (!selectedCategoryId || isNewTitle) {
+                            lastAutoSelectedTitleRef.current = cleanName
+                            onSelectCategory(darazSuggestions[0].id, darazSuggestions[0].path)
+                        }
+                    }
+                } else if (categories.length > 0) {
                     // Fallback to client-side match
-                    const enrichedSearch = enrichProductName(productName)
-                    const candidates = findBestMatches(enrichedSearch, 6)
-                    const mapped = candidates.map(c => ({ id: c.id, path: c.path, isAiSuggested: false }))
+                    const enrichedSearch = enrichProductName(cleanName)
+                    const candidates = findBestMatches(enrichedSearch, 4)
+                    const mapped = candidates.map(c => ({ id: c.id, path: c.path }))
                     setSuggestions(mapped)
-                    if (!selectedCategoryId && mapped.length > 0) {
-                        onSelectCategory(mapped[0].id, mapped[0].path)
+                    if (mapped.length > 0) {
+                        const isNewTitle = lastAutoSelectedTitleRef.current !== cleanName
+                        if (!selectedCategoryId || isNewTitle) {
+                            lastAutoSelectedTitleRef.current = cleanName
+                            onSelectCategory(mapped[0].id, mapped[0].path)
+                        }
                     }
                 }
             } catch (err) {
-                console.error('Failed to fetch category suggestions from Daraz API:', err)
-                // Fallback to client-side match
-                const enrichedSearch = enrichProductName(productName)
-                const candidates = findBestMatches(enrichedSearch, 6)
-                const mapped = candidates.map(c => ({ id: c.id, path: c.path, isAiSuggested: false }))
-                setSuggestions(mapped)
-                if (!selectedCategoryId && mapped.length > 0) {
-                    onSelectCategory(mapped[0].id, mapped[0].path)
+                console.error('Failed to fetch category suggestions:', err)
+                if (categories.length > 0) {
+                    const enrichedSearch = enrichProductName(cleanName)
+                    const candidates = findBestMatches(enrichedSearch, 4)
+                    const mapped = candidates.map(c => ({ id: c.id, path: c.path }))
+                    setSuggestions(mapped)
+                    if (mapped.length > 0 && !selectedCategoryId) {
+                        onSelectCategory(mapped[0].id, mapped[0].path)
+                    }
                 }
             } finally {
                 setFetchingSuggestions(false)
             }
         }
 
-        // Debounce calls slightly to prevent excessive API requests while typing
-        const timer = setTimeout(fetchSuggestions, 500)
+        // Fast debounce: 200ms
+        const timer = setTimeout(fetchSuggestions, 200)
         return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [productName, categories])
@@ -298,11 +307,9 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
                             Category Suggestions
                             {fetchingSuggestions && <Loader2 className="animate-spin text-orange-500" size={12} />}
                         </span>
-                        {suggestions.some(s => s.isAiSuggested) && (
-                            <span className="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold flex items-center gap-1">
-                                <Sparkles size={10} /> AI Suggested
-                            </span>
-                        )}
+                        <span className="text-[10px] text-gray-400 font-medium">
+                            Daraz Categories
+                        </span>
                     </div>
                     <div className="space-y-2">
                         {suggestions.map(sug => (
@@ -315,13 +322,10 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
                                     name="category_suggestion"
                                     checked={selectedCategoryId === sug.id}
                                     onChange={() => onSelectCategory(sug.id, sug.path)}
-                                    className="mt-0.5 text-orange-600 border-gray-300 focus:ring-orange-500"
+                                    className="mt-0.5 text-orange-600 border-gray-300 focus:ring-orange-500 cursor-pointer"
                                 />
-                                <span className={`${selectedCategoryId === sug.id ? 'font-bold text-orange-600' : ''} ${sug.isAiSuggested ? 'font-medium' : ''}`}>
+                                <span className={`${selectedCategoryId === sug.id ? 'font-semibold text-orange-600 dark:text-orange-400' : 'font-normal'}`}>
                                     {sug.path}
-                                    {sug.isAiSuggested && selectedCategoryId === sug.id && (
-                                        <span className="ml-1 text-[9px] bg-orange-100 text-orange-500 px-1 py-0.5 rounded font-bold">AI Pick</span>
-                                    )}
                                 </span>
                             </label>
                         ))}

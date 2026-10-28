@@ -78,10 +78,21 @@ function normalizeStem(word: string): string {
     if (!word) return ''
     let w = word.toLowerCase().trim()
     if (w.endsWith('ies') && w.length > 4) return w.slice(0, -3) + 'y'
+    if (w.endsWith('ing') && w.length > 5) return w.slice(0, -3)
+    if (w.endsWith('ers') && w.length > 5) return w.slice(0, -3)
+    if (w.endsWith('er') && w.length > 4) return w.slice(0, -2)
+    if (w.endsWith('al') && w.length > 4) return w.slice(0, -2)
     if (w.endsWith('es') && w.length > 4) return w.slice(0, -2)
+    if (w.endsWith('ed') && w.length > 4) return w.slice(0, -2)
     if (w.endsWith('s') && w.length > 3 && !w.endsWith('ss')) return w.slice(0, -1)
     return w
 }
+
+const GENERIC_MODIFIERS = new Set([
+    'electric', 'automatic', 'manual', 'mini', 'small', 'large', 
+    'device', 'set', 'charging', 'portable', 'universal', 'new', 
+    'multi', 'pro', 'implement', 'pack', 'theme', 'red', 'black', 'white'
+])
 
 /**
  * Search official Daraz leaf categories by keyword, category path, or product title.
@@ -107,6 +118,12 @@ export async function searchDarazCategories(
         .split(/\s+/)
         .filter(t => t.length >= 2)
     const queryStems = Array.from(new Set(rawTokens.map(normalizeStem)))
+
+    // Extract 2-word bigrams from the query for exact phrase bonus (e.g. "hair removal", "kids bag")
+    const bigrams: string[] = []
+    for (let i = 0; i < rawTokens.length - 1; i++) {
+        bigrams.push(`${rawTokens[i]} ${rawTokens[i + 1]}`)
+    }
 
     const scored: Array<DarazCategoryLeaf & { score: number }> = []
 
@@ -142,7 +159,16 @@ export async function searchDarazCategories(
             }
         }
 
-        // ── 2. KEYWORD / EXACT STEM MATCHING ─────────────
+        // ── 2. BIGRAM / PHRASE MATCHING ─────────────
+        for (const bg of bigrams) {
+            if (nameLower.includes(bg)) {
+                score += 1200
+            } else if (pathLower.includes(bg)) {
+                score += 600
+            }
+        }
+
+        // ── 3. KEYWORD / EXACT STEM MATCHING ─────────────
         const nameWords = item.name
             .toLowerCase()
             .replace(/[&|,\-_()]/g, ' ')
@@ -161,20 +187,57 @@ export async function searchDarazCategories(
         let matchedPathCount = 0
 
         for (const qStem of queryStems) {
+            const isModifier = GENERIC_MODIFIERS.has(qStem)
+            const tokenWeight = isModifier ? 25 : 200
+
             if (nameStems.includes(qStem)) {
-                score += 150
-                matchedNameCount++
+                score += tokenWeight
+                if (!isModifier) matchedNameCount++
             } else if (pathStems.includes(qStem)) {
-                score += 30
-                matchedPathCount++
+                score += isModifier ? 10 : 50
+                if (!isModifier) matchedPathCount++
             }
         }
 
         if (matchedNameCount > 1) {
-            score += matchedNameCount * 250
+            score += matchedNameCount * 450
         }
         if (matchedNameCount > 0 && matchedPathCount > 0) {
-            score += 80
+            score += 150
+        }
+
+        // ── 4. DOMAIN RULES & FALSE-FRIEND MOTIF GUARDS ──
+        // (a) Solar lighting: solar/sun + light/lamp/warning -> Furniture & Decor > Lighting > Outdoor Lighting
+        if ((cleanQuery.includes('solar') || cleanQuery.includes('sun')) && 
+            (cleanQuery.includes('light') || cleanQuery.includes('lamp') || cleanQuery.includes('warning'))) {
+            if (item.id === 10000647 || pathLower.includes('lighting > outdoor lighting')) {
+                score += 3500
+            }
+        }
+
+        // (b) Evil eye / motif design guard:
+        // Do not match Health & Beauty > Makeup / Eyes if it's a design motif without beauty context
+        if (cleanQuery.includes('evil eye') || (cleanQuery.includes('eye') && cleanQuery.includes('design'))) {
+            const hasBeautyContext = /makeup|cosmetic|shadow|liner|mascara|primer|beauty|skin care|cream|serum/.test(cleanQuery)
+            if (!hasBeautyContext && pathLower.startsWith('health & beauty')) {
+                score -= 3000
+            }
+        }
+
+        // (c) "Phone camera flash lights":
+        // Only match if the query explicitly mentions "phone camera", "mobile flash", or "selfie light"
+        if (item.id === 10002878 && !/phone|mobile|selfie|camera flash/.test(cleanQuery)) {
+            score -= 2000
+        }
+
+        // (d) Kids backpacks: kids/child/school + bag/backpack
+        if ((cleanQuery.includes('kid') || cleanQuery.includes('school') || cleanQuery.includes('child')) && 
+            (cleanQuery.includes('bag') || cleanQuery.includes('backpack'))) {
+            if (pathLower.includes('kids bags > backpacks') || item.id === 10001957) {
+                score += 2500
+            } else if (pathLower.includes('kids bags') || item.id === 10002765) {
+                score += 1500
+            }
         }
 
         if (score > 0) {
@@ -195,55 +258,38 @@ export async function resolveBestCategory(
     productName: string,
     categoryHint?: string
 ): Promise<{ id: number; path: string } | null> {
-    if (categoryHint && categoryHint.trim()) {
-        const hintMatches = await searchDarazCategories(categoryHint, 15)
-        if (hintMatches.length > 0) {
-            if (productName && productName.trim() && hintMatches.length > 1) {
-                const prodTokens = productName
-                    .toLowerCase()
-                    .replace(/[>/&|,\-_()]/g, ' ')
-                    .split(/\s+/)
-                    .filter(t => t.length >= 2)
-                    .map(normalizeStem)
+    if (productName && productName.trim()) {
+        const segments = productName.split(/[|,\/]/).map(s => s.trim()).filter(s => s.length > 2)
+        const queries = segments.length > 1 ? [productName, ...segments] : [productName]
+        const results = await Promise.all(queries.map(q => searchDarazCategories(q, 6)))
 
-                let bestCandidate = hintMatches[0]
-                let maxBonus = 0
-
-                for (const cand of hintMatches) {
-                    const candStems = cand.name
-                        .toLowerCase()
-                        .replace(/[&|,\-_()]/g, ' ')
-                        .split(/\s+/)
-                        .map(normalizeStem)
-
-                    let bonus = 0
-                    for (const pt of prodTokens) {
-                        if (candStems.includes(pt)) {
-                            bonus += 500
-                        }
-                    }
-
-                    if (bonus > maxBonus) {
-                        maxBonus = bonus
-                        bestCandidate = cand
-                    }
-                }
-
-                if (maxBonus > 0) {
-                    return { id: bestCandidate.id, path: bestCandidate.path }
+        const candidateMap = new Map<number, { leaf: DarazCategoryLeaf; score: number }>()
+        for (let qIdx = 0; qIdx < queries.length; qIdx++) {
+            const list = results[qIdx]
+            for (let rank = 0; rank < list.length; rank++) {
+                const item = list[rank]
+                const rankMultiplier = Math.max(0.4, 1 - rank * 0.15)
+                const candidateScore = item.score * rankMultiplier
+                const existing = candidateMap.get(item.id)
+                if (!existing) {
+                    candidateMap.set(item.id, { leaf: item, score: candidateScore })
+                } else {
+                    existing.score = Math.max(existing.score, candidateScore) + candidateScore * 0.35
                 }
             }
+        }
+        const sorted = Array.from(candidateMap.values()).sort((a, b) => b.score - a.score)
+        if (sorted.length > 0 && sorted[0].score > 100) {
+            return { id: sorted[0].leaf.id, path: sorted[0].leaf.path }
+        }
+    }
 
+    if (categoryHint && categoryHint.trim()) {
+        const hintMatches = await searchDarazCategories(categoryHint, 5)
+        if (hintMatches.length > 0) {
             return { id: hintMatches[0].id, path: hintMatches[0].path }
         }
     }
 
-    const prodMatches = await searchDarazCategories(productName, 1)
-    if (prodMatches.length > 0) {
-        return {
-            id: prodMatches[0].id,
-            path: prodMatches[0].path
-        }
-    }
     return null
 }

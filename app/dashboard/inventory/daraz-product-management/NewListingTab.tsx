@@ -8,6 +8,7 @@ import {
     Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock, Download
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
+import { calculateDarazFeeBreakdown, DEFAULT_OTHER_FEES, type OtherFeeItem } from '@/features/sales/utils/daraz-fee-calculator'
 import CategoryPicker from './CategoryPicker'
 import DynamicAttributesForm from './DynamicAttributesForm'
 import SearchableSupplierSelect from './SearchableSupplierSelect'
@@ -55,6 +56,7 @@ interface DraftListing {
     supplier_id?: string
     wholesale_price?: number
     campaign_price?: number
+    category_commission_rate?: number
     product_link?: string
     draft_type?: 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed'
     status: 'draft' | 'generating' | 'generated' | 'pushing' | 'pushed' | 'failed'
@@ -126,8 +128,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [drafts, setDrafts] = useState<DraftListing[]>([])
     const [draftsLoading, setDraftsLoading] = useState(true)
     const [currentPage, setCurrentPage] = useState(1)
+    const ITEMS_PER_PAGE = 25
     const [generatingId, setGeneratingId] = useState<string | null>(null)
     const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(new Set())
+    const handleSelectDraft = (id: string) => {
+        setSelectedDraftIds(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+    }
     const [bulkGenerating, setBulkGenerating] = useState(false)
     const [bulkPushing, setBulkPushing] = useState(false)
 
@@ -251,6 +262,56 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [editSelectedStores, setEditSelectedStores] = useState<string[]>([])
     const [storeModalSaving, setStoreModalSaving] = useState(false)
 
+    // ── Real-Time Profit & Margin Calculator State ───────────────────────────
+    const [categoryCommissions, setCategoryCommissions] = useState<Record<string, number>>({})
+    const [activeOtherFees, setActiveOtherFees] = useState<OtherFeeItem[]>(DEFAULT_OTHER_FEES)
+
+    // ── Delete Confirmation Modal State ─────────────────────────────────────
+    const [deleteConfirmDraft, setDeleteConfirmDraft] = useState<DraftListing | null>(null)
+    const [isDeletingDraft, setIsDeletingDraft] = useState(false)
+
+    // ── Compute Real-time Profit / Receivable Helper ────────────────────────
+    const computeProfitInfo = useCallback((
+        path?: string | null,
+        selling?: number | null,
+        wholesale?: number | null
+    ) => {
+        if (!path || !path.trim() || !selling || selling <= 0) return null
+
+        const commRate = categoryCommissions[path] 
+            ?? categoryCommissions[path.toLowerCase().trim()] 
+            ?? 12.0 // average Daraz commission rate fallback
+
+        const breakdown = calculateDarazFeeBreakdown({
+            salesPrice: Number(selling),
+            categoryCommissionRate: commRate,
+            otherFees: activeOtherFees.length > 0 ? activeOtherFees : DEFAULT_OTHER_FEES
+        })
+
+        const netPayout = breakdown.netPayout
+
+        if (wholesale !== undefined && wholesale !== null && Number(wholesale) > 0) {
+            const profit = netPayout - Number(wholesale)
+            return {
+                hasWholesale: true,
+                profit: parseFloat(profit.toFixed(2)),
+                isPositive: profit >= 0,
+                receivableAmount: parseFloat(netPayout.toFixed(2)),
+                commRate,
+                breakdown
+            }
+        }
+
+        return {
+            hasWholesale: false,
+            profit: null,
+            isPositive: true,
+            receivableAmount: parseFloat(netPayout.toFixed(2)),
+            commRate,
+            breakdown
+        }
+    }, [categoryCommissions, activeOtherFees])
+
     // Publish dropdown & Already Pushed modal states
     const [publishDropdownId, setPublishDropdownId] = useState<string | null>(null)
     const [alreadyPushedModalDraft, setAlreadyPushedModalDraft] = useState<DraftListing | null>(null)
@@ -260,6 +321,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
     // Per-store titles: { storeId: title }
     const [titlesPerStore, setTitlesPerStore] = useState<Record<string, string>>({})
+    const [isAiGeneratedTitle, setIsAiGeneratedTitle] = useState<boolean>(false)
     // Which store tab is active in the title editor
     const [activeTitleStoreId, setActiveTitleStoreId] = useState<string>('')
 
@@ -272,11 +334,21 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
      const [images, setImages] = useState<string[]>([])
     const [uploadingImage, setUploadingImage] = useState(false)
+    const [previewLargeImage, setPreviewLargeImage] = useState<{ url: string; index: number; bulkRowIndex?: number } | null>(null)
     const [dragImageIdx, setDragImageIdx] = useState<number | null>(null)
     const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
     const [bulkDragSourceRowId, setBulkDragSourceRowId] = useState<string | null>(null)
     const [bulkDragImageIdx, setBulkDragImageIdx] = useState<number | null>(null)
     const [bulkDragOverIdx, setBulkDragOverIdx] = useState<number | null>(null)
+
+    useEffect(() => {
+        if (!previewLargeImage) return
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setPreviewLargeImage(null)
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [previewLargeImage])
 
     const [description, setDescription] = useState('')
     const [highlights, setHighlights] = useState<string[]>([''])
@@ -368,6 +440,26 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
+    // Batch load commissions for drafts to calculate profit in real time
+    const loadCommissionsForDrafts = useCallback((items: DraftListing[]) => {
+        const paths = Array.from(new Set(items.map(d => d.category_path).filter(Boolean) as string[]))
+        if (paths.length > 0) {
+            fetch('/api/daraz/profit/category-commission', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths })
+            })
+            .then(r => r.json())
+            .then(json => {
+                if (json.success) {
+                    if (json.commissions) setCategoryCommissions(prev => ({ ...prev, ...json.commissions }))
+                    if (json.otherFees) setActiveOtherFees(json.otherFees)
+                }
+            })
+            .catch(() => {})
+        }
+    }, [])
+
     const fetchDrafts = async (retryArg?: any) => {
         const retryCount = typeof retryArg === 'number' ? retryArg : 0
         setDraftsLoading(true)
@@ -378,6 +470,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 if (json?.success && Array.isArray(json.data)) {
                     setDrafts(json.data)
                     setCurrentPage(1)
+                    loadCommissionsForDrafts(json.data)
                     return
                 }
             }
@@ -392,6 +485,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 if (!error && Array.isArray(data)) {
                     setDrafts(data as DraftListing[])
                     setCurrentPage(1)
+                    loadCommissionsForDrafts(data as DraftListing[])
                     return
                 }
             } catch (fallbackErr) {
@@ -407,6 +501,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             setDraftsLoading(false)
         }
     }
+
+    // Reactive watcher: automatically fetch category commission when category changes in edit/single form
+    useEffect(() => {
+        if (!categoryPath || !categoryPath.trim()) return
+        const key = categoryPath.trim()
+        if (categoryCommissions[key] !== undefined) return
+
+        fetch(`/api/daraz/profit/category-commission?path=${encodeURIComponent(key)}`)
+            .then(r => r.json())
+            .then(json => {
+                if (json.success && json.commissionRate !== undefined) {
+                    setCategoryCommissions(prev => ({ ...prev, [key]: json.commissionRate }))
+                    if (json.otherFees) setActiveOtherFees(json.otherFees)
+                }
+            })
+            .catch(() => {})
+    }, [categoryPath, categoryCommissions])
 
     // ── Prefilled data from Products Tab ─────────────────────────────────────
     useEffect(() => {
@@ -996,10 +1107,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
     const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files || e.target.files.length === 0) return
+        const files = Array.from(e.target.files)
         setUploadingImage(true)
         try {
-            const url = await uploadImageToSupabase(e.target.files[0])
-            const updated = [...images, url]
+            const remaining = 8 - images.length
+            if (remaining <= 0) {
+                alert('Maximum 8 photos allowed per product.')
+                return
+            }
+            const filesToUpload = files.slice(0, remaining)
+            const urls = await Promise.all(filesToUpload.map(f => uploadImageToSupabase(f)))
+            const updated = [...images, ...urls].slice(0, 8)
             setImages(updated)
             // If editing a draft, patch images
             if (editingDraftId) {
@@ -1013,10 +1131,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             alert('Upload failed: ' + err.message)
         } finally {
             setUploadingImage(false)
+            e.target.value = ''
         }
     }
 
-    const removeImage = (idx: number) => setImages(images.filter((_, i) => i !== idx))
+    const removeImage = (idx: number) => {
+        const updated = images.filter((_, i) => i !== idx)
+        setImages(updated)
+        if (editingDraftId) {
+            patchDraft({ images: updated })
+        }
+    }
 
     // ── Auto-save draft on raw name blur ─────────────────────────────────────
     const handleRawNameBlur = async () => {
@@ -1295,6 +1420,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 newTitlesPerStore[storeId] = data.titles?.[storeName] || rawName
             })
             setTitlesPerStore(newTitlesPerStore)
+            setIsAiGeneratedTitle(true)
             if (selectedStores.length > 0) {
                 setActiveTitleStoreId(selectedStores[0])
             }
@@ -1378,6 +1504,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             const storeNames = targetStores
                 .map(id => stores.find(s => s.id === id)?.seller_account || id)
 
+            let targetCategoryPath = draft.category_path || ''
+            if (!targetCategoryPath && effectiveName && !isImageOnly) {
+                try {
+                    const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(effectiveName)}`)
+                    const catJson = await catRes.json()
+                    if (catJson.success && catJson.suggestions?.length > 0) {
+                        targetCategoryPath = catJson.suggestions[0].path
+                    }
+                } catch {}
+            }
+
             const res = await fetch('/api/daraz/products/ai-generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1386,6 +1523,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     price: draft.price || 500,
                     imageUrl: draft.images?.[0] || null,
                     storeNames: storeNames.length > 0 ? storeNames : ['Default Store'],
+                    categoryPath: targetCategoryPath || 'General',
                     model: aiModel
                 })
             })
@@ -1400,6 +1538,22 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                 const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
+                let resolvedCatId = data.category_id || null
+                let resolvedCatPath = data.category_suggestion || ''
+
+                if ((!resolvedCatId || !resolvedCatPath) && finalTitle) {
+                    try {
+                        const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(finalTitle)}`)
+                        const catJson = await catRes.json()
+                        if (catJson.success && catJson.suggestions?.length > 0) {
+                            resolvedCatId = catJson.suggestions[0].id
+                            resolvedCatPath = catJson.suggestions[0].path
+                        }
+                    } catch (e) {
+                        console.warn('Fallback category fetch failed:', e)
+                    }
+                }
+
                 await fetch('/api/daraz/drafts', {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -1412,8 +1566,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         description: data.description || '',
                         highlights: data.highlights || [],
                         attributes: { ...(data.attributes || {}), brand: 'No Brand' },
-                        category_id: data.category_id || null,
-                        category_path: data.category_suggestion || '',
+                        category_id: resolvedCatId,
+                        category_path: resolvedCatPath,
                         status: 'generated'
                     })
                 })
@@ -1648,6 +1802,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 const storeNames = targetStores
                     .map(id => stores.find(s => s.id === id)?.seller_account || id)
 
+                let targetCategoryPath = item.category_path || ''
+                if (!targetCategoryPath && effectiveName && !isImageOnly) {
+                    try {
+                        const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(effectiveName)}`)
+                        const catJson = await catRes.json()
+                        if (catJson.success && catJson.suggestions?.length > 0) {
+                            targetCategoryPath = catJson.suggestions[0].path
+                        }
+                    } catch {}
+                }
+
                 const res = await fetch('/api/daraz/products/ai-generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1656,6 +1821,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         price: item.price || 500,
                         imageUrl: item.images?.[0] || null,
                         storeNames: storeNames.length > 0 ? storeNames : ['Default Store'],
+                        categoryPath: targetCategoryPath || 'General',
                         model: aiModel
                     })
                 })
@@ -1670,6 +1836,22 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                     const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
+                    let resolvedCatId = data.category_id || null
+                    let resolvedCatPath = data.category_suggestion || ''
+
+                    if ((!resolvedCatId || !resolvedCatPath) && finalTitle) {
+                        try {
+                            const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(finalTitle)}`)
+                            const catJson = await catRes.json()
+                            if (catJson.success && catJson.suggestions?.length > 0) {
+                                resolvedCatId = catJson.suggestions[0].id
+                                resolvedCatPath = catJson.suggestions[0].path
+                            }
+                        } catch (e) {
+                            console.warn('Fallback category fetch failed in bulk generate:', e)
+                        }
+                    }
+
                     await fetch('/api/daraz/drafts', {
                         method: 'PATCH',
                         headers: { 'Content-Type': 'application/json' },
@@ -1682,8 +1864,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             description: data.description || '',
                             highlights: data.highlights || [],
                             attributes: { ...(data.attributes || {}), brand: 'No Brand' },
-                            category_id: data.category_id || null,
-                            category_path: data.category_suggestion || '',
+                            category_id: resolvedCatId,
+                            category_path: resolvedCatPath,
                             status: 'generated'
                         })
                     })
@@ -1692,8 +1874,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         ...d,
                         title: finalTitle,
                         titles_per_store: newTitlesPerStore,
-                        category_id: data.category_id || undefined,
-                        category_path: data.category_suggestion || undefined,
+                        category_id: resolvedCatId || undefined,
+                        category_path: resolvedCatPath || undefined,
                         status: 'generated'
                     } : d))
                 }
@@ -1712,11 +1894,32 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         fetchDrafts()
     }
 
-    // ── Delete draft ──────────────────────────────────────────────────────────
-    const handleDeleteDraft = async (id: string) => {
-        if (!confirm('Delete this draft listing?')) return
-        await fetch(`/api/daraz/drafts?id=${id}`, { method: 'DELETE' })
-        setDrafts(prev => prev.filter(d => d.id !== id))
+    // ── Delete draft handlers (Safe with confirmation & DB sync) ───────────
+    const handleDeleteDraft = (draftOrId: string | DraftListing) => {
+        const draft = typeof draftOrId === 'string'
+            ? drafts.find(d => d.id === draftOrId) || ({ id: draftOrId, raw_name: 'Product Draft' } as DraftListing)
+            : draftOrId
+        setDeleteConfirmDraft(draft)
+    }
+
+    const handleConfirmDeleteDraft = async () => {
+        if (!deleteConfirmDraft) return
+        setIsDeletingDraft(true)
+        const id = deleteConfirmDraft.id
+        try {
+            const res = await fetch(`/api/daraz/drafts?id=${id}`, { method: 'DELETE' })
+            if (!res.ok) {
+                // Direct fallback to Supabase
+                const { error } = await supabase.from('daraz_draft_listings').delete().eq('id', id)
+                if (error) throw error
+            }
+            setDrafts(prev => prev.filter(d => d.id !== id))
+            setDeleteConfirmDraft(null)
+        } catch (err: any) {
+            alert('Failed to delete draft: ' + (err.message || 'Unknown error'))
+        } finally {
+            setIsDeletingDraft(false)
+        }
     }
 
     // ── Edit draft (open full form) ───────────────────────────────────────────
@@ -1813,8 +2016,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 if (cached) {
                     const treeData = JSON.parse(cached)
                     const segments = suggestedPath.toLowerCase().split('>').map((s: string) => s.trim())
-                    const leafName = segments[segments.length - 1]
-                    const leafTokens = leafName.split(/\s+/).filter((t: string) => t.length > 2)
+                    const leafName = segments[segments.length - 1] || ''
+                    const leafTokens = leafName.replace(/[^\w\s]/g, ' ').split(/\s+/).filter((t: string) => t.length > 2)
 
                     const candidates: Array<{ id: number; path: string; score: number }> = []
 
@@ -1827,18 +2030,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                             if (nodeLower === leafName) {
                                 score = 200
-                            } else if (nodeLower.includes(leafName) || leafName.includes(nodeLower)) {
+                            } else if (leafName && (nodeLower.includes(leafName) || leafName.includes(nodeLower))) {
                                 score = 100
                             } else {
                                 leafTokens.forEach((token: string) => {
-                                    const regex = new RegExp(`\\b${token}s?\\b`, 'i')
-                                    if (regex.test(nodeLower)) score += 20
-                                    else if (nodeLower.includes(token)) score += 8
+                                    try {
+                                        const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                                        const regex = new RegExp(`\\b${escaped}s?\\b`, 'i')
+                                        if (regex.test(nodeLower)) score += 20
+                                        else if (nodeLower.includes(token)) score += 8
+                                    } catch {
+                                        if (nodeLower.includes(token)) score += 8
+                                    }
                                 })
                             }
 
                             segments.slice(0, -1).forEach((seg: string, idx: number) => {
-                                const segTokens = seg.split(/\s+/).filter((t: string) => t.length > 2)
+                                const segTokens = seg.replace(/[^\w\s]/g, ' ').split(/\s+/).filter((t: string) => t.length > 2)
                                 segTokens.forEach((token: string) => {
                                     if (nodePathLower.includes(token)) {
                                         score += (idx === segments.length - 2) ? 15 : 5
@@ -2260,7 +2468,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     // ═══════════════════════════════════════════════════════════════════════
     if (viewMode === 'list') {
         return (
-            <div className="space-y-4">
+            <div className="space-y-4 font-sans font-[family-name:var(--font-inter)]">
                 {/* Status Tabs Bar */}
                 <div className="flex border-b border-gray-200 dark:border-zinc-800 overflow-x-auto gap-4 scrollbar-none bg-white dark:bg-zinc-900 p-2 rounded-t-lg shadow-xs">
                     {statusTabs.map(tab => (
@@ -2335,38 +2543,54 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         <button
                             type="button"
                             onClick={() => setIsAddMenuOpen(!isAddMenuOpen)}
-                            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded text-sm font-semibold flex items-center gap-1.5 shadow"
+                            className="px-4 py-2 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600 hover:from-orange-600 hover:via-amber-600 hover:to-orange-700 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 shadow-md shadow-orange-500/25 hover:shadow-lg hover:shadow-orange-500/35 transition-all transform active:scale-95 cursor-pointer ring-1 ring-white/20"
                         >
-                            <Plus size={16} />
-                            Add Product
-                            <ChevronDown size={14} />
+                            <span className="w-5 h-5 rounded-lg bg-white/20 flex items-center justify-center">
+                                <Plus size={13} strokeWidth={3} />
+                            </span>
+                            <span>Add Product</span>
+                            <ChevronDown size={14} className={`transition-transform duration-200 opacity-80 ${isAddMenuOpen ? 'rotate-180' : ''}`} />
                         </button>
 
                         {isAddMenuOpen && (
-                            <div className="absolute right-0 mt-1.5 w-44 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-lg z-50 divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setEditingDraftId(null)
-                                        setRawName(''); setTitlesPerStore({}); setImages([])
-                                        setDescription(''); setHighlights(['']); setCategoryId(null)
-                                        setCategoryPath(''); setSellingPrice(0); setSpecialPrice(undefined)
-                                        setSelectedSupplierId(''); setWholesalePrice(undefined); setCampaignPrice(undefined)
-                                        setSpecialPriceFrom(today()); setSpecialPriceTo(fiveYearsFromNow())
-                                        setDynamicAttributes({}); setAiCategorySuggestion(null)
-                                        setViewMode('add-single'); setIsAddMenuOpen(false)
-                                    }}
-                                    className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 font-medium"
-                                >
-                                    ✦ Single Add
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={handleStartBulkAdd}
-                                    className="w-full text-left p-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/20 text-gray-700 dark:text-zinc-300 font-medium"
-                                >
-                                    ⊞ Bulk Add
-                                </button>
+                            <div className="absolute right-0 mt-2 w-52 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-xl z-50 p-1.5 divide-y divide-gray-100 dark:divide-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100">
+                                <div className="p-1 space-y-0.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setEditingDraftId(null)
+                                            setRawName(''); setTitlesPerStore({}); setImages([])
+                                            setDescription(''); setHighlights(['']); setCategoryId(null)
+                                            setCategoryPath(''); setSellingPrice(0); setSpecialPrice(undefined)
+                                            setSelectedSupplierId(''); setWholesalePrice(undefined); setCampaignPrice(undefined)
+                                            setSpecialPriceFrom(today()); setSpecialPriceTo(fiveYearsFromNow())
+                                            setDynamicAttributes({}); setAiCategorySuggestion(null)
+                                            setViewMode('add-single'); setIsAddMenuOpen(false)
+                                        }}
+                                        className="w-full text-left px-3 py-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/30 text-gray-800 dark:text-zinc-200 rounded-lg font-medium flex items-center gap-2.5 transition-colors cursor-pointer"
+                                    >
+                                        <div className="w-7 h-7 rounded-lg bg-orange-100 dark:bg-orange-950/50 text-orange-600 dark:text-orange-400 flex items-center justify-center shrink-0">
+                                            <Sparkles size={14} />
+                                        </div>
+                                        <div>
+                                            <p className="font-semibold text-gray-900 dark:text-zinc-100 text-xs">Single Add</p>
+                                            <p className="text-[10px] text-gray-500 dark:text-zinc-400 font-normal">Full AI Content Generation</p>
+                                        </div>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleStartBulkAdd}
+                                        className="w-full text-left px-3 py-2.5 hover:bg-orange-50 dark:hover:bg-orange-950/30 text-gray-800 dark:text-zinc-200 rounded-lg font-medium flex items-center gap-2.5 transition-colors cursor-pointer"
+                                    >
+                                        <div className="w-7 h-7 rounded-lg bg-amber-100 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                                            <Zap size={14} />
+                                        </div>
+                                        <div>
+                                            <p className="font-semibold text-gray-900 dark:text-zinc-100 text-xs">Bulk Add</p>
+                                            <p className="text-[10px] text-gray-400 font-normal">Multiple Products & Links</p>
+                                        </div>
+                                    </button>
+                                </div>
                             </div>
                         )}
                     </div>
@@ -2487,13 +2711,13 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 case 'generated':
                                 case 'failed':
                                     return 2;
-                                case 'pushing':
                                 case 'pushed':
+                                case 'pushing':
                                     return 3;
                                 default:
                                     return 4;
                             }
-                        };
+                        }
 
                         const sortedDrafts = [...filteredDrafts].sort((a, b) => {
                             const priorityA = getStatusGroupPriority(a.status);
@@ -2501,72 +2725,93 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             if (priorityA !== priorityB) {
                                 return priorityA - priorityB;
                             }
-                            return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+                            return new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime();
                         });
 
-                        const ITEMS_PER_PAGE = 50;
-                        const totalPages = Math.ceil(sortedDrafts.length / ITEMS_PER_PAGE) || 1;
+                        const totalPages = Math.ceil(sortedDrafts.length / ITEMS_PER_PAGE);
                         const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
                         const paginatedDrafts = sortedDrafts.slice(startIndex, startIndex + ITEMS_PER_PAGE);
 
                         return (
                             <>
-                                {paginatedDrafts.map(draft => (
-                                        <div 
-                                            key={draft.id} 
-                                            className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 bg-white dark:bg-zinc-900 p-4 border border-gray-200 dark:border-zinc-800 rounded-lg shadow-xs hover:border-gray-300 dark:hover:border-zinc-700 hover:shadow-sm transition-all duration-200 relative"
-                                        >
-                                            {/* Selection Checkbox */}
-                                            <div className="flex items-center">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={selectedDraftIds.has(draft.id)}
-                                                    onChange={(e) => {
-                                                        const next = new Set(selectedDraftIds)
-                                                        if (e.target.checked) next.add(draft.id)
-                                                        else next.delete(draft.id)
-                                                        setSelectedDraftIds(next)
-                                                    }}
-                                                    className="w-4 h-4 text-orange-500 border-gray-300 dark:border-zinc-700 rounded focus:ring-orange-500 cursor-pointer"
-                                                />
-                                            </div>
+                                {paginatedDrafts.map((draft) => (
+                                    <div
+                                        key={draft.id}
+                                        className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-4 shadow-xs hover:border-gray-300 dark:hover:border-zinc-700 transition-all flex flex-col md:flex-row gap-4 items-start md:items-center justify-between"
+                                    >
+                                        <div className="flex items-start md:items-center gap-3.5 flex-1 min-w-0">
+                                            {/* Checkbox */}
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedDraftIds.has(draft.id)}
+                                                onChange={() => handleSelectDraft(draft.id)}
+                                                className="mt-1 md:mt-0 rounded border-gray-300 text-orange-600 focus:ring-orange-500 shrink-0 cursor-pointer"
+                                            />
 
                                             {/* Product Image - Click opens Gallery & Desktop Upload */}
-                                            <div 
-                                                onClick={() => {
-                                                    setImageModalDraft(draft)
-                                                    setModalImages(draft.images ? [...draft.images] : [])
-                                                }}
-                                                className="relative flex-none cursor-pointer group"
-                                                title="Click to view & edit all photos"
-                                            >
-                                                <img
-                                                    src={draft.images?.[0] || '/placeholder.png'}
-                                                    alt="Preview"
-                                                    className="w-16 h-16 rounded object-cover border border-gray-200 dark:border-zinc-800 bg-gray-50 transition-transform group-hover:scale-105 group-hover:shadow-md"
-                                                />
-                                                <div className="absolute inset-0 bg-black/35 rounded opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                                                    <Pencil size={14} />
+                                            <div className="flex flex-col items-center flex-none">
+                                                <div 
+                                                    onClick={() => {
+                                                        setImageModalDraft(draft)
+                                                        setModalImages(draft.images ? [...draft.images] : [])
+                                                    }}
+                                                    className="relative cursor-pointer group"
+                                                    title="Click to view & edit all photos"
+                                                >
+                                                    <img
+                                                        src={draft.images?.[0] || '/placeholder.png'}
+                                                        alt="Preview"
+                                                        className="w-20 h-20 rounded-lg object-cover border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 transition-transform group-hover:scale-105 group-hover:shadow-md"
+                                                    />
+                                                    <div className="absolute inset-0 bg-black/40 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                                        <Pencil size={15} />
+                                                    </div>
+                                                    {draft.images && draft.images.length > 1 && (
+                                                        <span className="absolute bottom-1 right-1 bg-black/75 text-[9px] text-white px-1.5 py-0.5 rounded font-bold">
+                                                            +{draft.images.length - 1}
+                                                        </span>
+                                                    )}
                                                 </div>
-                                                {draft.images && draft.images.length > 1 && (
-                                                    <span className="absolute bottom-0.5 right-0.5 bg-black/70 text-[9px] text-white px-1 rounded font-bold">
-                                                        +{draft.images.length - 1}
+
+                                                {/* Pre-flight Image Progress Line */}
+                                                <div className="w-20 mt-1.5" title={`Image count: ${draft.images?.length || 0}/8. Less than 2 or 2-3: Yellow, More than 3: Green`}>
+                                                    <div className="w-full h-1.5 bg-gray-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                                                        <div 
+                                                            className={`h-full transition-all duration-300 ${
+                                                                (draft.images?.length || 0) > 3 
+                                                                    ? 'w-full bg-emerald-500' 
+                                                                    : (draft.images?.length || 0) >= 2 
+                                                                        ? 'w-2/3 bg-amber-400' 
+                                                                        : (draft.images?.length || 0) === 1
+                                                                            ? 'w-1/3 bg-amber-400'
+                                                                            : 'w-0 bg-gray-300'
+                                                            }`}
+                                                        />
+                                                    </div>
+                                                    <span className={`text-[9px] font-semibold block text-center mt-0.5 ${
+                                                        (draft.images?.length || 0) > 3 
+                                                            ? 'text-emerald-600 dark:text-emerald-400' 
+                                                            : (draft.images?.length || 0) > 0 
+                                                                ? 'text-amber-600 dark:text-amber-400' 
+                                                                : 'text-gray-400'
+                                                    }`}>
+                                                        {(draft.images?.length || 0)}/8 photos {(draft.images?.length || 0) > 3 ? '✓' : ''}
                                                     </span>
-                                                )}
+                                                </div>
                                             </div>
 
                                             {/* Main info columns */}
-                                            <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 items-center min-w-0">
+                                            <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 items-center min-w-0 font-sans">
                                                 
                                                 {/* Column 1: Names + Copy Button for Daraz Title */}
                                                 <div className="min-w-0 flex flex-col justify-center">
-                                                    <span className="font-bold text-gray-800 dark:text-zinc-200 block truncate text-sm" title={draft.raw_name}>
+                                                    <span className="font-semibold text-gray-900 dark:text-zinc-100 block truncate text-[15px] leading-snug tracking-tight" title={draft.raw_name}>
                                                         {draft.raw_name}
                                                     </span>
-                                                    <div className="text-xs mt-1 flex items-center min-w-0">
+                                                    <div className="mt-1 flex items-center min-w-0">
                                                         {draft.title ? (
-                                                            <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400 font-medium min-w-0 max-w-full">
-                                                                <Sparkles size={12} className="shrink-0 text-amber-500" />
+                                                            <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300 font-normal min-w-0 max-w-full text-xs sm:text-[13px]">
+                                                                <Sparkles size={13} className="shrink-0 text-amber-500" />
                                                                 <span className="truncate" title={draft.title}>{draft.title}</span>
                                                                 <button
                                                                     type="button"
@@ -2597,7 +2842,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                 e.stopPropagation()
                                                                 handleOpenAiStudioForDraft(draft)
                                                             }}
-                                                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-gradient-to-r from-orange-500/10 to-amber-500/10 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-900/40 hover:bg-orange-500 hover:text-white transition-all shadow-2xs group/btn cursor-pointer"
+                                                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-gradient-to-r from-orange-500/10 to-amber-500/10 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-900/40 hover:bg-orange-500 hover:text-white transition-all shadow-2xs group/btn cursor-pointer"
                                                             title="Generate pure white studio cover & AI lifestyle scenes"
                                                         >
                                                             <Sparkles size={11} className="text-orange-500 group-hover/btn:text-white transition-colors" />
@@ -2611,7 +2856,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     <div className="flex items-center gap-1.5 min-w-0">
                                                         <span 
                                                             onClick={() => handleOpenCategoryModal(draft)}
-                                                            className="text-xs font-semibold text-gray-700 dark:text-zinc-300 truncate cursor-pointer hover:text-orange-600 dark:hover:text-orange-400 transition-colors"
+                                                            className="text-xs sm:text-[13px] font-medium text-gray-800 dark:text-zinc-200 truncate cursor-pointer hover:text-orange-600 dark:hover:text-orange-400 transition-colors"
                                                             title="Click to edit category & specifications"
                                                         >
                                                             {draft.category_path || 'No Category Selected'}
@@ -2637,7 +2882,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                         <span 
                                                                             key={storeId} 
                                                                             onClick={() => handleOpenStoreModal(draft)}
-                                                                            className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 bg-amber-50/70 dark:bg-amber-950/20 text-amber-800 dark:text-amber-300 border border-amber-200/50 dark:border-amber-900/30 rounded font-medium transition-all hover:bg-amber-100/50 dark:hover:bg-amber-950/40 cursor-pointer"
+                                                                            className="inline-flex items-center gap-1 text-[11px] px-2.5 py-0.5 bg-amber-50/80 dark:bg-amber-950/20 text-amber-900 dark:text-amber-200 border border-amber-200/60 dark:border-amber-900/40 rounded-md font-medium transition-all hover:bg-amber-100/50 dark:hover:bg-amber-950/40 cursor-pointer"
                                                                             title="Click to edit seller account"
                                                                         >
                                                                             <Store size={10} className="shrink-0 text-amber-600 dark:text-amber-500" />
@@ -2664,7 +2909,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                     e.stopPropagation()
                                                                     handleOpenStoreModal(draft)
                                                                 }}
-                                                                className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 text-gray-500 dark:text-zinc-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20 border border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-400 rounded font-medium transition-all"
+                                                                className="inline-flex items-center gap-1 text-[11px] px-2.5 py-0.5 text-gray-600 dark:text-zinc-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20 border border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-400 rounded-md font-medium transition-all"
                                                                 title="Select Seller Account"
                                                             >
                                                                 <Store size={10} className="shrink-0" />
@@ -2698,21 +2943,21 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     })()}
                                                 </div>
 
-                                                {/* Column 3: Price (Regular & Special) + Edit Icon */}
+                                                {/* Column 3: Price (Regular & Special) + Real-time Profit / Receivable + Edit Icon */}
                                                 <div className="flex flex-col md:items-center justify-center min-w-0">
                                                     <div className="flex items-center gap-1.5">
                                                         <div className="flex flex-col md:items-center">
                                                             {draft.special_price ? (
                                                                 <div className="flex items-baseline gap-1.5">
-                                                                    <span className="text-sm font-bold text-emerald-600 dark:text-emerald-400">
+                                                                    <span className="text-[15px] font-semibold text-gray-900 dark:text-zinc-100">
                                                                         NPR {draft.special_price}
                                                                     </span>
-                                                                    <span className="text-[11px] text-gray-400 line-through">
+                                                                    <span className="text-xs text-gray-400 line-through">
                                                                         NPR {draft.price || 0}
                                                                     </span>
                                                                 </div>
                                                             ) : (
-                                                                <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">
+                                                                <span className="text-[15px] font-semibold text-gray-900 dark:text-zinc-100">
                                                                     {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
                                                                 </span>
                                                             )}
@@ -2729,6 +2974,36 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             <Pencil size={11} />
                                                         </button>
                                                     </div>
+
+                                                    {/* Real-time Profit Amount in clean text */}
+                                                    {(() => {
+                                                        const effectiveSelling = draft.special_price || draft.price
+                                                        const profitInfo = computeProfitInfo(draft.category_path, effectiveSelling, draft.wholesale_price)
+                                                        if (!profitInfo) return null
+
+                                                        if (profitInfo.hasWholesale) {
+                                                            return (
+                                                                <div className="mt-0.5 text-center" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted. Net Payout: NPR ${profitInfo.receivableAmount}`}>
+                                                                    <span className={`text-xs font-semibold ${
+                                                                        profitInfo.isPositive 
+                                                                            ? 'text-emerald-600 dark:text-emerald-400' 
+                                                                            : 'text-rose-600 dark:text-rose-400'
+                                                                    }`}>
+                                                                        {profitInfo.isPositive ? '+' : ''}Rs. {profitInfo.profit} profit
+                                                                    </span>
+                                                                </div>
+                                                            )
+                                                        }
+
+                                                        return (
+                                                            <div className="mt-0.5 text-center" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted`}>
+                                                                <span className="text-[11px] text-gray-500 dark:text-zinc-400 font-medium">
+                                                                    Payout: NPR {profitInfo.receivableAmount}
+                                                                </span>
+                                                            </div>
+                                                        )
+                                                    })()}
+
                                                     <div className="mt-1">
                                                         {statusBadge(draft.status, draft)}
                                                     </div>
@@ -2738,10 +3013,10 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         </div>
                                                     )}
                                                 </div>
-
                                             </div>
+                                        </div>
 
-                                            {/* Action Buttons Column */}
+                                        {/* Action Buttons Column */}
                                             <div className="flex-none flex sm:flex-col items-stretch justify-center gap-1.5 border-t sm:border-t-0 sm:border-l border-gray-100 dark:border-zinc-800 pt-3 sm:pt-0 sm:pl-4 min-w-[110px]">
                                                 {/* 1. Draft/Failed/Generating Status Action Group */}
                                                 {(draft.status === 'draft' || draft.status === 'failed' || draft.status === 'generating') && (
@@ -2750,7 +3025,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             type="button"
                                                             onClick={() => handleSingleGenerate(draft)}
                                                             disabled={draft.status === 'generating' || generatingId === draft.id}
-                                                            className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded transition-all flex items-center gap-1.5 text-xs font-semibold justify-center disabled:opacity-50 shadow-sm"
+                                                            className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-md transition-all flex items-center gap-1.5 text-xs font-semibold justify-center disabled:opacity-50 shadow-xs"
                                                             title="Generate AI Content"
                                                         >
                                                             {draft.status === 'generating' || generatingId === draft.id ? (
@@ -2760,11 +3035,15 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             )}
                                                             Generate AI
                                                         </button>
-                                                        <div className="relative w-full">
+                                                        <div className="relative w-full" data-dropdown-container>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => setActiveDropdownId(activeDropdownId === draft.id ? null : draft.id)}
-                                                                className={`w-full px-2.5 py-1.5 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-400 rounded transition-colors flex items-center gap-1.5 text-xs font-semibold justify-start ${activeDropdownId === draft.id ? 'bg-gray-100 text-gray-700 dark:bg-zinc-800' : ''}`}
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    setActiveDropdownId(activeDropdownId === draft.id ? null : draft.id)
+                                                                    setPublishDropdownId(null)
+                                                                }}
+                                                                className={`w-full px-2.5 py-1.5 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-400 rounded-md transition-colors flex items-center gap-1.5 text-xs font-semibold justify-start ${activeDropdownId === draft.id ? 'bg-gray-100 text-gray-700 dark:bg-zinc-800' : ''}`}
                                                                 title="More Actions"
                                                             >
                                                                 <MoreVertical size={14} />
@@ -2772,27 +3051,42 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             </button>
                                                             
                                                             {activeDropdownId === draft.id && (
-                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-28 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-md shadow-lg z-50 py-1 text-xs text-left">
+                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-32 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in duration-100">
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
-                                                                            handleEditDraft(draft);
-                                                                            setActiveDropdownId(null);
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleEditDraft(draft)
+                                                                            setActiveDropdownId(null)
                                                                         }}
-                                                                        className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-200 flex items-center gap-1.5 font-medium"
+                                                                        className="w-full text-left px-3 py-2 hover:bg-orange-50 dark:hover:bg-orange-950/30 text-gray-700 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
                                                                     >
-                                                                        <Edit3 size={12} />
-                                                                        Edit
+                                                                        <Edit3 size={13} className="text-orange-500" />
+                                                                        Edit Listing
                                                                     </button>
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
-                                                                            handleDeleteDraft(draft.id);
-                                                                            setActiveDropdownId(null);
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleOpenAiStudioForDraft(draft)
+                                                                            setActiveDropdownId(null)
                                                                         }}
-                                                                        className="w-full text-left px-3 py-2 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 flex items-center gap-1.5 font-medium"
+                                                                        className="w-full text-left px-3 py-2 hover:bg-amber-50 dark:hover:bg-amber-950/30 text-gray-700 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
                                                                     >
-                                                                        <Trash2 size={12} />
+                                                                        <Sparkles size={13} className="text-amber-500" />
+                                                                        AI Studio
+                                                                    </button>
+                                                                    <div className="border-t border-gray-100 dark:border-zinc-700 my-0.5" />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleDeleteDraft(draft)
+                                                                            setActiveDropdownId(null)
+                                                                        }}
+                                                                        className="w-full text-left px-3 py-2 hover:bg-red-50 dark:hover:bg-red-950/30 text-rose-600 flex items-center gap-2 font-medium transition-colors"
+                                                                    >
+                                                                        <Trash2 size={13} />
                                                                         Delete
                                                                     </button>
                                                                 </div>
@@ -2807,11 +3101,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         <div className="relative" data-dropdown-container>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => {
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
                                                                     setPublishDropdownId(publishDropdownId === draft.id ? null : draft.id)
                                                                     setActiveDropdownId(null)
                                                                 }}
-                                                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-sm"
+                                                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-xs"
                                                                 title="Publish Options"
                                                             >
                                                                 <Send size={12} />
@@ -2823,7 +3118,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                 <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-44 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in zoom-in-95 duration-100">
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
                                                                             setPublishDropdownId(null)
                                                                             handleQuickPush(draft)
                                                                         }}
@@ -2838,7 +3134,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                     <div className="border-t border-gray-100 dark:border-zinc-700/60 my-0.5" />
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
                                                                             setPublishDropdownId(null)
                                                                             openAlreadyPushedModal(draft)
                                                                         }}
@@ -2856,11 +3153,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         <div className="relative w-full" data-dropdown-container>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => {
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
                                                                     setActiveDropdownId(activeDropdownId === draft.id ? null : draft.id)
                                                                     setPublishDropdownId(null)
                                                                 }}
-                                                                className={`w-full px-2.5 py-1.5 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-400 rounded transition-colors flex items-center gap-1.5 text-xs font-semibold justify-start ${activeDropdownId === draft.id ? 'bg-gray-100 text-gray-700 dark:bg-zinc-800' : ''}`}
+                                                                className={`w-full px-2.5 py-1.5 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-400 rounded-md transition-colors flex items-center gap-1.5 text-xs font-semibold justify-start ${activeDropdownId === draft.id ? 'bg-gray-100 text-gray-700 dark:bg-zinc-800' : ''}`}
                                                                 title="More Actions"
                                                             >
                                                                 <MoreVertical size={14} />
@@ -2868,27 +3166,42 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             </button>
                                                             
                                                             {activeDropdownId === draft.id && (
-                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-28 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-md shadow-lg z-50 py-1 text-xs text-left">
+                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-32 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in duration-100">
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
-                                                                            handleEditDraft(draft);
-                                                                            setActiveDropdownId(null);
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleEditDraft(draft)
+                                                                            setActiveDropdownId(null)
                                                                         }}
-                                                                        className="w-full text-left px-3 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-200 flex items-center gap-1.5 font-medium"
+                                                                        className="w-full text-left px-3 py-2 hover:bg-orange-50 dark:hover:bg-orange-950/30 text-gray-700 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
                                                                     >
-                                                                        <Edit3 size={12} />
-                                                                        Edit
+                                                                        <Edit3 size={13} className="text-orange-500" />
+                                                                        Edit Listing
                                                                     </button>
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => {
-                                                                            handleDeleteDraft(draft.id);
-                                                                            setActiveDropdownId(null);
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleOpenAiStudioForDraft(draft)
+                                                                            setActiveDropdownId(null)
                                                                         }}
-                                                                        className="w-full text-left px-3 py-2 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 flex items-center gap-1.5 font-medium"
+                                                                        className="w-full text-left px-3 py-2 hover:bg-amber-50 dark:hover:bg-amber-950/30 text-gray-700 dark:text-zinc-200 flex items-center gap-2 font-medium transition-colors"
                                                                     >
-                                                                        <Trash2 size={12} />
+                                                                        <Sparkles size={13} className="text-amber-500" />
+                                                                        AI Studio
+                                                                    </button>
+                                                                    <div className="border-t border-gray-100 dark:border-zinc-700 my-0.5" />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleDeleteDraft(draft)
+                                                                            setActiveDropdownId(null)
+                                                                        }}
+                                                                        className="w-full text-left px-3 py-2 hover:bg-red-50 dark:hover:bg-red-950/30 text-rose-600 flex items-center gap-2 font-medium transition-colors"
+                                                                    >
+                                                                        <Trash2 size={13} />
                                                                         Delete
                                                                     </button>
                                                                 </div>
@@ -2897,18 +3210,36 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     </>
                                                 )}
 
-                                                {/* 3. Pushed Status Action Group (No Edit, only Delete) */}
+                                                {/* 3. Pushed Status Action Group (Edit & Delete Available) */}
                                                 {(draft.status === 'pushed' || draft.status === 'pushing') && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleDeleteDraft(draft.id)}
-                                                        disabled={draft.status === 'pushing'}
-                                                        className="px-2.5 py-1.5 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/20 text-gray-600 dark:text-zinc-400 rounded transition-colors flex items-center gap-1.5 text-xs font-semibold justify-center disabled:opacity-50"
-                                                        title="Delete"
-                                                    >
-                                                        <Trash2 size={14} />
-                                                        Delete
-                                                    </button>
+                                                    <div className="flex flex-col gap-1 w-full">
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handleEditDraft(draft)
+                                                            }}
+                                                            disabled={draft.status === 'pushing'}
+                                                            className="px-2.5 py-1.5 hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-950/20 text-gray-600 dark:text-zinc-400 rounded-md transition-colors flex items-center gap-1.5 text-xs font-semibold justify-center disabled:opacity-50"
+                                                            title="Edit Details"
+                                                        >
+                                                            <Edit3 size={13} />
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handleDeleteDraft(draft)
+                                                            }}
+                                                            disabled={draft.status === 'pushing'}
+                                                            className="px-2.5 py-1.5 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/20 text-gray-500 dark:text-zinc-400 rounded-md transition-colors flex items-center gap-1.5 text-xs font-semibold justify-center disabled:opacity-50"
+                                                            title="Delete Draft"
+                                                        >
+                                                            <Trash2 size={13} />
+                                                            Delete
+                                                        </button>
+                                                    </div>
                                                 )}
                                             </div>
                                         </div>
@@ -2947,7 +3278,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             );
                         })()
                     )}
-                
+                </div>
+
                 {/* ── 1. Image Gallery & Desktop Upload Modal ──────────────── */}
                 {imageModalDraft && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
@@ -3722,6 +4054,80 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     </div>
                 )}
 
+                {/* ── Permanent Delete Confirmation Modal ─────────────────── */}
+                {deleteConfirmDraft && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+                        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl max-w-md w-full overflow-hidden">
+                            <div className="p-5 space-y-4">
+                                <div className="flex items-start gap-3.5">
+                                    <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-950/50 flex items-center justify-center text-red-600 dark:text-red-400 shrink-0">
+                                        <Trash2 size={20} />
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100">
+                                            Delete Product Draft?
+                                        </h3>
+                                        <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1 leading-relaxed">
+                                            Are you sure you want to delete this product? It will be removed immediately from your list and permanently deleted from the database.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="bg-gray-50 dark:bg-zinc-800/60 p-3 rounded-lg border border-gray-200 dark:border-zinc-700/60 flex items-center gap-3">
+                                    {deleteConfirmDraft.images && deleteConfirmDraft.images.length > 0 ? (
+                                        <img
+                                            src={deleteConfirmDraft.images[0]}
+                                            alt=""
+                                            className="w-12 h-12 object-cover rounded-md border border-gray-200 dark:border-zinc-700 shrink-0"
+                                        />
+                                    ) : (
+                                        <div className="w-12 h-12 rounded-md bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-gray-400 shrink-0">
+                                            <ImageIcon size={18} />
+                                        </div>
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-xs font-semibold text-gray-800 dark:text-zinc-200 truncate">
+                                            {deleteConfirmDraft.title || deleteConfirmDraft.raw_name || 'Untitled Draft'}
+                                        </p>
+                                        <p className="text-[10px] text-gray-400 mt-0.5">
+                                            ID: {deleteConfirmDraft.id.slice(0, 8)}... • Status: {deleteConfirmDraft.status}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center justify-end gap-2.5 px-5 py-3.5 bg-gray-50 dark:bg-zinc-850/70 border-t border-gray-200 dark:border-zinc-800">
+                                <button
+                                    type="button"
+                                    onClick={() => setDeleteConfirmDraft(null)}
+                                    disabled={isDeletingDraft}
+                                    className="px-3.5 py-1.5 text-xs font-semibold border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleConfirmDeleteDraft}
+                                    disabled={isDeletingDraft}
+                                    className="px-4 py-1.5 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-md flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                                >
+                                    {isDeletingDraft ? (
+                                        <>
+                                            <Loader2 size={13} className="animate-spin" />
+                                            Deleting...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Trash2 size={13} />
+                                            Delete Permanently
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* ── AI Product Image Studio Modal ─────────────────────────── */}
                 <DarazAiStudioModal
                     isOpen={isAiStudioOpen}
@@ -3732,7 +4138,6 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     price={aiStudioDraft?.price || ''}
                     onApplyImages={handleApplyStudioImages}
                 />
-                </div>
             </div>
         )
     }
@@ -3742,7 +4147,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     // ═══════════════════════════════════════════════════════════════════════
     if (viewMode === 'add-bulk') {
         return (
-            <div className="space-y-4">
+            <div className="space-y-4 font-sans font-[family-name:var(--font-inter)]">
                 <div className="flex items-center gap-3 bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-lg shadow-sm">
                     <button type="button" onClick={handleBackToList} className="p-1.5 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-full">
                         <ArrowLeft size={16} />
@@ -3942,6 +4347,26 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             }}
                                             className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
                                         />
+                                        {(() => {
+                                            const profit = computeProfitInfo(row.extractedCategory?.path, row.special_price || row.price, row.wholesale_price)
+                                            if (!profit) return null
+                                            return (
+                                                <div className="pt-0.5">
+                                                    {profit.hasWholesale ? (
+                                                        <div className={`text-[11px] font-bold flex items-center gap-1 ${
+                                                            profit.isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                                                        }`}>
+                                                            <span>{profit.isPositive ? 'Profit:' : 'Loss:'}</span>
+                                                            <span>{profit.isPositive ? '+' : ''}NPR {profit.profit}</span>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                                                            Receivable: NPR {profit.receivableAmount}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )
+                                        })()}
                                     </div>
 
                                     {/* Campaign Price */}
@@ -3962,6 +4387,26 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             }}
                                             className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
                                         />
+                                        {(() => {
+                                            const campProfit = computeProfitInfo(row.extractedCategory?.path, row.campaign_price, row.wholesale_price)
+                                            if (!campProfit) return null
+                                            return (
+                                                <div className="pt-0.5">
+                                                    {campProfit.hasWholesale ? (
+                                                        <div className={`text-[11px] font-bold flex items-center gap-1 ${
+                                                            campProfit.isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                                                        }`}>
+                                                            <span>{campProfit.isPositive ? 'Campaign:' : 'Loss:'}</span>
+                                                            <span>{campProfit.isPositive ? '+' : ''}NPR {campProfit.profit}</span>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                                                            Receivable: NPR {campProfit.receivableAmount}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )
+                                        })()}
                                     </div>
                                 </div>
 
@@ -4011,11 +4456,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     setBulkDragImageIdx(null);
                                                     setBulkDragOverIdx(null);
                                                 }}
-                                                className={`relative w-16 h-16 sm:w-20 sm:h-20 border-2 rounded-lg overflow-hidden group cursor-grab active:cursor-grabbing transition-all ${
+                                                className={`relative w-20 h-20 sm:w-24 sm:h-24 border-2 rounded-lg overflow-hidden group cursor-grab active:cursor-grabbing transition-all ${
                                                     bulkDragSourceRowId === row.id && bulkDragOverIdx === imgIdx 
                                                         ? 'border-orange-500 scale-105 shadow-md' 
                                                         : imgIdx === 0 
-                                                            ? 'border-orange-500 shadow-xs' 
+                                                            ? 'border-orange-500 shadow-xs ring-1 ring-orange-500/20' 
                                                             : 'border-gray-200 dark:border-zinc-700 hover:border-gray-300'
                                                 }`}
                                             >
@@ -4028,27 +4473,39 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     </span>
                                                 )}
 
+                                                {/* Center View Icon */}
+                                                <div 
+                                                    onClick={() => setPreviewLargeImage({ url: img, index: imgIdx, bulkRowIndex: idx })}
+                                                    className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity z-10 cursor-pointer"
+                                                >
+                                                    <div className="w-6 h-6 rounded-full bg-white/20 backdrop-blur-xs flex items-center justify-center text-white">
+                                                        <Maximize2 size={13} />
+                                                    </div>
+                                                </div>
+
+                                                {/* Delete button: only deletes when clicked */}
                                                 <button
                                                     type="button"
-                                                    onClick={() => {
+                                                    onClick={(e) => {
+                                                        e.stopPropagation()
                                                         const next = [...bulkRows]
                                                         next[idx].images = next[idx].images.filter((_, i) => i !== imgIdx)
                                                         setBulkRows(next)
                                                     }}
-                                                    className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 text-white flex items-center justify-center text-sm font-bold transition-opacity"
-                                                    title="Remove image"
+                                                    className="absolute top-1 right-1 w-6 h-6 bg-red-600/90 hover:bg-red-600 active:scale-95 text-white rounded-md shadow-md opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center z-20 hover:scale-110 cursor-pointer"
+                                                    title="Delete image"
                                                 >
-                                                    ×
+                                                    <Trash2 size={12} />
                                                 </button>
                                             </div>
                                         ))}
                                         {row.images.length < 8 && (
-                                            <label className="w-16 h-16 sm:w-20 sm:h-20 border border-dashed border-gray-300 dark:border-zinc-700 rounded-lg flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-orange-500 hover:bg-orange-50/20 transition-all shrink-0">
+                                            <label className="w-20 h-20 sm:w-24 sm:h-24 border border-dashed border-gray-300 dark:border-zinc-700 rounded-lg flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-orange-500 hover:bg-orange-50/20 transition-all shrink-0">
                                                 {bulkUploadingId === row.id
                                                     ? <Loader2 className="animate-spin text-orange-500" size={16} />
                                                     : <Upload className="text-gray-400 group-hover:text-orange-500 transition-colors" size={16} />
                                                 }
-                                                <span className="text-[10px] text-gray-400 font-medium">Upload</span>
+                                                <span className="text-[10px] text-gray-400 font-medium">Add Photos</span>
                                                 <input
                                                     type="file"
                                                     accept="image/*"
@@ -4059,6 +4516,35 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 />
                                             </label>
                                         )}
+                                    </div>
+
+                                    {/* Pre-Flight Image Validation Line in Bulk Row */}
+                                    <div className="pt-1.5 space-y-1 max-w-xs">
+                                        <div className="flex items-center justify-between text-[10px] font-semibold">
+                                            <span className="flex items-center gap-1 text-gray-600 dark:text-zinc-400">
+                                                <span className={`inline-block w-1.5 h-1.5 rounded-full ${row.images.length > 3 ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                                                Photos: {row.images.length}
+                                            </span>
+                                            <span className={row.images.length > 3 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-amber-600 dark:text-amber-400 font-bold'}>
+                                                {row.images.length < 2
+                                                    ? 'Min 2-3 images needed'
+                                                    : row.images.length <= 3
+                                                    ? 'Acceptable (2-3)'
+                                                    : 'Ready (>3 images ✓)'}
+                                            </span>
+                                        </div>
+                                        <div className="w-full bg-gray-100 dark:bg-zinc-800 h-1.5 rounded-full overflow-hidden p-0.5 border border-gray-200 dark:border-zinc-700">
+                                            <div
+                                                className={`h-full rounded-full transition-all duration-300 ${
+                                                    row.images.length > 3
+                                                        ? 'bg-emerald-500'
+                                                        : 'bg-amber-400'
+                                                }`}
+                                                style={{
+                                                    width: `${Math.min(100, Math.max(12, (row.images.length / 4) * 100))}%`
+                                                }}
+                                            />
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -4112,7 +4598,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     // VIEW 3: FULL ADD / EDIT FORM
     // ═══════════════════════════════════════════════════════════════════════
     return (
-        <div className="space-y-5">
+        <div className="space-y-5 font-sans font-[family-name:var(--font-inter)]">
             {/* Merged Header & AI Generator Bar */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-xl shadow-sm">
                 {/* 1. Left: Back Arrow, Title & Subtitle */}
@@ -4143,6 +4629,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         onChange={(e) => setAiModel(e.target.value)}
                         className="py-1 px-2.5 border border-orange-200 dark:border-zinc-700 rounded-md text-xs bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-400 font-medium"
                     >
+                        <option value="gemini-3.5-flash">Gemini 3.5 Flash (Free Tier)</option>
+                        <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                         <option value="gpt-4o-mini">GPT-4o Mini</option>
                         <option value="gpt-4o">GPT-4o (Vision)</option>
                     </select>
@@ -4235,6 +4723,30 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 {specialPrice && sellingPrice ? (
                                     <p className="text-[10px] text-gray-400 truncate">Listed Price: NPR {sellingPrice}</p>
                                 ) : null}
+
+                                {/* Real-time Profit / Receivable Calculation */}
+                                {(() => {
+                                    const profitInfo = computeProfitInfo(categoryPath, specialPrice || sellingPrice, wholesalePrice)
+                                    if (!profitInfo) return null
+                                    return (
+                                        <div className="pt-0.5">
+                                            {profitInfo.hasWholesale ? (
+                                                <div className={`text-[11px] font-bold flex items-center gap-1 ${
+                                                    profitInfo.isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                                                }`}>
+                                                    <span>{profitInfo.isPositive ? 'Profit:' : 'Loss:'}</span>
+                                                    <span>{profitInfo.isPositive ? '+' : ''}NPR {profitInfo.profit}</span>
+                                                    <span className="text-[10px] text-gray-400 font-normal">({profitInfo.commRate}% comm)</span>
+                                                </div>
+                                            ) : (
+                                                <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                                                    <span>Receivable:</span>
+                                                    <span>NPR {profitInfo.receivableAmount}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )
+                                })()}
                             </div>
 
                             {/* Campaign Price Input */}
@@ -4254,6 +4766,29 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     }}
                                     className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-medium"
                                 />
+
+                                {/* Real-time Profit / Receivable for Campaign */}
+                                {(() => {
+                                    const campProfitInfo = computeProfitInfo(categoryPath, campaignPrice, wholesalePrice)
+                                    if (!campProfitInfo) return null
+                                    return (
+                                        <div className="pt-0.5">
+                                            {campProfitInfo.hasWholesale ? (
+                                                <div className={`text-[11px] font-bold flex items-center gap-1 ${
+                                                    campProfitInfo.isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                                                }`}>
+                                                    <span>{campProfitInfo.isPositive ? 'Campaign Profit:' : 'Campaign Loss:'}</span>
+                                                    <span>{campProfitInfo.isPositive ? '+' : ''}NPR {campProfitInfo.profit}</span>
+                                                </div>
+                                            ) : (
+                                                <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                                                    <span>Receivable:</span>
+                                                    <span>NPR {campProfitInfo.receivableAmount}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )
+                                })()}
                             </div>
                         </div>
                     </div>
@@ -4407,6 +4942,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             value={titleVal}
                                             onChange={(e) => {
                                                 const val = e.target.value
+                                                setIsAiGeneratedTitle(false)
                                                 if (storeId) {
                                                     setTitlesPerStore(prev => ({ ...prev, [storeId]: val, '__manual__': val }))
                                                 } else {
@@ -4418,9 +4954,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             className="w-full h-9 px-3 border border-gray-300 dark:border-zinc-700 rounded-md text-xs text-gray-800 dark:text-zinc-100 placeholder:text-gray-400 bg-white dark:bg-zinc-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 transition-colors font-normal"
                                         />
                                         <p className="text-[11px] text-gray-400">
-                                            {Object.keys(titlesPerStore).length > 0
+                                            {isAiGeneratedTitle
                                                 ? <span className="text-orange-500 font-medium">✦ AI-generated title — you can edit it</span>
-                                                : 'Type manually or click "Generate Content" to auto-generate an SEO-optimized title'
+                                                : 'Type title manually or click "Generate Content" to auto-generate an SEO title'
                                             }
                                         </p>
                                     </div>
@@ -4430,7 +4966,13 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         {/* Category Picker with auto-select */}
                         <CategoryPicker
-                            productName={Object.values(titlesPerStore).filter(t => t && t !== '').join(' ') || rawName || ''}
+                            productName={(() => {
+                                const activeStoreId = activeTitleStoreId || selectedStores[0]
+                                const activeVal = (activeStoreId && titlesPerStore[activeStoreId])
+                                    ? titlesPerStore[activeStoreId]
+                                    : (titlesPerStore['__manual__'] || Object.values(titlesPerStore).find(t => t && t.trim() !== '') || '')
+                                return activeVal || rawName || ''
+                            })()}
                             selectedCategoryId={categoryId}
                             selectedCategoryPath={categoryPath}
                             onSelectCategory={(id, path) => {
@@ -4483,38 +5025,101 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                             setDragOverIdx(null)
                                         }}
                                         onDragEnd={() => { setDragImageIdx(null); setDragOverIdx(null) }}
-                                        className={`relative w-20 h-20 group border-2 rounded overflow-hidden cursor-grab active:cursor-grabbing transition-all
-                                            ${dragOverIdx === idx ? 'border-orange-500 scale-105' : idx === 0 ? 'border-orange-400' : 'border-gray-200 dark:border-zinc-700'}`}
+                                        onClick={() => setPreviewLargeImage({ url: img, index: idx })}
+                                        className={`relative w-28 h-28 group border-2 rounded-xl overflow-hidden cursor-pointer transition-all shadow-xs select-none
+                                            ${dragOverIdx === idx ? 'border-orange-500 scale-105 shadow-md' : idx === 0 ? 'border-orange-500 ring-2 ring-orange-500/20 shadow-xs' : 'border-gray-200 dark:border-zinc-700 hover:border-orange-400 dark:hover:border-orange-500'}`}
+                                        title="Click to view large image"
                                     >
-                                        <img src={img} className="w-full h-full object-cover" alt="" />
+                                        <img 
+                                            src={img} 
+                                            className="w-full h-full object-cover transition-transform duration-250 group-hover:scale-108" 
+                                            alt="" 
+                                        />
+                                        
                                         {/* Primary badge */}
                                         {idx === 0 && (
-                                            <span className="absolute top-0 left-0 bg-orange-500 text-white text-[9px] font-bold px-1 py-0.5 rounded-br">
+                                            <span className="absolute top-0 left-0 bg-gradient-to-r from-orange-600 to-amber-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-br shadow-xs z-10 pointer-events-none">
                                                 Primary
                                             </span>
                                         )}
-                                        {/* Drag indicator */}
-                                        <span className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-80 transition-opacity">
-                                            <svg width="12" height="12" viewBox="0 0 16 16" fill="white"><path d="M7 2a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm3 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM7 6a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm3 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm-3 4a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm3 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
-                                        </span>
+                                        
+                                        {/* Center enlarge hint on hover */}
+                                        <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-white transition-opacity duration-150 pointer-events-none z-10">
+                                            <div className="w-8 h-8 rounded-full bg-white/25 backdrop-blur-md flex items-center justify-center text-white mb-1 shadow-sm group-hover:scale-110 transition-transform">
+                                                <Maximize2 size={15} />
+                                            </div>
+                                            <span className="text-[10px] font-medium tracking-tight text-white/95">View Large</span>
+                                        </div>
+
+                                        {/* Distinct Delete button - ONLY deletes when this button is clicked */}
                                         <button
                                             type="button"
-                                            onClick={() => removeImage(idx)}
-                                            className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-80 flex items-center justify-center text-white transition-opacity pt-4"
+                                            onClick={(e) => {
+                                                e.stopPropagation()
+                                                removeImage(idx)
+                                            }}
+                                            className="absolute top-1.5 right-1.5 w-7 h-7 bg-red-600/90 hover:bg-red-600 active:scale-95 text-white rounded-lg shadow-md opacity-0 group-hover:opacity-100 transition-all duration-150 flex items-center justify-center z-20 hover:scale-110 cursor-pointer"
+                                            title="Delete image"
                                         >
-                                            <Trash2 size={16} />
+                                            <Trash2 size={13} />
                                         </button>
                                     </div>
                                 ))}
                                 {images.length < 8 && (
-                                    <label className="w-20 h-20 rounded border-2 border-dashed border-gray-300 dark:border-zinc-700 flex flex-col items-center justify-center cursor-pointer hover:border-orange-500 transition-colors">
-                                        {uploadingImage
-                                            ? <Loader2 className="animate-spin text-gray-400" size={20} />
-                                            : <><Upload className="text-gray-400" size={20} /><span className="text-[10px] text-gray-400 font-semibold mt-1">Upload</span></>
-                                        }
-                                        <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" disabled={uploadingImage} />
+                                    <label className="w-28 h-28 rounded-lg border-2 border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-500 dark:hover:border-orange-400 bg-gray-50/50 dark:bg-zinc-800/40 hover:bg-orange-50/30 dark:hover:bg-orange-950/20 flex flex-col items-center justify-center cursor-pointer transition-all shadow-2xs group">
+                                        {uploadingImage ? (
+                                            <div className="flex flex-col items-center gap-1">
+                                                <Loader2 className="animate-spin text-orange-500" size={22} />
+                                                <span className="text-[10px] text-orange-600 font-semibold">Uploading...</span>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <div className="w-8 h-8 rounded-full bg-orange-100 dark:bg-orange-950/40 text-orange-600 dark:text-orange-400 flex items-center justify-center mb-1 group-hover:scale-110 transition-transform">
+                                                    <Upload size={16} />
+                                                </div>
+                                                <span className="text-xs text-gray-700 dark:text-zinc-200 font-bold">Add Photos</span>
+                                                <span className="text-[10px] text-gray-400">Select Multiple</span>
+                                            </>
+                                        )}
+                                        <input
+                                            type="file"
+                                            accept="image/*"
+                                            multiple
+                                            onChange={handleImageUpload}
+                                            className="hidden"
+                                            disabled={uploadingImage}
+                                        />
                                     </label>
                                 )}
+                            </div>
+
+                            {/* Pre-Flight Image Validation Line (<2 yellow, 2-3 yellow, >3 green) */}
+                            <div className="pt-2 space-y-1.5 max-w-md">
+                                <div className="flex items-center justify-between text-[11px] font-semibold">
+                                    <span className="flex items-center gap-1.5 text-gray-700 dark:text-zinc-300">
+                                        <span className={`inline-block w-2 h-2 rounded-full ${images.length > 3 ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                                        Pre-flight Check: {images.length} Image{images.length !== 1 ? 's' : ''}
+                                    </span>
+                                    <span className={images.length > 3 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-amber-600 dark:text-amber-400 font-bold'}>
+                                        {images.length < 2
+                                            ? 'Min 2-3 images required'
+                                            : images.length <= 3
+                                            ? 'Standard gallery (2-3 images)'
+                                            : 'Excellent gallery (>3 images ✓)'}
+                                    </span>
+                                </div>
+                                <div className="w-full bg-gray-100 dark:bg-zinc-800 h-2 rounded-full overflow-hidden p-0.5 border border-gray-200 dark:border-zinc-700">
+                                    <div
+                                        className={`h-full rounded-full transition-all duration-300 ${
+                                            images.length > 3
+                                                ? 'bg-emerald-500 shadow-sm shadow-emerald-500/40'
+                                                : 'bg-amber-400 shadow-sm shadow-amber-400/40'
+                                        }`}
+                                        style={{
+                                            width: `${Math.min(100, Math.max(12, (images.length / 4) * 100))}%`
+                                        }}
+                                    />
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -5513,6 +6118,74 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 price={aiStudioDraft?.price || sellingPrice || ''}
                 onApplyImages={handleApplyStudioImages}
             />
+
+            {/* ── Large Image Lightbox Preview Modal ───────── */}
+            {previewLargeImage && (
+                <div 
+                    className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200"
+                    onClick={() => setPreviewLargeImage(null)}
+                >
+                    {/* Top Floating Controls Bar */}
+                    <div 
+                        className="w-full max-w-4xl flex items-center justify-between text-white pb-3 px-2 sm:px-0"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center gap-2.5">
+                            <span className="text-xs sm:text-sm font-semibold tracking-wide bg-white/10 px-3 py-1 rounded-full border border-white/15">
+                                Image {previewLargeImage.index + 1}
+                            </span>
+                            {previewLargeImage.index === 0 && (
+                                <span className="text-[11px] sm:text-xs bg-gradient-to-r from-orange-600 to-amber-600 text-white font-medium px-2.5 py-0.5 rounded-full shadow-xs">
+                                    Primary Listing Cover
+                                </span>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    if (previewLargeImage.bulkRowIndex !== undefined) {
+                                        const bIdx = previewLargeImage.bulkRowIndex
+                                        const imgIdx = previewLargeImage.index
+                                        const next = [...bulkRows]
+                                        next[bIdx].images = next[bIdx].images.filter((_, i) => i !== imgIdx)
+                                        setBulkRows(next)
+                                    } else {
+                                        removeImage(previewLargeImage.index)
+                                    }
+                                    setPreviewLargeImage(null)
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 active:scale-95 rounded-lg transition-all shadow-md cursor-pointer"
+                                title="Delete this photo"
+                            >
+                                <Trash2 size={14} />
+                                <span>Delete Photo</span>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setPreviewLargeImage(null)}
+                                className="w-8 h-8 rounded-full bg-white/15 hover:bg-white/25 active:scale-95 text-white flex items-center justify-center transition-all cursor-pointer"
+                                title="Close preview (Esc)"
+                            >
+                                <X size={18} />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Large Image Frame */}
+                    <div 
+                        className="relative max-w-4xl max-h-[80vh] flex items-center justify-center rounded-2xl overflow-hidden border border-white/15 shadow-2xl bg-black/60"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <img 
+                            src={previewLargeImage.url} 
+                            alt="Product Preview Large" 
+                            className="max-h-[76vh] max-w-full object-contain select-none"
+                        />
+                    </div>
+                </div>
+            )}
 
             <datalist id="variant-color-options">
                 {COMMON_COLORS.map(color => (

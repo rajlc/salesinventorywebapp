@@ -1,4 +1,11 @@
-import sharp from 'sharp'
+async function getSharp() {
+    try {
+        const mod = await import('sharp')
+        return mod.default || mod
+    } catch {
+        return null
+    }
+}
 
 export interface OptimizedImage {
     url: string
@@ -46,6 +53,22 @@ export async function fetchAndOptimizeImage(url: string, maxDim = 1024): Promise
 
         const arrayBuf = await res.arrayBuffer()
         const buf = Buffer.from(arrayBuf)
+
+        const sharp = await getSharp()
+        if (!sharp) {
+            const base64 = buf.toString('base64')
+            const result: OptimizedImage = {
+                url,
+                base64,
+                mimeType: 'image/jpeg',
+                dataUrl: `data:image/jpeg;base64,${base64}`,
+                width: maxDim,
+                height: maxDim,
+                sizeBytes: buf.length
+            }
+            imageCache.set(url, { data: result, expires: Date.now() + 30 * 60 * 1000 })
+            return result
+        }
 
         const meta = await sharp(buf).metadata()
         const optBuf = await sharp(buf)

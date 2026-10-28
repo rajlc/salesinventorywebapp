@@ -1,84 +1,95 @@
 import { NextRequest, NextResponse } from 'next/server'
+import axios from 'axios'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getValidAccessToken, buildSignedParams, API_URL } from '@/lib/daraz/client'
+import { searchDarazCategories, type DarazCategoryLeaf } from '@/lib/daraz/category-service'
+
+/**
+ * Category suggestions from a product title — NO AI involved.
+ *
+ *  1. Try Daraz's own suggestion endpoint (Seller Center source). On the Nepal
+ *     gateway this currently answers "InvalidApiPath", so after one failure we
+ *     skip it for an hour to keep requests fast. If Daraz ever enables it, it
+ *     is picked up automatically.
+ *  2. Otherwise rank the real Daraz leaf categories (cached tree, in-memory)
+ *     against the title and each "|" / "," segment of it.
+ */
+
+let darazSuggestDisabledUntil = 0
+
+async function tryDarazSuggestion(productName: string): Promise<Array<{ id: number; path: string }>> {
+    if (Date.now() < darazSuggestDisabledUntil) return []
+    try {
+        const supabase = await createAdminClient()
+        const { data: stores } = await supabase.from('online_stores').select('id').eq('is_active', true).limit(1)
+        if (!stores?.length) return []
+        const accessToken = await getValidAccessToken(stores[0].id, 'order')
+        const params = buildSignedParams('/product/category/suggestion/get', accessToken, { product_name: productName })
+        const res = await axios.get(`${API_URL}/product/category/suggestion/get`, { params, timeout: 4000 })
+        if (res.data?.code === 'InvalidApiPath') {
+            darazSuggestDisabledUntil = Date.now() + 60 * 60 * 1000
+            return []
+        }
+        const list = res.data?.data?.categorySuggestions || []
+        return list
+            .map((s: any) => ({ id: Number(s.categoryId), path: String(s.categoryPath || s.categoryName || '') }))
+            .filter((s: any) => s.id)
+    } catch {
+        darazSuggestDisabledUntil = Date.now() + 10 * 60 * 1000
+        return []
+    }
+}
 
 export async function GET(request: NextRequest) {
     try {
-        const { searchParams } = new URL(request.url)
-        const productName = searchParams.get('productName')
-        if (!productName) {
-            return NextResponse.json({ error: 'productName is required' }, { status: 400 })
+        const productName = new URL(request.url).searchParams.get('productName')?.trim()
+        if (!productName || productName.startsWith('[Image Only]') || productName.length < 2) {
+            return NextResponse.json({ success: true, source: 'none', suggestions: [], paths: [] })
         }
 
-        const supabase = await createAdminClient()
-
-        // Load AI Settings
-        const { data: aiSettingsRow } = await supabase
-            .from('app_settings')
-            .select('value')
-            .eq('key', 'daraz_ai_settings')
-            .maybeSingle()
-
-        const aiSettings = aiSettingsRow?.value || {}
-        const apiKey = aiSettings.apiKey || process.env.OPENAI_API_KEY || ''
-        const preferredModel = aiSettings.model || 'gpt-4o-mini'
-
-        if (!apiKey) {
-            return NextResponse.json({ success: true, paths: [] })
+        const fromDaraz = await tryDarazSuggestion(productName)
+        if (fromDaraz.length > 0) {
+            return NextResponse.json({ success: true, source: 'daraz', suggestions: fromDaraz.slice(0, 4), paths: [] })
         }
 
-        const prompt = `You are a product categorization expert for Daraz Nepal (Lazada).
-Identify the e-commerce category paths for the following product.
-PRODUCT: "${productName}"
+        const segments = productName
+            .split(/[|,\/]/)
+            .map(s => s.trim())
+            .filter(s => s.length > 2)
 
-Suggest the top 3 most relevant leaf category paths. Output ONLY a valid JSON object with a "suggestions" key containing an array of strings (using ' > ' as separator). No markdown code fences.
+        const queries = segments.length > 1 ? [productName, ...segments] : [productName]
+        const results = await Promise.all(queries.map(q => searchDarazCategories(q, 6)))
 
-Example response:
-{
-  "suggestions": [
-    "Fashion > Men > Shoes > Shoes Accessories",
-    "Health & Beauty > Bath & Body > Foot Care > Foot Deodorant"
-  ]
-}`
-
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify({
-                model: preferredModel,
-                messages: [
-                    { role: 'system', content: 'You always return a JSON object with a suggestions array of strings.' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0.2,
-                response_format: { type: 'json_object' }
-            })
-        })
-
-        if (!response.ok) {
-            return NextResponse.json({ success: true, paths: [] })
+        // Score candidates across all queries/segments
+        const candidateMap = new Map<number, { leaf: DarazCategoryLeaf; score: number }>()
+        for (let qIdx = 0; qIdx < queries.length; qIdx++) {
+            const list = results[qIdx]
+            for (let rank = 0; rank < list.length; rank++) {
+                const item = list[rank]
+                const rankMultiplier = Math.max(0.4, 1 - rank * 0.15)
+                const candidateScore = item.score * rankMultiplier
+                const existing = candidateMap.get(item.id)
+                if (!existing) {
+                    candidateMap.set(item.id, { leaf: item, score: candidateScore })
+                } else {
+                    existing.score = Math.max(existing.score, candidateScore) + candidateScore * 0.35
+                }
+            }
         }
 
-        const result = await response.json()
-        const rawContent = result.choices?.[0]?.message?.content || '{}'
-        
-        let parsed: any = {}
-        try {
-            parsed = JSON.parse(rawContent)
-        } catch {
-            parsed = {}
-        }
+        const sortedCandidates = Array.from(candidateMap.values())
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 4)
+            .map(c => ({ id: c.leaf.id, path: c.leaf.path }))
 
-        const paths = parsed.suggestions || []
         return NextResponse.json({
             success: true,
-            paths
+            source: 'matched',
+            suggestions: sortedCandidates,
+            paths: [],
         })
-
     } catch (error: any) {
         console.error('[DarazCategorySuggestion] Error:', error.message)
-        return NextResponse.json({ success: true, paths: [] })
+        return NextResponse.json({ success: true, source: 'none', suggestions: [], paths: [] })
     }
 }

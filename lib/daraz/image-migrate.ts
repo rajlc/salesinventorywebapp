@@ -1,8 +1,17 @@
 import axios from 'axios'
 import FormData from 'form-data'
-import sharp from 'sharp'
 import { buildSignedParams, signRequest, API_URL, APP_KEY, APP_SECRET } from './client'
 import { createAdminClient } from '@/lib/supabase/server'
+
+async function getSharp() {
+    try {
+        const mod = await import('sharp')
+        return mod.default || mod
+    } catch (e) {
+        console.warn('[ImageMigrate] Sharp native library not available:', e)
+        return null
+    }
+}
 
 /**
  * Strips webp transform extensions, resizing parameters (_720x720q80..., etc.)
@@ -89,6 +98,11 @@ async function convertAndReuploadAsJpeg(imageUrl: string): Promise<string> {
         }
     })
 
+    const sharp = await getSharp()
+    if (!sharp) {
+        throw new Error('Image conversion library not available on this server')
+    }
+
     const jpegBuffer = await sharp(downloadRes.data)
         .flatten({ background: { r: 255, g: 255, b: 255 } }) // Replace transparent backgrounds with white
         .jpeg({ quality: 90, mozjpeg: true })
@@ -165,6 +179,10 @@ export async function migrateImagesToDaraz(
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             })
+            const sharp = await getSharp()
+            if (!sharp) {
+                throw new Error('Image conversion library not available on this server')
+            }
             const jpegBuffer = await sharp(downloadRes.data)
                 .flatten({ background: { r: 255, g: 255, b: 255 } })
                 .jpeg({ quality: 90 })

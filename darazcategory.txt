@@ -1,0 +1,221 @@
+Latest update:
+2023-07-20 10:38:53
+8192
+GetCategoryAttributes
+GET
+/category/attributes/get
+Description：Use this API to get a list of attributes for a specified product category.
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+No
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+primary_category_id
+String
+Yes
+Identifier of the category for which the caller wants the list of attributes.
+language_code
+String
+No
+Language code indicates the type of language you would like to translate. Please note not all languages are available in every region. For example, in Indonesia, only English and Indonesia are available. If you are passing a language code which does not belong to your area, null value might receive. Please do make sure your language code is correct. Supported language codes are listed as below: English:"en_US" - available in every area Singapore:"en_SG" - available in Singapore Thailand"th_TH" - available in Thailand Indonesia:"id_ID" - available in Indonesia Vietnam:"vi_VN" - available in Vietnam Philippines: "fil_PH" - available in Philippines Malaysia : "ms_MY" - available in Malaysia Default(if null is passed): "en_US"
+Response Parameters
+Name
+Type
+Description
+data
+Object[]
+Response body
+Error code
+Error code
+Error message
+Solution
+57
+E057: No attribute sets linked to that category.
+No attributes are linked to the specified category.
+GET
+/category/attributes/get
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/category/attributes/get");
+request.setHttpMethod("GET");
+request.addApiParameter("primary_category_id", "8704");
+request.addApiParameter("language_code", "en_US");
+IopResponse response = client.execute(request);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": [
+    {
+      "advanced": {
+        "is_key_prop": 1
+      },
+      "is_sale_prop": "0",
+      "name": "mattress_size",
+      "input_type": "singleSelect",
+      "options": [
+        {
+          "name": "Twin"
+        }
+      ],
+      "is_mandatory": "1",
+      "attribute_type": "normal",
+      "label": "Size",
+      "id": "0"
+    }
+  ],
+  "request_id": "0ba2887315178178017221014"
+}
+
+
+Latest update:
+2023-07-20 10:45:34
+8170
+GetCategoryTree
+GET/POST
+/category/tree/get
+Description：Use this API to retrieve the list of all product categories in the system.
+Service Endpoints
+Region
+Endpoint
+Myanmar
+https://api.shop.com.mm/rest
+Bangladesh
+https://api.daraz.com.bd/rest
+Pakistan
+https://api.daraz.pk/rest
+Sri Lanka
+https://api.daraz.lk/rest
+Nepal
+https://api.daraz.com.np/rest
+Common Parameters
+Name
+Type
+Required or not
+Description
+app_key
+String
+Yes
+Unique app ID issued by DARAZ Open Platform console when you apply for an app category
+timestamp
+String
+Yes
+The time stamp of the request e.g. 1517820392000 (which translates to 5 February 2018 08:46:32) with less than 7200s difference from UTC time
+access_token
+String
+No
+API interface call credentials
+sign_method
+String
+Yes
+The HMAC hash algorithm you are using to calculate your signature
+sign
+String
+Yes
+Part of the authentication process that is used for identifying and verifying who is sending a request (click <a target='_blank' href='https://open.daraz.com/doc/doc.htm#?nodeId=10450&docId=108068'>here</a> for details)
+Parameter
+Name
+Type
+Required or not
+Description
+No Data
+Response Parameters
+Name
+Type
+Description
+data
+Object[]
+Response body
+Error code
+Error code
+Error message
+Solution
+No Data
+GET/POST
+/category/tree/get
+JAVA
+PHP
+.NET
+RUBY
+PYTHON
+CURL
+IopClient client = new IopClient(url, appkey, appSecret);
+IopRequest request = new IopRequest();
+request.setApiName("/category/tree/get");
+IopResponse response = client.execute(request);
+System.out.println(response.getBody());
+Thread.sleep(10);
+
+Streamlined Return
+{
+  "code": "0",
+  "data": [
+    {
+      "category_id": 6588,
+      "children": [
+        {
+          "category_id": 7436,
+          "var": true,
+          "name": "Socks",
+          "leaf": true
+        },
+        {
+          "category_id": 7435,
+          "var": true,
+          "name": "Underwear",
+          "leaf": true
+        }
+      ],
+      "var": true,
+      "name": "Socks \u0026 Tights",
+      "leaf": false
+    }
+  ],
+  "request_id": "0ba2887315178178017221014"
+}

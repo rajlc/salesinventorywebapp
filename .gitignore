@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+inventory-web-mobileapp/
 
 # debug
 npm-debug.log*
