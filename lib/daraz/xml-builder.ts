@@ -87,6 +87,9 @@ export function buildProductCreateXml(payload: DarazProductPayload): string {
     })
 
     // Build SKUs XML
+    const today = new Date().toISOString().split('T')[0]
+    const defaultSpecialTo = new Date(Date.now() + 5 * 365 * 24 * 3600 * 1000).toISOString().split('T')[0]
+
     const skusXml = skus.map((sku, i) => {
         const sellerSku = sku.sellerSku || generateSellerSku(name, i + 1)
         
@@ -100,14 +103,23 @@ export function buildProductCreateXml(payload: DarazProductPayload): string {
             .map(([k, v]) => `                      <${k}>${escapeXml(v)}</${k}>`)
             .join('\n')
 
+        const specialFrom = sku.specialPriceFrom || today
+        const specialTo = sku.specialPriceTo || defaultSpecialTo
+
+        // Ensure price is strictly greater than specialPrice if specialPrice is provided
+        let effectivePrice = sku.price
+        if (sku.specialPrice && sku.specialPrice > 0 && effectivePrice <= sku.specialPrice) {
+            effectivePrice = sku.specialPrice + 200
+        }
+
         return `                <Sku>
                      <SellerSku>${escapeXml(sellerSku)}</SellerSku>
 ${variantAttrLines}
                      <quantity>${sku.quantity}</quantity>
-                     <price>${sku.price.toFixed(2)}</price>
+                     <price>${effectivePrice.toFixed(2)}</price>
 ${sku.specialPrice ? `                     <special_price>${sku.specialPrice.toFixed(2)}</special_price>` : ''}
-${sku.specialPrice && sku.specialPriceFrom ? `                     <special_from_date>${sku.specialPriceFrom}</special_from_date>` : ''}
-${sku.specialPrice && sku.specialPriceTo ? `                     <special_to_date>${sku.specialPriceTo}</special_to_date>` : ''}
+${sku.specialPrice ? `                     <special_from_date>${specialFrom}</special_from_date>` : ''}
+${sku.specialPrice ? `                     <special_to_date>${specialTo}</special_to_date>` : ''}
 ${sku.packageLength ? `                     <package_length>${sku.packageLength}</package_length>` : ''}
 ${sku.packageHeight ? `                     <package_height>${sku.packageHeight}</package_height>` : ''}
 ${sku.packageWeight ? `                     <package_weight>${sku.packageWeight}</package_weight>` : ''}

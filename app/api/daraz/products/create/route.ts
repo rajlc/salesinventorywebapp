@@ -150,17 +150,29 @@ export async function POST(request: NextRequest) {
                     if (sku.color_family) variantAttributes.color_family = sku.color_family
                     if (sku.size) variantAttributes.size = sku.size
 
+                    const today = new Date().toISOString().split('T')[0]
+                    const defaultSpecialTo = new Date(Date.now() + 5 * 365 * 24 * 3600 * 1000).toISOString().split('T')[0]
+
+                    let skuPrice = Number(sku.price) || 500
+                    const skuSpecialPrice = (sku.specialPrice !== undefined && sku.specialPrice !== null && !isNaN(Number(sku.specialPrice)))
+                        ? Number(sku.specialPrice)
+                        : undefined
+
+                    if (skuSpecialPrice && skuPrice <= skuSpecialPrice) {
+                        skuPrice = skuSpecialPrice + 200
+                    }
+
                     enrichedSkus.push({
                         sellerSku: sku.sellerSku,
-                        price: sku.price,
-                        specialPrice: sku.specialPrice,
-                        specialPriceFrom: sku.specialPriceFrom,
-                        specialPriceTo: sku.specialPriceTo,
-                        quantity: sku.quantity,
-                        packageWeight: sku.packageWeight,
-                        packageLength: sku.packageLength,
-                        packageWidth: sku.packageWidth,
-                        packageHeight: sku.packageHeight,
+                        price: skuPrice,
+                        specialPrice: skuSpecialPrice,
+                        specialPriceFrom: sku.specialPriceFrom || (skuSpecialPrice ? today : undefined),
+                        specialPriceTo: sku.specialPriceTo || (skuSpecialPrice ? defaultSpecialTo : undefined),
+                        quantity: sku.quantity !== undefined ? Number(sku.quantity) : 100,
+                        packageWeight: sku.packageWeight !== undefined ? Number(sku.packageWeight) : 0.1,
+                        packageLength: sku.packageLength !== undefined ? Number(sku.packageLength) : 10,
+                        packageWidth: sku.packageWidth !== undefined ? Number(sku.packageWidth) : 10,
+                        packageHeight: sku.packageHeight !== undefined ? Number(sku.packageHeight) : 5,
                         packageContent: sku.packageContent || 'Standard Package',
                         images: darazSkuImages.length > 0 ? darazSkuImages : [darazMainImages[0]],
                         variantAttributes
