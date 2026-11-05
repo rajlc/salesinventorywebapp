@@ -27,10 +27,10 @@ CREATE INDEX IF NOT EXISTS idx_daraz_orders_store_order_date
 CREATE INDEX IF NOT EXISTS idx_daraz_orders_items_detail_gin
     ON public.daraz_orders USING gin (items_detail jsonb_path_ops);
 
--- 5. Reclaim dead tuples & refresh query planner statistics
-VACUUM ANALYZE public.app_settings;
-VACUUM ANALYZE public.daraz_chat_sessions;
-VACUUM ANALYZE public.daraz_chat_messages;
-VACUUM ANALYZE public.daraz_delayed_messages;
-VACUUM ANALYZE public.daraz_orders;
+-- 5. Refresh query planner statistics (runs cleanly inside Supabase SQL Editor transaction block)
+ANALYZE public.app_settings;
+ANALYZE public.daraz_chat_sessions;
+ANALYZE public.daraz_chat_messages;
+ANALYZE public.daraz_delayed_messages;
+ANALYZE public.daraz_orders;
 
