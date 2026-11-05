@@ -22,10 +22,10 @@ export default function DarazCustomerDetailsPage() {
 
     const queryClient = useQueryClient()
 
-    // Fetch unique seller accounts from online stores
+    // Fetch unique seller accounts from online stores (only stores with order sync enabled)
     const { data: onlineStoresResult } = useQuery({
-        queryKey: ['online-stores'],
-        queryFn: getOnlineStores
+        queryKey: ['online-stores', 'order-sync-only'],
+        queryFn: () => getOnlineStores({ onlyOrderSync: true })
     })
     const onlineStores = onlineStoresResult?.data || []
 

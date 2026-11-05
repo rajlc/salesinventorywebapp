@@ -171,8 +171,8 @@ export default function PanVatReportPage() {
         queryFn: getCompanyDetails
     })
 
-    // Fetch Online Stores
-    const { data: onlineStores = [], isLoading: isLoadingStores } = useOnlineStores()
+    // Fetch Online Stores (only Order Sync enabled stores)
+    const { data: onlineStores = [], isLoading: isLoadingStores } = useOnlineStores({ onlyOrderSync: true })
 
     // Fetch Purchase Bills
     const { data: purchaseBills = [], isLoading: isLoadingPurchases } = useQuery({

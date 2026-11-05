@@ -3,6 +3,7 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import axios from 'axios'
 import { syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
+import { isStoreOrderSyncEnabled, isStoreChatReviewEnabled } from '@/lib/daraz/store-sync-config'
 
 export const dynamic = 'force-dynamic'
 
@@ -65,6 +66,16 @@ export async function GET(request: NextRequest) {
     }
 
     const supabase = await createAdminClient()
+
+    // Guard: Check if Order Sync is enabled for this store
+    const orderSyncEnabled = await isStoreOrderSyncEnabled(storeId, supabase)
+    if (!orderSyncEnabled) {
+        return NextResponse.json({
+            orders: [],
+            count: 0,
+            message: 'Order sync is disabled for this store (Product Listing Only mode).'
+        })
+    }
 
     // 1. Get Token
     const { data: tokenData, error: dbError } = await supabase
@@ -701,11 +712,12 @@ export async function GET(request: NextRequest) {
 
             // Step 9: Queue and process automated chat greetings for pending orders
             try {
-                const { data: chatSettings } = await supabase
+                const chatEnabled = await isStoreChatReviewEnabled(storeId, supabase)
+                const { data: chatSettings } = chatEnabled ? await supabase
                     .from('daraz_chat_settings')
                     .select('*')
                     .eq('store_id', storeId)
-                    .maybeSingle()
+                    .maybeSingle() : { data: null }
 
                 if (chatSettings?.auto_reply_on_new_order) {
                     const pendingOrders = finalOrders.filter(o => {

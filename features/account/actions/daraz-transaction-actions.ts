@@ -2,6 +2,7 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
 
 export interface DarazWeeklyTransaction {
     id?: string
@@ -101,6 +102,17 @@ export async function getWeeklyEstimatedSales(startDate: string, endDate: string
 // Fetch daily estimated revenue AND daily shipped amount from database
 export async function getDailyDarazReportData(startDate: string, endDate: string) {
     const supabase = await createClient()
+
+    // Determine any stores with Order & Finance Sync disabled
+    const { data: rawStores } = await supabase
+        .from('online_stores')
+        .select('id, seller_account')
+    const enrichedStores = await enrichStoresWithSyncModes((rawStores || []) as any[], supabase)
+    const disabledAccounts = new Set(
+        enrichedStores
+            .filter((s: any) => s.order_sync_enabled === false && s.seller_account)
+            .map((s: any) => s.seller_account)
+    )
 
     // 1. Fetch delivered orders from database for accurate sales amount and commission fees
     const deliveredOrders: any[] = []
@@ -229,6 +241,7 @@ export async function getDailyDarazReportData(startDate: string, endDate: string
         if (endDate && dateStr > endDate) return
 
         const seller = order.online_stores?.seller_account || 'Unknown'
+        if (disabledAccounts.has(seller)) return
         const entry = getOrCreate(dateStr, seller)
 
         const price = parseFloat(order.price) || 0
@@ -246,6 +259,7 @@ export async function getDailyDarazReportData(startDate: string, endDate: string
     ;(deliveredStats || []).forEach((row: any) => {
         const date = row.date // YYYY-MM-DD
         const seller = row.seller
+        if (disabledAccounts.has(seller)) return
         const entry = getOrCreate(date, seller)
         
         const r = parseFloat(row.revenue) || 0
@@ -279,6 +293,7 @@ export async function getDailyDarazReportData(startDate: string, endDate: string
         if (endDate && dateStr > endDate) return
 
         const seller = order.online_stores?.seller_account || 'Unknown'
+        if (disabledAccounts.has(seller)) return
         const entry = getOrCreate(dateStr, seller)
         entry.shippedAmount += parseFloat(order.price) || 0
     })

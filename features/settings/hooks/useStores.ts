@@ -5,6 +5,7 @@ import {
     getOnlineStores,
     createOnlineStore,
     updateOnlineStore,
+    updateOnlineStoreSyncMode,
     deleteOnlineStore,
     getRetailStores,
     createRetailStore,
@@ -13,15 +14,15 @@ import {
 } from '../actions/settingsActions'
 
 // Online Stores Hooks
-export function useOnlineStores() {
+export function useOnlineStores(options?: { onlyOrderSync?: boolean; onlyChatReview?: boolean }) {
     return useQuery({
-        queryKey: ['online-stores'],
+        queryKey: ['online-stores', options?.onlyOrderSync ? 'order-sync-only' : 'all', options?.onlyChatReview ? 'chat-review-only' : 'all'],
         queryFn: async () => {
-            const result = await getOnlineStores()
+            const result = await getOnlineStores(options)
             if (result.error) throw new Error(result.error)
             return result.data || []
         },
-        staleTime: 1000 * 60 * 10,
+        staleTime: 1000 * 60 * 5,
     })
 }
 
@@ -32,6 +33,7 @@ export function useCreateOnlineStore() {
         mutationFn: createOnlineStore,
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['online-stores'] })
+            queryClient.invalidateQueries({ queryKey: ['daraz-seller-accounts'] })
         },
     })
 }
@@ -44,6 +46,20 @@ export function useUpdateOnlineStore() {
             updateOnlineStore(id, data),
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['online-stores'] })
+            queryClient.invalidateQueries({ queryKey: ['daraz-seller-accounts'] })
+        },
+    })
+}
+
+export function useToggleOnlineStoreSyncMode() {
+    const queryClient = useQueryClient()
+
+    return useMutation({
+        mutationFn: ({ id, mode }: { id: string; mode: { order_sync_enabled?: boolean; chat_review_enabled?: boolean } }) =>
+            updateOnlineStoreSyncMode(id, mode),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['online-stores'] })
+            queryClient.invalidateQueries({ queryKey: ['daraz-seller-accounts'] })
         },
     })
 }
@@ -55,6 +71,7 @@ export function useDeleteOnlineStore() {
         mutationFn: deleteOnlineStore,
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['online-stores'] })
+            queryClient.invalidateQueries({ queryKey: ['daraz-seller-accounts'] })
         },
     })
 }

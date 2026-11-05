@@ -196,8 +196,8 @@ export function DarazFinanceCard({ fiscalYearId }: DarazFinanceCardProps) {
         return activeFiscalYear || fiscalYears.find(fy => fy.is_active) || fiscalYears[0] || null
     }, [selectedFYId, fiscalYears, activeFiscalYear])
 
-    // Fetch Online Stores to map seller accounts to exact store company_name
-    const { data: onlineStores = [] } = useOnlineStores()
+    // Fetch Online Stores to map seller accounts to exact store company_name (only Order Sync enabled stores)
+    const { data: onlineStores = [] } = useOnlineStores({ onlyOrderSync: true })
 
     const storeCompanyMap = useMemo(() => {
         const map: Record<string, string> = {}

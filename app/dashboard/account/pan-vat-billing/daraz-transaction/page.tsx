@@ -109,8 +109,8 @@ export default function DarazTransactionPage() {
         return fiscalYears.find(fy => fy.id === fiscalYearId) || activeFiscalYear
     }, [fiscalYearId, fiscalYears, activeFiscalYear])
 
-    // Fetch Online Stores (Seller accounts & Company mappings)
-    const { data: onlineStores = [], isLoading: isLoadingStores } = useOnlineStores()
+    // Fetch Online Stores (Seller accounts & Company mappings - only Order Sync enabled stores)
+    const { data: onlineStores = [], isLoading: isLoadingStores } = useOnlineStores({ onlyOrderSync: true })
 
     // Fetch saved settlements/transactions for selected Fiscal Year
     const { data: savedTransactions = [], isLoading: isLoadingTransactions } = useQuery({

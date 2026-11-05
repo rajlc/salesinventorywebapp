@@ -12,7 +12,7 @@ export default function DarazAccountPage() {
 }
 
 function DarazAccountContent() {
-    const { data: rawStores, isLoading: isStoresLoading } = useOnlineStores()
+    const { data: rawStores, isLoading: isStoresLoading } = useOnlineStores({ onlyOrderSync: true })
     const stores = Array.isArray(rawStores) ? rawStores : []
     const [selectedStoreId, setSelectedStoreId] = useState<string>('')
     const [activeTab, setActiveTab] = useState<'report' | 'account-statement'>('account-statement')

@@ -6,6 +6,7 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { format } from 'date-fns'
 import { getStatementBreakdown, extractTaxInvoicesFromBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
+import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
 
 // Helper to sign extraction requests
 function signRequest(apiName: string, params: Record<string, any>, appSecret: string) {
@@ -141,9 +142,11 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
     }
 
     // Fetch stores to map identifier to store_id UUID
-    const { data: storeRows } = await supabase
+    const { data: rawStoreRows } = await supabase
         .from('online_stores')
         .select('id, seller_account, seller_id, company_name')
+    const storeRows = await enrichStoresWithSyncModes((rawStoreRows || []) as any[], supabase)
+    const disabledStoreIds = new Set(storeRows.filter((s: any) => s.order_sync_enabled === false).map((s: any) => s.id))
 
     const target = (storeIdentifier || '').trim().toLowerCase()
 
@@ -165,6 +168,10 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
         })
     }
 
+    if (matchedStore && matchedStore.order_sync_enabled === false) {
+        throw new Error(`Order & Finance sync is disabled for "${matchedStore.seller_account}" (Product Listing Only mode).`)
+    }
+
     // Query tokens for matched store
     let tokenData: any = null
     if (matchedStore) {
@@ -176,12 +183,13 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
         tokenData = tokens?.find((t: any) => t.app_type === 'order' && t.access_token) || tokens?.find((t: any) => t.access_token)
     }
 
-    // If still not found, fetch all tokens
+    // If still not found, fetch all tokens (excluding disabled stores)
     if (!tokenData) {
         const { data: allTokens } = await supabase
             .from('daraz_api_tokens')
             .select('*')
-        tokenData = allTokens?.find((t: any) => t.app_type === 'order' && t.access_token) || allTokens?.find((t: any) => t.access_token)
+        const enabledTokens = (allTokens || []).filter((t: any) => !disabledStoreIds.has(t.store_id))
+        tokenData = enabledTokens.find((t: any) => t.app_type === 'order' && t.access_token) || enabledTokens.find((t: any) => t.access_token)
     }
 
     if (!tokenData || !tokenData.access_token) {
@@ -303,10 +311,21 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
 export async function fetchDarazPayoutStatus(storeId?: string, createdAfter?: string) {
     const supabase = await createAdminClient()
 
-    // Query online_stores table
-    const { data: storeRows } = await supabase
+    // Query online_stores table and filter out Product-Listing-Only stores
+    const { data: rawStoreRows } = await supabase
         .from('online_stores')
         .select('id, seller_account, seller_id, company_name')
+
+    const enrichedStoreRows = await enrichStoresWithSyncModes((rawStoreRows || []) as any[], supabase)
+    const disabledStoreIds = new Set(
+        enrichedStoreRows.filter((s: any) => s.order_sync_enabled === false).map((s: any) => s.id)
+    )
+    const disabledAccountsLower = new Set(
+        enrichedStoreRows
+            .filter((s: any) => s.order_sync_enabled === false && s.seller_account)
+            .map((s: any) => String(s.seller_account).toLowerCase())
+    )
+    const storeRows = enrichedStoreRows.filter((s: any) => s.order_sync_enabled !== false)
 
     const storeNameMap: Record<string, string> = {}
     const companyNameMap: Record<string, string> = {}
@@ -375,6 +394,7 @@ export async function fetchDarazPayoutStatus(storeId?: string, createdAfter?: st
 
                 for (const tokenData of tokens) {
                     if (!tokenData.access_token) continue
+                    if (tokenData.store_id && disabledStoreIds.has(tokenData.store_id)) continue
 
                     const matchedStore = storeRows?.find((s: any) => s.id === tokenData.store_id)
                     let tokenStoreName = matchedStore?.seller_account
@@ -401,6 +421,8 @@ export async function fetchDarazPayoutStatus(storeId?: string, createdAfter?: st
                             const finalStoreName = (tokenStoreName && tokenStoreName !== 'All') 
                                 ? tokenStoreName 
                                 : resolveStoreName(tokenStoreName, sampleStmt)
+
+                            if (disabledAccountsLower.has(finalStoreName.toLowerCase())) continue
 
                             const compName = matchedStore?.company_name || companyNameMap[finalStoreName.toLowerCase()] || finalStoreName
 
@@ -445,14 +467,17 @@ export async function fetchDarazPayoutStatus(storeId?: string, createdAfter?: st
         }
 
         const { data } = await query
-        const orders = data || []
+        const orders = (data || []).filter((o: any) => !disabledAccountsLower.has(String(o.seller_account || '').toLowerCase()))
 
         let targetStores: string[] = []
         if (storeId && storeId !== 'All' && storeId !== 'Account Not Found') {
-            targetStores = [storeId]
+            if (!disabledAccountsLower.has(storeId.toLowerCase()) && !disabledStoreIds.has(storeId)) {
+                targetStores = [storeId]
+            }
         } else {
             const uniqueStores = Array.from(new Set(orders.map((o: any) => o.seller_account).filter(Boolean))) as string[]
-            targetStores = uniqueStores.length > 0 ? uniqueStores : ['Bagmati Traders', 'Balaju Branch', 'BTAS Cosmetics']
+            const fallbackStores = (uniqueStores.length > 0 ? uniqueStores : ['Bagmati Traders', 'Balaju Branch', 'BTAS Cosmetics'])
+            targetStores = fallbackStores.filter(s => !disabledAccountsLower.has(s.toLowerCase()))
         }
 
         // Fuzzy store matching helper

@@ -258,10 +258,10 @@ export default function DarazSalesEntryPage() {
         staleTime: 60 * 1000
     })
 
-    // Fetch online stores for filter
+    // Fetch online stores for filter (only stores with order sync enabled)
     const { data: onlineStoresResult } = useQuery({
-        queryKey: ['online-stores'],
-        queryFn: getOnlineStores,
+        queryKey: ['online-stores', 'order-sync-only'],
+        queryFn: () => getOnlineStores({ onlyOrderSync: true }),
         staleTime: 10 * 60 * 1000
     })
     const onlineStores = onlineStoresResult?.data || []

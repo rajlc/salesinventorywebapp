@@ -1,9 +1,10 @@
-import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import axios from 'axios'
 import { revalidatePath } from 'next/cache'
 import { syncOrderPurchaseCost } from './report-actions'
 import { autoPlanPurchaseForOrder } from '@/features/purchase/actions/auto-plan-utils'
+import { isStoreOrderSyncEnabled } from '@/lib/daraz/store-sync-config'
 
 // Helper: Sign Daraz API Requests
 export function signRequest(apiName: string, params: Record<string, any>, appSecret: string) {
@@ -63,6 +64,13 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
     }
 
     const supabase = await createAdminClient()
+
+    // Guard: Check if Order Sync is enabled for this store
+    const orderSyncEnabled = await isStoreOrderSyncEnabled(storeId, supabase)
+    if (!orderSyncEnabled) {
+        console.log(`[DarazSync] Skipping order ${orderId} — Order sync is disabled for store ${storeId}`)
+        return { success: false, skipped: true, newStatus: 'Skipped (Order Sync Disabled)' }
+    }
 
     // Get Token
     const { data: tokenData, error: dbError } = await supabase
@@ -206,7 +214,6 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
         let savedOrder = initialSavedOrder;
         if (saveError) {
              if (saveError.code === '23505' && saveError.message.includes('invoice_number_key')) {
-                 // Collision on single insert. Append a random suffix to bypass Next.js cache and guarantee uniqueness
                  const randAppendix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
                  upsertPayload.invoice_number = `${invoiceNumber}-${randAppendix}`;
                  console.log(`[DarazSync] Invoice collision detected for order ${order.order_number}. Retrying with: ${upsertPayload.invoice_number}`);
@@ -248,8 +255,6 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
             })
 
             if (itemsToSync.length > 0) {
-                // [RACE CONDITION FIX] Instead of deleting all, we use deterministic IDs and upsert.
-                // This prevents parallel processes from clearing and then doubling the items.
                 const orderItemsPayload = []
                 let sequence = 1
 
@@ -282,12 +287,9 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
                         if (aggregatedItems.has(key)) {
                             const existing = aggregatedItems.get(key)
                             existing.quantity += 1
-                            // Keep the higher priority status if they differ
                             existing.status = getProminentStatus([existing.status, p.status])
                             existing.item_status = existing.status
                         } else {
-                            // Generate deterministic ID for this item group within this order
-                            // We EXCLUDE status from the ID seed so the ID stays the same even if status changes
                             p.id = generateDeterministicId(`order-${savedOrder.id}-sku-${p.seller_sku}-amt-${p.amount}`)
                             aggregatedItems.set(key, p)
                         }
@@ -306,7 +308,6 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
                         .not('id', 'in', `(${finalIds.join(',')})`)
                 }
             } else {
-                // If there are no items to sync (e.g. order cancelled), clear existing ones
                 await supabase.from('daraz_order_items').delete().eq('order_id', savedOrder.id)
             }
 
@@ -331,18 +332,14 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
             const ordNum = String(order.order_number)
             console.log(`[DarazSync] Order ${ordNum} Delivered. Scheduling profit sync in 3 minutes...`)
 
-            // We use a non-awaited setTimeout to allow the request to COMPLETE and RETURN to the user/webhook
-            // while the sync runs in the background.
             setTimeout(async () => {
                 try {
-                    // Re-importing inside the closure if needed, but since it's an exported function from this file or imported, it should work.
-                    // Actually syncOrderPurchaseCost is imported at the top of the file.
                     await syncOrderPurchaseCost(ordNum)
                     console.log(`[DarazSync] Delayed Auto-profit-sync TRIGGERED for: ${ordNum}`)
                 } catch (syncErr: any) {
                     console.error(`[DarazSync] Delayed Auto-profit-sync FAILED for ${ordNum}:`, syncErr.message)
                 }
-            }, 180000) // 3 minutes = 180,000ms
+            }, 180000)
         }
 
         revalidatePath('/dashboard/sales/daraz')

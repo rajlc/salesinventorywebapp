@@ -1457,9 +1457,12 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                                /(pack|send|pathaunu|dinus).*(black|blue|red|green|white|yellow|gold|silver|pink)\s+(color|colour|ko|size|ma)/i.test(cleanText)
         const isAddressRequest = /(change|update|naya|arkai).*(address|thikana|location|ghar)/i.test(cleanText)
         const isPhoneRequest = /(change|update|naya|arkai).*(phone|number|mobile)/i.test(cleanText)
-        const isCancelRequest = /(cancel|cancellation|order radd|cancel garnu)/i.test(cleanText)
+        const isCancelRequest = /(cancel|cancellation|order radd|cancel garnu|cancel gardinu)/i.test(cleanText)
 
-        if (isColorRequest || isAddressRequest || isPhoneRequest || isCancelRequest) {
+        // Only use fallback static acknowledgment if AI Auto-Reply is disabled;
+        // When AI is enabled, let the AI agent handle cancellation (checking DB order status),
+        // address/phone policy, and variant modifications per the configured AI instructions.
+        if (!settings.ai_enabled && (isColorRequest || isAddressRequest || isPhoneRequest || isCancelRequest)) {
             let reason = 'Urgent customer order modification'
             if (isColorRequest) reason = `Customer requested color/variant change: "${userText.substring(0, 50)}"`
             else if (isAddressRequest) reason = `Customer requested address change: "${userText.substring(0, 50)}"`
@@ -1484,7 +1487,7 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                 reason
             ).catch(e => console.warn('[Handover1] Push notify warning:', e))
 
-            const ackReply = "Hajur, tapai ko request hami le note gareka xau. Hamro team le parcel dispatch garnu aghi tapailai direct call/contact garnecha. / Thank you, we have noted your request. Our support team will review and contact you before dispatch."
+            const ackReply = "Hajur, tapai ko request note gareka xau. Hamro team le parcel dispatch hunu aghi check garera yahi chat ma inform garnuhunxa."
             await sendChatMessage(storeId, sessionId, '1', ackReply, undefined, undefined, true)
             try { revalidatePath('/dashboard/chat-ai') } catch {}
             return
@@ -1579,35 +1582,64 @@ async function runAutoReply(storeId: string, sessionId: string, msg: DarazMessag
                 }
             }
 
-            // 2. Fetch Buyer's Orders (Prioritizing Pending orders)
-            let buyerOrdersContext = 'No active order records found for this buyer.'
+            // 2. Fetch Buyer's Orders (Prioritizing Pending/Active orders & Order Cards in session)
+            let buyerOrdersContext = 'No active order records found for this buyer in our database.'
             let buyerOrders: any[] | null = null
-            if (session?.buyer_id) {
+
+            // Check if an Order Card (template_id = '10007') was sent in this chat session
+            let cardOrderNumber: string | null = null
+            try {
+                const { data: orderCardMsg } = await supabase
+                    .from('daraz_chat_messages')
+                    .select('content')
+                    .eq('session_id', sessionId)
+                    .eq('template_id', '10007')
+                    .order('send_time', { ascending: false })
+                    .limit(1)
+                    .maybeSingle()
+                if (orderCardMsg?.content) {
+                    const parsedCard = JSON.parse(orderCardMsg.content)
+                    if (parsedCard?.orderId || parsedCard?.order_id) {
+                        cardOrderNumber = String(parsedCard.orderId || parsedCard.order_id).trim()
+                    }
+                }
+            } catch {}
+
+            if (session?.buyer_id || cardOrderNumber) {
                 const safeTitle = (session?.title || '').replace(/[,()]/g, ' ').trim()
                 const isGenericBuyer = !safeTitle || /^buyer\s*\d*$/i.test(safeTitle)
                 const cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
 
-                let buyerOrderQuery = supabase
-                    .from('daraz_orders')
-                    .select('order_number, order_status, order_date, price, daraz_order_items(product_name, seller_sku, quantity, amount)')
-                    .gte('order_date', cutoffDate)
-                    .order('order_date', { ascending: false })
-                    .limit(3)
-
+                const orFilters: string[] = []
+                if (cardOrderNumber) {
+                    orFilters.push(`order_number.eq.${cardOrderNumber}`)
+                }
+                if (session?.buyer_id) {
+                    orFilters.push(`items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
+                }
                 if (!isGenericBuyer && safeTitle.length >= 3) {
-                    buyerOrderQuery = buyerOrderQuery.or(`customer_name.ilike.%${safeTitle}%,items_detail.cs.[{"buyer_id":${session.buyer_id}}]`)
-                } else {
-                    buyerOrderQuery = buyerOrderQuery.filter('items_detail', 'cs', `[{"buyer_id":${session.buyer_id}}]`)
+                    orFilters.push(`customer_name.ilike.%${safeTitle}%`)
                 }
 
-                try {
-                    const res: any = await Promise.race([
-                        buyerOrderQuery,
-                        new Promise((resolve) => setTimeout(() => resolve({ data: null }), 3500))
-                    ])
-                    buyerOrders = res?.data || null
-                } catch {
-                    buyerOrders = null
+                if (orFilters.length > 0) {
+                    let buyerOrderQuery = supabase
+                        .from('daraz_orders')
+                        .select('order_number, order_status, order_date, price, store_id, daraz_order_items(product_name, seller_sku, quantity, amount)')
+                        .or('deleted.is.null,deleted.eq.false')
+                        .gte('order_date', cutoffDate)
+                        .or(orFilters.join(','))
+                        .order('order_date', { ascending: false })
+                        .limit(5)
+
+                    try {
+                        const res: any = await Promise.race([
+                            buyerOrderQuery,
+                            new Promise((resolve) => setTimeout(() => resolve({ data: null }), 3500))
+                        ])
+                        buyerOrders = res?.data || null
+                    } catch {
+                        buyerOrders = null
+                    }
                 }
 
                 if (buyerOrders && buyerOrders.length > 0) {
@@ -1719,12 +1751,13 @@ ${targetProductQAs.length > 0
 
             const agentCustomInstructions = settings.ai_agent_instructions?.trim() || DEFAULT_AI_AGENT_SYSTEM_INSTRUCTIONS
 
-            const systemPrompt = `${agentCustomInstructions}
+            const systemPrompt = `=== SYSTEM INSTRUCTIONS (HIGHEST PRIORITY - FOLLOW STRICTLY) ===
+${agentCustomInstructions}
 
-Store & Customer Context:
+=== LIVE STORE, ORDER & PRODUCT CONTEXT ===
 Buyer: ${session?.title || 'Customer'} (Buyer ID: ${session?.buyer_id || 'N/A'})
 
-Buyer Order Status:
+Buyer Order Status (from database):
 ${buyerOrdersContext}
 ${orderDiscrepancyContext}
 
@@ -1734,19 +1767,10 @@ Recent Conversation History:
 ${historyContext}
 [Buyer (Customer)]: ${userText}
 
-Strict Guidelines for Response:
-1. Talk like a friendly human customer service agent. Keep responses short (under 2-3 sentences).
-2. If the customer asks about price or cost (e.g. "price kati xa?", "rate kati ho?", "kati parxa?", "how much is this?"), refer directly to "Current Listed Price" above and state the price clearly and politely (e.g. "Hajur, yo product ko price Rs. 1,290 ho.").
-3. If customer asks about order status or delivery date, check the Buyer Order Status above.
-4. ORDER DAMAGE VS SHIPPED/PENDING STATUS: If customer claims product damage/defect but the order status is currently "Shipped", "Ready to Ship", or "Pending" (not delivered), politely ask if they have already received the parcel because our system still shows it as "Shipped", and state our team will investigate. Append "[ACTION:HANDOVER_TO_HUMAN]".
-5. RETURN & REFUND POLICY: If customer asks to return, refund, or claims wrong/defective item, state that Bagmati Traders carefully inspects and double-checks every parcel to dispatch the exact authentic item ordered. If damaged during courier transit, ask for unboxing photos/videos so our team can investigate and solve it. Append "[ACTION:HANDOVER_TO_HUMAN]".
-6. DIRECT / OFFLINE DELIVERY OR ADDRESS & PHONE NUMBER SENT IN CHAT: If customer sends a location/address or phone number asking to send or deliver to them, politely explain that per Daraz platform rules, all orders must be placed directly by the customer on the Daraz app/website by entering their delivery location and phone number. We cannot deliver or process orders outside the Daraz platform. Instruct them to confirm their order on Daraz.
-7. PRODUCT SPECIFICATIONS (RECHARGEABLE, BATTERY, CHARGER, MATERIALS, SPECS): If customer asks about product specifications (e.g. "yo rechargeable ho?", battery, charging, USB cable, color, size, material, warranty), check both "Specifications & Highlights" and "Description Summary" above. If the information is present in either, answer accurately, politely, and directly in Nepali or English.
-8. If the customer sends vague prompts or marks like "??" or greetings, respond politely acknowledging their interest in the product and ask how you can help them with their order.
-9. CRITICAL RULE: Only if the customer asks a specific question about product features, dimensions, or compatibility that is TRULY NOT mentioned anywhere in the Specifications & Highlights, Description Summary, or Verified Q&A, DO NOT GUESS OR INVENT FACTS.
-   Reply with:
-   "Hajur, yo barema hamro team le warehouse/stock ma verify garera chhitai update garnechha. / Thank you for your inquiry. Our support team will verify this specific detail and update you shortly."
-   and append "[ACTION:HANDOVER_TO_HUMAN]" at the very end.
+=== OUTPUT REQUIREMENTS ===
+- Reply directly to the Buyer's latest message above by strictly following your SYSTEM INSTRUCTIONS and using the LIVE STORE, ORDER & PRODUCT CONTEXT.
+- Never promise phone calls or direct contact outside Daraz chat.
+- If a rule in your SYSTEM INSTRUCTIONS requires human handover, append "[ACTION:HANDOVER_TO_HUMAN]" at the very end of your reply.
 Response:`
 
             let replyText: string | null = null
@@ -1761,16 +1785,19 @@ Response:`
             }
 
             if (replyText && replyText.trim()) {
-                const isHandover = replyText.includes('[ACTION:HANDOVER_TO_HUMAN]')
+                const isHandover = replyText.includes('[ACTION:HANDOVER_TO_HUMAN]') || isColorRequest
                 const cleanReply = replyText
                     .replace(/\[ACTION:HANDOVER_TO_HUMAN\]/gi, '')
                     .replace(/AI Assistant:/gi, '')
+                    .replace(/tapailai direct call\/contact garnecha/gi, 'yahi chat ma inform garnuhunxa')
+                    .replace(/direct call\/contact/gi, 'chat ma update')
                     .trim()
 
                 if (isHandover) {
                     const pausedUntil = new Date(Date.now() + cooldownHours * 60 * 60 * 1000).toISOString()
                     let handoverReason = `Customer query requires human attention: "${userText.substring(0, 50)}"`
-                    if (orderDiscrepancyContext) handoverReason = `Damage claim while order in non-delivered status: "${userText.substring(0, 50)}"`
+                    if (isColorRequest) handoverReason = `Customer requested color/variant change: "${userText.substring(0, 50)}"`
+                    else if (orderDiscrepancyContext) handoverReason = `Damage claim while order in non-delivered status: "${userText.substring(0, 50)}"`
                     else if (isReturnRefundRequest) handoverReason = `Return/refund request: "${userText.substring(0, 50)}"`
                     else if (isDamageComplaint) handoverReason = `Product damage/defect claim: "${userText.substring(0, 50)}"`
 

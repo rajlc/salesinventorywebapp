@@ -1,19 +1,16 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import { useOnlineStores } from '@/features/settings/hooks/useStores'
+import { useState, useEffect, useMemo, Suspense } from 'react'
+import { useOnlineStores, useToggleOnlineStoreSyncMode } from '@/features/settings/hooks/useStores'
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@/components/ui-shim'
-import { RefreshCw, ArrowLeft, Store, AlertCircle } from 'lucide-react'
+import { RefreshCw, ArrowLeft, Store, Package } from 'lucide-react'
 import Link from 'next/link'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-
-import { Suspense } from 'react'
 import { useState as useReactState } from 'react'
 
 export const dynamic = 'force-dynamic'
 
-// Helper: Same logic as backend to keep consistency
 // Helper: Same logic as backend to keep consistency
 export function getProminentStatus(statuses: string[], currentStatus: string = ''): string {
     const rawStatuses = statuses || (currentStatus ? [currentStatus] : [])
@@ -44,6 +41,7 @@ export function getProminentStatus(statuses: string[], currentStatus: string = '
 
 export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: boolean }) {
     const { data: stores, isLoading, isError, error, refetch } = useOnlineStores()
+    const toggleSyncMode = useToggleOnlineStoreSyncMode()
     const searchParams = useSearchParams()
     const router = useRouter()
     const [syncedOrders, setSyncedOrders] = useState<any[]>([])
@@ -52,22 +50,24 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
 
     // Load initial data (Local Storage & DB Orders)
     useEffect(() => {
-        // Initialize lastUpdated from localStorage if available
-        // Initialize lastUpdated from localStorage if available
         const lastSyncTime = localStorage.getItem('daraz_last_sync_time')
         if (lastSyncTime) {
             setLastUpdated(new Date(parseInt(lastSyncTime)))
         }
 
         if (stores && stores.length > 0) {
+            // Remove orders from local state for stores that have order_sync_enabled === false
+            const enabledStoreIds = new Set(
+                stores.filter((s: any) => s.order_sync_enabled !== false).map((s: any) => s.id)
+            )
+            setSyncedOrders(prev => prev.filter(o => enabledStoreIds.has(o.store_id)))
             syncAllStores('db')
         }
     }, [stores])
 
-
     useEffect(() => {
         if (searchParams.get('status') === 'success') {
-            toast.success('Daraz store connected successfully!', { description: 'You can now sync orders.' })
+            toast.success('Daraz store connected successfully!', { description: 'Your Daraz account is now linked.' })
             router.replace('/dashboard/sales/daraz/order-sync')
         }
     }, [searchParams, router])
@@ -94,7 +94,9 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
         setIsSyncingGlobal(true)
         let totalNewOrders = 0
 
-        for (const store of stores) {
+        const orderSyncStores = stores.filter((s: any) => s.order_sync_enabled !== false)
+
+        for (const store of orderSyncStores) {
             try {
                 const url = `/api/daraz/orders?storeId=${store.id}${source === 'db' ? '&source=db' : ''}`
                 const response = await fetch(url)
@@ -126,7 +128,26 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
         return totalNewOrders
     }
 
-
+    const handleToggleStoreOrderSync = async (store: any) => {
+        const nextVal = store.order_sync_enabled === false
+        try {
+            const res = await toggleSyncMode.mutateAsync({
+                id: store.id,
+                mode: { order_sync_enabled: nextVal },
+            })
+            if (res.error) {
+                toast.error(res.error)
+            } else {
+                toast.success(
+                    nextVal
+                        ? `Order & Finance Sync enabled for ${store.seller_account}`
+                        : `Order & Finance Sync disabled for ${store.seller_account} (Product Listing Only)`
+                )
+            }
+        } catch (err: any) {
+            toast.error(err.message || 'Failed to update Order Sync mode')
+        }
+    }
 
     // Grouping and Sorting Logic
     const groupedOrders = useMemo(() => {
@@ -225,7 +246,6 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                             <p className="text-[13px] text-gray-500 dark:text-gray-400">Sync orders from your connected Daraz stores</p>
                         </div>
                         <div className="flex items-center gap-2">
-                            {/* Auto Sync Removed */}
                             <Link
                                 href="/dashboard/sales/daraz"
                                 className="hidden md:flex items-center gap-1 px-2 py-1 text-[13px] bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 rounded transition-colors"
@@ -291,13 +311,19 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                         ) : stores && stores.length > 0 ? (
                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                                 {stores.map((store: any) => (
-                                    <StoreCard key={store.id} store={store} onSyncSuccess={mergeOrders} />
+                                    <StoreCard
+                                        key={store.id}
+                                        store={store}
+                                        onSyncSuccess={mergeOrders}
+                                        onToggleOrderSync={() => handleToggleStoreOrderSync(store)}
+                                        isTogglingSync={toggleSyncMode.isPending}
+                                    />
                                 ))}
                             </div>
                         ) : (
                             <div className="text-center py-8 text-muted-foreground text-[15px]">
                                 <p>No online stores found.</p>
-                                <Link href="/dashboard/settings/store-settings" className="text-blue-600 hover:underline mt-1 inline-block">
+                                <Link href="/dashboard/settings/stores" className="text-blue-600 hover:underline mt-1 inline-block">
                                     Add a store in Settings
                                 </Link>
                             </div>
@@ -310,7 +336,7 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                     <div className="space-y-3">
                         <h2 className="text-[15px] font-bold text-gray-500 uppercase tracking-wider">Synced Orders</h2>
 
-                        {Object.entries(groupedOrders).map(([date, orders]: [string, any[]], groupIndex) => (
+                        {Object.entries(groupedOrders).map(([date, orders]: [string, any[]]) => (
                             <Card key={date} className="overflow-hidden border border-gray-200 dark:border-zinc-800">
                                 <div className="bg-gray-50 dark:bg-zinc-800/50 px-3 py-1.5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between">
                                     <span className="font-bold text-sm">{date}</span>
@@ -376,7 +402,7 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                                                         statusColor = 'bg-red-50 text-red-700 border border-red-200'
                                                     }
                                                     else if (['failed delivered', 'failed', 'failed_delivery', 'failed_delivered', 'failed delivery', 'shipped_back_success', 'delivery failed', 'delivery_failed', 'returning to seller', 'returning_to_seller', 'shipped_back'].includes(rawStatus)) {
-                                                        displayStatus = 'Returning to Seller' // Combined Failure/Return status
+                                                        displayStatus = 'Returning to Seller'
                                                         statusColor = 'bg-orange-50 text-orange-700 border border-orange-200'
                                                     }
                                                     else if (['customer return', 'customer_return'].includes(rawStatus)) {
@@ -391,8 +417,7 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                                                         displayStatus = 'Returned Delivered'
                                                         statusColor = 'bg-orange-100 text-orange-800 border border-orange-300'
                                                     }
-
-                                                } // End of if(rawStatus) checks
+                                                }
 
                                                 return (
                                                     <tr key={order.order_id} className="bg-white hover:bg-gray-50 dark:bg-zinc-900 dark:hover:bg-zinc-800/50">
@@ -446,7 +471,6 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                                                                 orderId={order.order_id}
                                                                 storeId={order.store_id}
                                                                 onRefreshComplete={() => {
-                                                                    // Reload orders from DB
                                                                     syncAllStores('db')
                                                                 }}
                                                             />
@@ -463,7 +487,6 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
                 )}
             </div>
         </div>
-
     )
 }
 
@@ -475,9 +498,21 @@ export default function OrderSyncPage() {
     )
 }
 
-function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (orders: any[]) => void }) {
+function StoreCard({
+    store,
+    onSyncSuccess,
+    onToggleOrderSync,
+    isTogglingSync,
+}: {
+    store: any
+    onSyncSuccess: (orders: any[]) => void
+    onToggleOrderSync: () => void
+    isTogglingSync?: boolean
+}) {
     const [status, setStatus] = useState<'idle' | 'linking' | 'syncing' | 'syncing-pending' | 'syncing-shipped' | 'syncing-ready-to-ship' | 'success' | 'error'>('idle')
     const [message, setMessage] = useState('')
+
+    const orderSyncEnabled = store.order_sync_enabled !== false
 
     const handleConnect = async () => {
         try {
@@ -498,6 +533,7 @@ function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (order
     }
 
     const handleSync = async (mode: 'all' | 'pending' | 'shipped' | 'ready_to_ship') => {
+        if (!orderSyncEnabled) return
         try {
             if (mode === 'all') setStatus('syncing')
             else if (mode === 'pending') setStatus('syncing-pending')
@@ -520,8 +556,6 @@ function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (order
             if (data.error) {
                 throw new Error(data.error)
             }
-
-            console.log('Orders:', data)
 
             // Check for DB Save Error
             if (data.dbSave && !data.dbSave.success && data.dbSave.error) {
@@ -549,14 +583,29 @@ function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (order
 
     return (
         <div className="flex flex-col gap-3 p-4 border rounded-lg bg-white dark:bg-zinc-900 shadow-sm border-gray-200 dark:border-zinc-800">
-            <div className="flex items-center gap-3">
-                <div className="p-3 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400">
-                    <Store size={24} />
+            <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className={`p-3 rounded-full ${orderSyncEnabled ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400' : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'}`}>
+                        <Store size={24} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-[16px] truncate" title={store.seller_account}>{store.seller_account}</div>
+                        <div className="text-[13px] text-muted-foreground truncate">{store.company_name}</div>
+                    </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-[17px] truncate" title={store.seller_account}>{store.seller_account}</div>
-                    <div className="text-[15px] text-muted-foreground truncate">{store.company_name}</div>
-                </div>
+                <button
+                    type="button"
+                    onClick={onToggleOrderSync}
+                    disabled={isTogglingSync}
+                    title={orderSyncEnabled ? 'Click to disable Order & Finance Sync (Product Listing Only)' : 'Click to enable Order & Finance Sync'}
+                    className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold border transition-colors cursor-pointer ${
+                        orderSyncEnabled
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                            : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800'
+                    }`}
+                >
+                    {orderSyncEnabled ? 'Order Sync: ON' : 'Products Only'}
+                </button>
             </div>
 
             <div className="pt-2 flex flex-col gap-2">
@@ -570,65 +619,79 @@ function StoreCard({ store, onSyncSuccess }: { store: any, onSyncSuccess: (order
                     {status === 'linking' ? 'Redirecting...' : 'Connect / Re-Auth'}
                 </Button>
 
-                <Button
-                    onClick={handleSyncAll}
-                    variant="default"
-                    size="sm"
-                    className="w-full bg-orange-600 hover:bg-orange-700 text-white"
-                    disabled={status.startsWith('syncing') || status === 'linking'}
-                >
-                    {status === 'syncing' ? (
-                        <RefreshCw className="animate-spin mr-2 h-4 w-4" />
-                    ) : (
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    Sync All Orders
-                </Button>
+                {orderSyncEnabled ? (
+                    <>
+                        <Button
+                            onClick={handleSyncAll}
+                            variant="default"
+                            size="sm"
+                            className="w-full bg-orange-600 hover:bg-orange-700 text-white"
+                            disabled={status.startsWith('syncing') || status === 'linking'}
+                        >
+                            {status === 'syncing' ? (
+                                <RefreshCw className="animate-spin mr-2 h-4 w-4" />
+                            ) : (
+                                <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Sync All Orders
+                        </Button>
 
-                <Button
-                    onClick={handleSyncShipped}
-                    variant="outline"
-                    size="sm"
-                    className="w-full text-indigo-700 border-indigo-300 hover:bg-indigo-50 bg-indigo-50/50"
-                    disabled={status.startsWith('syncing') || status === 'linking'}
-                >
-                    {status === 'syncing-shipped' ? (
-                        <RefreshCw className="animate-spin mr-2 h-4 w-4" />
-                    ) : (
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    Sync Shipped Only
-                </Button>
+                        <Button
+                            onClick={handleSyncShipped}
+                            variant="outline"
+                            size="sm"
+                            className="w-full text-indigo-700 border-indigo-300 hover:bg-indigo-50 bg-indigo-50/50"
+                            disabled={status.startsWith('syncing') || status === 'linking'}
+                        >
+                            {status === 'syncing-shipped' ? (
+                                <RefreshCw className="animate-spin mr-2 h-4 w-4" />
+                            ) : (
+                                <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Sync Shipped Only
+                        </Button>
 
-                <Button
-                    onClick={handleSyncReadyToShip}
-                    variant="outline"
-                    size="sm"
-                    className="w-full text-blue-700 border-blue-300 hover:bg-blue-50 bg-blue-50/50"
-                    disabled={status.startsWith('syncing') || status === 'linking'}
-                >
-                    {status === 'syncing-ready-to-ship' ? (
-                        <RefreshCw className="animate-spin mr-2 h-4 w-4" />
-                    ) : (
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    Sync Ready to Ship Only
-                </Button>
+                        <Button
+                            onClick={handleSyncReadyToShip}
+                            variant="outline"
+                            size="sm"
+                            className="w-full text-blue-700 border-blue-300 hover:bg-blue-50 bg-blue-50/50"
+                            disabled={status.startsWith('syncing') || status === 'linking'}
+                        >
+                            {status === 'syncing-ready-to-ship' ? (
+                                <RefreshCw className="animate-spin mr-2 h-4 w-4" />
+                            ) : (
+                                <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Sync Ready to Ship Only
+                        </Button>
 
-                <Button
-                    onClick={handleSyncPending}
-                    variant="outline"
-                    size="sm"
-                    className="w-full text-yellow-700 border-yellow-300 hover:bg-yellow-50 bg-yellow-50/50"
-                    disabled={status.startsWith('syncing') || status === 'linking'}
-                >
-                    {status === 'syncing-pending' ? (
-                        <RefreshCw className="animate-spin mr-2 h-4 w-4" />
-                    ) : (
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    Sync Pending Only
-                </Button>
+                        <Button
+                            onClick={handleSyncPending}
+                            variant="outline"
+                            size="sm"
+                            className="w-full text-yellow-700 border-yellow-300 hover:bg-yellow-50 bg-yellow-50/50"
+                            disabled={status.startsWith('syncing') || status === 'linking'}
+                        >
+                            {status === 'syncing-pending' ? (
+                                <RefreshCw className="animate-spin mr-2 h-4 w-4" />
+                            ) : (
+                                <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Sync Pending Only
+                        </Button>
+                    </>
+                ) : (
+                    <div className="p-3 rounded-lg bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/60 text-center space-y-1.5">
+                        <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-amber-800 dark:text-amber-300">
+                            <Package size={14} />
+                            <span>Product Listing Only Mode</span>
+                        </div>
+                        <p className="text-[11px] text-amber-700/90 dark:text-amber-400/90 leading-relaxed">
+                            Order &amp; Finance sync is disabled for this store. You can push &amp; manage products in Daraz Product Management.
+                        </p>
+                    </div>
+                )}
             </div>
 
             {message && (
@@ -684,4 +747,3 @@ function RefreshOrderButton({ orderId, storeId, onRefreshComplete }: { orderId: 
         </Button>
     )
 }
-

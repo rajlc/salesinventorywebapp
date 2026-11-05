@@ -7,6 +7,7 @@ import { unstable_cache } from 'next/cache'
 import { format } from 'date-fns'
 import { calculateDarazFeeBreakdown } from '@/features/sales/utils/daraz-fee-calculator'
 import { getDarazOtherFees } from './daraz-commission-actions'
+import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
 
 export interface OrderReportItem {
     order_primary_id: string
@@ -365,7 +366,7 @@ export async function getDarazOrderDetailsForReport(orderNumber: string) {
 // In-memory cache for seller accounts to avoid scanning order items table on every request
 let cachedSellerAccounts: string[] | null = null
 let cachedSellerAccountsTime = 0
-const SELLER_ACCOUNTS_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+const SELLER_ACCOUNTS_CACHE_TTL = 10 * 1000 // 10 seconds
 
 export async function getSellerAccounts(): Promise<string[]> {
     const now = Date.now()
@@ -375,17 +376,24 @@ export async function getSellerAccounts(): Promise<string[]> {
 
     const supabase = await createClient()
     const accounts = new Set<string>()
+    const disabledAccounts = new Set<string>()
 
     try {
-        // 1. Fast lookup from online_stores table (10ms)
+        // 1. Fast lookup from online_stores table with sync modes
         const { data: stores } = await supabase
             .from('online_stores')
-            .select('seller_account')
+            .select('id, seller_account')
             .not('seller_account', 'is', null)
 
         if (stores && stores.length > 0) {
-            stores.forEach((s: any) => {
-                if (s.seller_account) accounts.add(s.seller_account)
+            const enriched = await enrichStoresWithSyncModes(stores as any[], supabase)
+            enriched.forEach((s: any) => {
+                if (!s.seller_account) return
+                if (s.order_sync_enabled === false) {
+                    disabledAccounts.add(s.seller_account)
+                } else {
+                    accounts.add(s.seller_account)
+                }
             })
         }
 
@@ -397,12 +405,14 @@ export async function getSellerAccounts(): Promise<string[]> {
 
         if (tokens && tokens.length > 0) {
             tokens.forEach((t: any) => {
-                if (t.seller_account) accounts.add(t.seller_account)
+                if (t.seller_account && !disabledAccounts.has(t.seller_account)) {
+                    accounts.add(t.seller_account)
+                }
             })
         }
 
         // If stores/tokens found, cache and return immediately in ~15ms instead of 3,200ms
-        if (accounts.size > 0) {
+        if (accounts.size > 0 || disabledAccounts.size > 0) {
             const result = Array.from(accounts).sort()
             cachedSellerAccounts = result
             cachedSellerAccountsTime = now
@@ -419,7 +429,9 @@ export async function getSellerAccounts(): Promise<string[]> {
 
         if (recentItems) {
             recentItems.forEach((item: any) => {
-                if (item.seller_account) accounts.add(item.seller_account)
+                if (item.seller_account && !disabledAccounts.has(item.seller_account)) {
+                    accounts.add(item.seller_account)
+                }
             })
         }
     } catch (err) {

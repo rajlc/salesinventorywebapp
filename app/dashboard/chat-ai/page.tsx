@@ -397,21 +397,36 @@ function ChatAiDashboardContent() {
     // Preset tags for customer queries
     const PRESET_TAGS = ['Change Address', 'Change Phone Number', 'Wholesale Inquiry', 'Urgent Return', 'General FAQ']
 
-    // 1. Fetch initial store list & active connections
+    // 1. Fetch initial store list & active connections (excluding stores where Chat & Review is disabled)
     useEffect(() => {
         async function fetchStores() {
-            const { data, error } = await supabase
-                .from('online_stores')
-                .select('*')
-                .order('company_name')
+            const [{ data, error }, { data: modeRow }] = await Promise.all([
+                supabase
+                    .from('online_stores')
+                    .select('*')
+                    .order('company_name'),
+                supabase
+                    .from('app_settings')
+                    .select('value')
+                    .eq('key', 'daraz_store_sync_modes')
+                    .maybeSingle()
+            ])
 
             if (error) {
                 toast.error('Failed to load stores')
                 console.error(error)
             } else {
-                setStores(data || [])
-                if (data && data.length > 0) {
-                    setActiveStoreId(data[0].id)
+                const modes = (modeRow?.value && typeof modeRow.value === 'object') ? modeRow.value : {}
+                const filteredStores = (data || []).filter((s: any) => {
+                    const m = modes[s.id]
+                    if (m && typeof m.chat_review_enabled === 'boolean') {
+                        return m.chat_review_enabled !== false
+                    }
+                    return s.chat_review_enabled !== false
+                })
+                setStores(filteredStores)
+                if (filteredStores.length > 0) {
+                    setActiveStoreId(filteredStores[0].id)
                 }
             }
         }

@@ -77,8 +77,8 @@ export default function PanVatBillingPage() {
         return fiscalYearId !== 'all' ? fiscalYears.find(fy => fy.id === fiscalYearId) : null
     }, [fiscalYearId, fiscalYears])
 
-    // Fetch Online Stores (Seller accounts & Company mappings)
-    const { data: rawOnlineStores } = useOnlineStores()
+    // Fetch Online Stores (Seller accounts & Company mappings - only Order Sync enabled stores)
+    const { data: rawOnlineStores } = useOnlineStores({ onlyOrderSync: true })
     const onlineStores = Array.isArray(rawOnlineStores) ? rawOnlineStores : []
 
     // Sales Billing Section states

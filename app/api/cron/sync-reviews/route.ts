@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { syncDarazReviews } from '@/features/reviews/actions/review-actions'
+import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
 
 export async function GET(request: NextRequest) {
     const startTime = Date.now()
@@ -10,7 +11,7 @@ export async function GET(request: NextRequest) {
         console.log('[Cron-Reviews] Starting automatic reviews sync for all stores...')
 
         // Fetch all stores
-        const { data: stores, error } = await supabase
+        const { data: rawStores, error } = await supabase
             .from('online_stores')
             .select('id, seller_account')
 
@@ -18,7 +19,10 @@ export async function GET(request: NextRequest) {
             throw new Error(`Failed to fetch stores: ${error.message}`)
         }
 
-        console.log(`[Cron-Reviews] Found ${stores?.length || 0} stores to process.`)
+        const enrichedStores = await enrichStoresWithSyncModes((rawStores || []) as any[], supabase)
+        const stores = enrichedStores.filter(s => s.chat_review_enabled !== false)
+
+        console.log(`[Cron-Reviews] Found ${stores?.length || 0} chat/review-enabled stores to process.`)
 
         const results = []
 

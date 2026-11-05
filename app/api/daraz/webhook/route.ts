@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse, after } from 'next/server'
-import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/server'
 import crypto from 'crypto'
 import { syncSingleDarazOrderAction } from '@/features/sales/actions/daraz-sync-order'
 import { processIncomingMessageAutoReply, generateSessionAiAnalysisAction } from '@/features/chat/actions/chat-actions'
+import { isStoreOrderSyncEnabled, isStoreChatReviewEnabled } from '@/lib/daraz/store-sync-config'
 
 // Signature verification using HMAC-SHA256
 function verifySignature(appKey: string, body: string, appSecret: string, receivedSignature: string): boolean {
@@ -108,6 +109,16 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ success: true, message: 'Store mapping missing' })
             }
 
+            // Guard: Check if Order Sync is enabled for this store
+            const orderSyncEnabled = await isStoreOrderSyncEnabled(store.id, supabase, store)
+            if (!orderSyncEnabled) {
+                console.log(`[Webhook] ⏭️ Order sync disabled for store "${store.seller_account}" (${store.id}). Ignoring Order #${tradeOrderId}.`)
+                return NextResponse.json({
+                    success: true,
+                    message: 'Order sync is disabled for this store (Product Listing Only mode)'
+                })
+            }
+
             console.log(`[Webhook] Matched Store: ${store.seller_account} (${store.id})`)
 
             // 2. Trigger shared sync logic
@@ -115,9 +126,10 @@ export async function POST(request: NextRequest) {
                 const result = await syncSingleDarazOrderAction(String(tradeOrderId), store.id)
                 console.log(`[Webhook] ✅ Order ${tradeOrderId} auto-synced. Status: ${result.newStatus}`)
 
-                // Queue automated chat message if it is a new order (Pending)
+                // Queue automated chat message if it is a new order (Pending) AND chat_review_enabled is on
                 const isPendingOrder = String(result.newStatus || '').toLowerCase() === 'pending'
-                if (isPendingOrder) {
+                const chatEnabled = await isStoreChatReviewEnabled(store.id, supabase)
+                if (isPendingOrder && chatEnabled) {
                     try {
                         const { data: chatSettings } = await supabase
                             .from('daraz_chat_settings')
@@ -128,7 +140,7 @@ export async function POST(request: NextRequest) {
                         if (chatSettings?.auto_reply_on_new_order) {
                             const delayMinutes = chatSettings.new_order_delay_minutes ?? 1
                             const scheduledAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString()
-                            
+
                             // Check if already queued to prevent duplicate entries
                             const { data: existingQueue } = await supabase
                                 .from('daraz_delayed_messages')
@@ -147,7 +159,7 @@ export async function POST(request: NextRequest) {
                                         scheduled_at: scheduledAt,
                                         status: 'pending'
                                     })
-                                
+
                                 if (insertError) {
                                     if (insertError.code === '23505') {
                                         console.log(`[Webhook] Duplicate ignored: message already queued/sent for Order: ${tradeOrderId} (caught constraint violation)`)
@@ -227,6 +239,16 @@ export async function POST(request: NextRequest) {
             if (!storeId) {
                 console.error(`[Webhook] Store not found for seller_id: ${seller_id} and session: ${sessionId}`)
                 return NextResponse.json({ success: true, message: 'Store not found' })
+            }
+
+            // Guard: Check if Chat AI & Reviews is enabled for this store
+            const chatEnabled = await isStoreChatReviewEnabled(storeId, supabase)
+            if (!chatEnabled) {
+                console.log(`[Webhook] ⏭️ Chat AI disabled for store "${storeId}". Ignoring chat event for session ${sessionId}.`)
+                return NextResponse.json({
+                    success: true,
+                    message: 'Chat AI is disabled for this store'
+                })
             }
 
             if (msgType === 6) {
@@ -348,7 +370,6 @@ export async function POST(request: NextRequest) {
                 }
 
                 // Use after() so the work continues after the HTTP response is sent.
-                // (Plain un-awaited promises are killed by serverless once the response returns.)
                 after(async () => {
                     if (shouldAutoReply) {
                         try {

@@ -8,7 +8,7 @@ import { Store } from 'lucide-react'
 import { StatementDetailView } from './StatementDetailView'
 
 export function AccountStatementView({ storeId }: { storeId?: string }) {
-    const { data: stores } = useOnlineStores()
+    const { data: stores } = useOnlineStores({ onlyOrderSync: true })
     const [selectedStore, setSelectedStore] = useState(storeId || '')
     const [selectedPeriod, setSelectedPeriod] = useState<string | null>(null)
 

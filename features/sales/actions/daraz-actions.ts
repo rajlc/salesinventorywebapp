@@ -3,6 +3,28 @@
 import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { calculateOrderProfitsForOrders, clearOrderProfitCalculatorCache } from '@/features/sales/utils/daraz-order-profit'
+import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
+
+async function getDisabledOrderSyncStores(supabase: any) {
+    try {
+        const { data: stores } = await supabase
+            .from('online_stores')
+            .select('id, seller_account')
+        if (!stores || stores.length === 0) return { disabledAccounts: [] as string[], disabledStoreIds: [] as string[] }
+        const enriched = await enrichStoresWithSyncModes(stores as any[], supabase)
+        const disabledAccounts: string[] = []
+        const disabledStoreIds: string[] = []
+        enriched.forEach((s: any) => {
+            if (s.order_sync_enabled === false) {
+                if (s.seller_account) disabledAccounts.push(s.seller_account)
+                if (s.id) disabledStoreIds.push(s.id)
+            }
+        })
+        return { disabledAccounts, disabledStoreIds }
+    } catch {
+        return { disabledAccounts: [] as string[], disabledStoreIds: [] as string[] }
+    }
+}
 
 // Types
 interface DarazOrderItem {
@@ -143,6 +165,13 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
         .select('*', { count: 'exact' })
         .or('deleted.is.null,deleted.eq.false')
 
+    const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+    if (disabledAccounts.length > 0) {
+        for (const acc of disabledAccounts) {
+            query = query.neq('seller_account', acc)
+        }
+    }
+
     // Seller Account Filter
     // Note: 'seller_account' column is now added to the 'daraz_orders_with_totals' view via migration.
     if (sellerAccount && sellerAccount !== 'all') {
@@ -281,6 +310,13 @@ export async function getAllDarazOrders(params: {
         .from('daraz_orders_with_totals')
         .select('*', { count: 'exact' })
         .or('deleted.is.null,deleted.eq.false') // Show only non-deleted orders
+
+    const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+    if (disabledAccounts.length > 0) {
+        for (const acc of disabledAccounts) {
+            query = query.neq('seller_account', acc)
+        }
+    }
 
     // Filter Logic: Hide "Cancel" and "Unpaid" orders from the order list
     // UNLESS ignoreStatusFilter is true (for Status Sync page)
@@ -1288,10 +1324,15 @@ export async function getDarazOrderStats(sellerAccount?: string, restrictShipped
             shippedQuery = shippedQuery.gte('shipped_at', todayStart)
         }
 
-        const [activeRes, shippedRes] = await Promise.all([activeQuery, shippedQuery])
+        const [activeRes, shippedRes, { disabledAccounts }] = await Promise.all([
+            activeQuery,
+            shippedQuery,
+            getDisabledOrderSyncStores(supabase)
+        ])
+        const disabledSet = new Set(disabledAccounts)
 
-        const activeRows = activeRes.data || []
-        const shippedRows = shippedRes.data || []
+        const activeRows = (activeRes.data || []).filter((r: any) => !disabledSet.has(r.seller_account))
+        const shippedRows = (shippedRes.data || []).filter((r: any) => !disabledSet.has(r.seller_account))
 
         let pendingCount = 0
         let pendingAmount = 0
@@ -1465,8 +1506,12 @@ export async function getDailySalesReport(params?: { forceRefresh?: boolean } | 
             return dateMap.get(sellerAccount)!
         }
 
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        const disabledSet = new Set(disabledAccounts)
+
         allOrders?.forEach((order: any) => {
             const sellerAccount = order.online_stores?.seller_account || 'Unknown'
+            if (disabledSet.has(sellerAccount)) return
             const price = parseFloat(order.price) || 0
 
             // 1. Handle Shipped Metric (independent check)
@@ -1560,13 +1605,16 @@ export async function getOrderSummaryReport(params?: { forceRefresh?: boolean } 
     const supabase = await createClient()
 
     try {
-        // 1. Get ALL Seller Accounts
-        const { data: stores, error: storeError } = await supabase
+        // 1. Get ALL Seller Accounts (excluding Product-Listing-Only stores)
+        const { data: rawStores, error: storeError } = await supabase
             .from('online_stores')
-            .select('seller_account')
+            .select('id, seller_account')
             .order('seller_account')
 
         if (storeError) throw storeError
+        const enrichedStores = await enrichStoresWithSyncModes((rawStores || []) as any[], supabase)
+        const disabledSet = new Set(enrichedStores.filter((s: any) => s.order_sync_enabled === false).map((s: any) => s.seller_account))
+        const stores = enrichedStores.filter((s: any) => s.order_sync_enabled !== false)
 
         // Initialize map
         const summaryMap = new Map<string, {
@@ -1581,7 +1629,7 @@ export async function getOrderSummaryReport(params?: { forceRefresh?: boolean } 
             remain_qty: number
         }>()
 
-        stores?.forEach(store => {
+        stores?.forEach((store: any) => {
             if (store.seller_account) {
                 summaryMap.set(store.seller_account, {
                     shipped_qty: 0,
@@ -1633,6 +1681,7 @@ export async function getOrderSummaryReport(params?: { forceRefresh?: boolean } 
         // 3. Aggregate Data with Hybrid Matching Priority
         allOrders?.forEach((order: any) => {
             const sellerAccount = order.seller_account || 'Unknown'
+            if (disabledSet.has(sellerAccount)) return
             const price = parseFloat(order.price) || 0
             const mainStatus = order.order_status
             const itemStatuses = order.statuses || [] // Array of strings
@@ -2027,14 +2076,16 @@ export async function syncDarazOrderProducts(orderId: string) {
 
 export async function getUniqueSellerAccounts() {
     const supabase = await createClient()
-    // Only select the one column we need — no full row fetch
-    const { data } = await supabase
-        .from('daraz_order_items')
-        .select('seller_account')
-        .not('seller_account', 'is', null)
-
+    const [{ data }, { disabledAccounts }] = await Promise.all([
+        supabase
+            .from('daraz_order_items')
+            .select('seller_account')
+            .not('seller_account', 'is', null),
+        getDisabledOrderSyncStores(supabase)
+    ])
+    const disabledSet = new Set(disabledAccounts)
     // Deduplicate in JS — cheaper than a view scan
-    const accounts = [...new Set((data || []).map(d => d.seller_account))] as string[]
+    const accounts = [...new Set((data || []).map(d => d.seller_account).filter(a => a && !disabledSet.has(a)))] as string[]
     return accounts.sort()
 }
 
@@ -2052,20 +2103,25 @@ export async function getOrderStatusSummary() {
             return []
         }
 
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        const disabledSet = new Set(disabledAccounts)
+
         // Normalise the returned rows to match the expected shape
-        return (data || []).map((row: any) => ({
-            seller_account: row.seller_account,
-            pending: Number(row.pending || 0),
-            packed: Number(row.packed || 0),
-            ready_to_ship: Number(row.ready_to_ship || 0),
-            shipped: Number(row.shipped || 0),
-            delivered: Number(row.delivered || 0),
-            returning_to_seller: Number(row.returning_to_seller || 0),
-            returned_delivered: Number(row.returned_delivered || 0),
-            customer_return: Number(row.customer_return || 0),
-            customer_return_delivered: Number(row.customer_return_delivered || 0),
-            unpaid: Number(row.unpaid || 0),
-        }))
+        return (data || [])
+            .filter((row: any) => !disabledSet.has(row.seller_account))
+            .map((row: any) => ({
+                seller_account: row.seller_account,
+                pending: Number(row.pending || 0),
+                packed: Number(row.packed || 0),
+                ready_to_ship: Number(row.ready_to_ship || 0),
+                shipped: Number(row.shipped || 0),
+                delivered: Number(row.delivered || 0),
+                returning_to_seller: Number(row.returning_to_seller || 0),
+                returned_delivered: Number(row.returned_delivered || 0),
+                customer_return: Number(row.customer_return || 0),
+                customer_return_delivered: Number(row.customer_return_delivered || 0),
+                unpaid: Number(row.unpaid || 0),
+            }))
     } catch (error) {
         console.error('Error in getOrderStatusSummary:', error)
         return []
@@ -2090,6 +2146,8 @@ export async function getLast30DaysSales(fiscalYearId?: string) {
         const pageSize = 1000
         const dailyData: { [date: string]: { [seller: string]: number } } = {}
         const sellerAccounts = new Set<string>()
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        const disabledSet = new Set(disabledAccounts)
 
         while (true) {
             let query = supabase
@@ -2124,6 +2182,7 @@ export async function getLast30DaysSales(fiscalYearId?: string) {
 
                 order.items?.forEach((item: any) => {
                     const seller = item.seller_account || 'Unknown'
+                    if (disabledSet.has(seller)) return
                     sellerAccounts.add(seller)
                     if (!dailyData[date][seller]) {
                         dailyData[date][seller] = 0
@@ -2328,8 +2387,11 @@ export async function getProductReportData(params: GetProductReportParams) {
         }
     }
 
-    // Exclude deleted orders
-    const items: any[] = rawItems.filter((item: any) => !item.daraz_orders?.deleted)
+    const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+    const disabledSet = new Set(disabledAccounts)
+
+    // Exclude deleted orders and Product-Listing-Only stores
+    const items: any[] = rawItems.filter((item: any) => !item.daraz_orders?.deleted && !disabledSet.has(item.seller_account))
 
     // ── Step 2: Fetch all items for the delivered orders (view-independent totals) ───
     const deliveredOrderIds = Array.from(new Set(
@@ -2634,6 +2696,13 @@ export async function getDarazCustomerDetails(params: {
             .not('shipping_phone', 'is', null)
             .or('deleted.is.null,deleted.eq.false')
 
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        if (disabledAccounts.length > 0) {
+            for (const acc of disabledAccounts) {
+                query = query.neq('seller_account', acc)
+            }
+        }
+
         if (sellerAccount && sellerAccount !== 'all') {
             query = query.eq('seller_account', sellerAccount)
         }
@@ -2764,8 +2833,3 @@ export async function checkDeliveredCustomerOrders(
         return []
     }
 }
-
-
-
-
-
