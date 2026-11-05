@@ -26,7 +26,7 @@ export async function loginAction(
     let authData: { user: any } | null = null
     let signInError: any = null
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
         const res = await supabase.auth.signInWithPassword({
             email,
             password,
@@ -36,8 +36,18 @@ export async function loginAction(
 
         if (!signInError) break
 
-        const errMsg = String(signInError?.message || '').toLowerCase()
+        const rawMsg = String(signInError?.message || '').trim()
+        const errMsg = rawMsg.toLowerCase()
+        const errName = String(signInError?.name || '').toLowerCase()
         const isTransient =
+            rawMsg === '{}' ||
+            rawMsg === '' ||
+            errName.includes('retryable') ||
+            signInError?.status === 0 ||
+            signInError?.status === 522 ||
+            signInError?.status === 502 ||
+            signInError?.status === 503 ||
+            signInError?.status === 504 ||
             errMsg.includes('fetch failed') ||
             errMsg.includes('timeout') ||
             errMsg.includes('network') ||
@@ -45,12 +55,18 @@ export async function loginAction(
             errMsg.includes('503') ||
             errMsg.includes('504')
 
-        if (!isTransient || attempt === 1) break
-        await new Promise((r) => setTimeout(r, 800))
+        if (!isTransient || attempt === 2) break
+        await new Promise((r) => setTimeout(r, 900 * (attempt + 1)))
     }
 
     if (signInError) {
-        return { error: signInError.message }
+        const rawMsg = String(signInError?.message || '').trim()
+        if (rawMsg === '{}' || !rawMsg || String(signInError?.name || '').includes('Retryable')) {
+            return {
+                error: 'Database server is waking up or temporarily busy. Please wait 3 seconds and click Sign In again.'
+            }
+        }
+        return { error: rawMsg }
     }
 
     const user = authData?.user
@@ -58,32 +74,32 @@ export async function loginAction(
         return { error: 'Login failed. Please verify your credentials.' }
     }
 
-    // Check user status in user_profiles
+    // Check user status in user_profiles (prefer fast admin client to avoid extra RLS overhead)
     let profile: { status: string; role?: string } | null = null
 
-    const { data: userProfile, error: profileError } = await supabase
-        .from('user_profiles')
-        .select('status, role')
-        .eq('id', user.id)
-        .single()
+    try {
+        const admin = await createAdminClient()
+        const { data: adminProfile } = await admin
+            .from('user_profiles')
+            .select('status, role')
+            .eq('id', user.id)
+            .maybeSingle()
 
-    if (userProfile) {
-        profile = userProfile
-    } else {
-        // Fallback to admin client to bypass potential RLS restrictions
-        try {
-            const admin = await createAdminClient()
-            const { data: adminProfile } = await admin
-                .from('user_profiles')
-                .select('status, role')
-                .eq('id', user.id)
-                .single()
+        if (adminProfile) {
+            profile = adminProfile
+        }
+    } catch (adminErr) {
+        console.error('Failed to fetch profile via admin client:', adminErr)
+    }
 
-            if (adminProfile) {
-                profile = adminProfile
-            }
-        } catch (adminErr) {
-            console.error('Failed to fetch profile via admin client:', adminErr)
+    if (!profile) {
+        const { data: userProfile } = await supabase
+            .from('user_profiles')
+            .select('status, role')
+            .eq('id', user.id)
+            .maybeSingle()
+        if (userProfile) {
+            profile = userProfile
         }
     }
 
@@ -104,19 +120,21 @@ export async function loginAction(
         }
     }
 
-    // Log login activity asynchronously
-    try {
-        await supabase.from('user_activity_logs').insert({
+    // Fire-and-forget login activity log so it never blocks or delays sign-in
+    supabase
+        .from('user_activity_logs')
+        .insert({
             user_id: user.id,
             action: 'login',
-            browser: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+            browser: null,
             ip_address: null,
         })
-    } catch (logError) {
-        // Silent fail for logging
-        console.error('Failed to log login activity:', logError)
-    }
+        .then(() => {}, () => {})
 
-    // Return success to the client instead of throwing Next.js NEXT_REDIRECT
-    return { success: true, redirectTo: '/dashboard' }
+    return {
+        success: true,
+        redirectTo: '/dashboard',
+        userId: user.id,
+        role: profile?.role || (user.user_metadata?.role as string) || 'user'
+    }
 }

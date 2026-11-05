@@ -348,8 +348,12 @@ const getCachedAggregateMetrics = unstable_cache(
         }
     },
     ['dashboard-aggregate-metrics-cache'],
-    { revalidate: 30, tags: ['dashboard-metrics'] }
+    { revalidate: 180, tags: ['dashboard-metrics'] }
 )
+
+// In-memory fast cache for Free Tier so repeated refreshes/navigations hit 0 DB queries
+let memoryDashboardCache: { key: string; expiresAt: number; data: any } | null = null
+let memoryFiscalYearCache: { expiresAt: number; fy: any } | null = null
 
 export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     const supabase = await createClient()
@@ -376,53 +380,68 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     if (user) {
         if (user.user_metadata?.full_name) {
             userName = user.user_metadata.full_name
-        } else {
-            const { data: prof } = await supabase.from('user_profiles').select('full_name').eq('id', user.id).maybeSingle()
-            if (prof?.full_name) userName = prof.full_name
-            else if (user.email) userName = user.email.split('@')[0]
+        } else if (user.email) {
+            userName = user.email.split('@')[0]
         }
     }
 
     const headerTitle = `Good ${timeGreeting}, ${userName}.`
     const headerSubtitle = `Welcome to your dashboard. Below is a summary of today's Orders, Inventory, and Purchasing activities.`
 
-    // 5 Days Ago ISO string
-    const fiveDaysAgo = new Date(nepalTime.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString()
+    // 5 Days Ago ISO string — rounded to start of day so unstable_cache key stays stable all day!
+    const fiveDaysAgoDate = new Date(nepalTime.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+    const fiveDaysAgo = `${fiveDaysAgoDate}T00:00:00.000Z`
 
-    // 2. Fetch Active Fiscal Year
+    // 2. Fetch Active Fiscal Year (cached in memory for 5 minutes)
     let activeFiscalYear = null
-    const { data: fyData } = await supabase
-        .from('fiscal_years')
-        .select('id, name, start_date, end_date, is_active')
-        .eq('is_active', true)
-        .maybeSingle()
-
-    if (fyData) {
-        activeFiscalYear = fyData
+    if (memoryFiscalYearCache && memoryFiscalYearCache.expiresAt > Date.now()) {
+        activeFiscalYear = memoryFiscalYearCache.fy
     } else {
-        const { data: latestFy } = await supabase
+        const { data: fyData } = await supabase
             .from('fiscal_years')
             .select('id, name, start_date, end_date, is_active')
-            .order('start_date', { ascending: false })
-            .limit(1)
+            .eq('is_active', true)
             .maybeSingle()
-        activeFiscalYear = latestFy || null
+
+        if (fyData) {
+            activeFiscalYear = fyData
+        } else {
+            const { data: latestFy } = await supabase
+                .from('fiscal_years')
+                .select('id, name, start_date, end_date, is_active')
+                .order('start_date', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+            activeFiscalYear = latestFy || null
+        }
+        memoryFiscalYearCache = { expiresAt: Date.now() + 5 * 60 * 1000, fy: activeFiscalYear }
     }
 
     const fyId = activeFiscalYear?.id
     const fyStart = activeFiscalYear?.start_date
     const fyEnd = activeFiscalYear?.end_date
 
-    // 3. Fetch cached aggregate metrics
-    const aggregates = await getCachedAggregateMetrics(
-        todayStr,
-        todayStartIso,
-        todayEndIso,
-        fiveDaysAgo,
-        fyId,
-        fyStart,
-        fyEnd
-    )
+    // 3. Fetch cached aggregate metrics (in-memory + Next.js cache)
+    const cacheKey = `${todayStr}:${fyId || 'none'}`
+    let aggregates: any = null
+    if (memoryDashboardCache && memoryDashboardCache.key === cacheKey && memoryDashboardCache.expiresAt > Date.now()) {
+        aggregates = memoryDashboardCache.data
+    } else {
+        aggregates = await getCachedAggregateMetrics(
+            todayStr,
+            todayStartIso,
+            todayEndIso,
+            fiveDaysAgo,
+            fyId,
+            fyStart,
+            fyEnd
+        )
+        memoryDashboardCache = {
+            key: cacheKey,
+            expiresAt: Date.now() + 180 * 1000,
+            data: aggregates,
+        }
+    }
 
     return {
         userName,

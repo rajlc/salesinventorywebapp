@@ -47,18 +47,27 @@ export function LoginForm() {
             const result = await loginAction(formData)
 
             if (result?.error) {
-                setError(result.error)
+                const cleanErr = result.error.trim() === "{}"
+                    ? "Database server is temporarily busy. Please wait a moment and try again."
+                    : result.error
+                setError(cleanErr)
                 setIsLoading(false)
                 return
             }
 
             if (result?.success) {
                 setIsSuccess(true)
+                if (typeof window !== "undefined") {
+                    try {
+                        if (result.userId) localStorage.setItem("bagmati_user_id_cache", result.userId)
+                        if (result.role) localStorage.setItem("bagmati_user_role_cache", result.role)
+                    } catch {}
+                }
                 const targetUrl = result.redirectTo || "/dashboard"
                 // Immediate full-page navigation ensures all Supabase auth cookies are synchronously loaded
                 setTimeout(() => {
                     window.location.href = targetUrl
-                }, 400)
+                }, 300)
             }
         } catch (err: any) {
             // Check if Next.js internal redirect error was caught

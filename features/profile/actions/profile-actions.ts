@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 
 export interface UserPermissionItem {
@@ -94,23 +94,11 @@ export async function getProfile() {
     }
 }
 
-// Get current user permissions (safe fallback with admin client to bypass any RLS issue)
+// Get current user permissions in a single query via admin client (zero RLS overhead)
 export async function getMyPermissions(): Promise<UserPermissionItem[]> {
-    const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
+    const user = await getAuthenticatedUser()
     if (!user) return []
 
-    // 1. Try standard query
-    const { data: perms } = await supabase
-        .from('user_permissions')
-        .select('id, user_id, main_page_role, sub_page_role, permission_type')
-        .eq('user_id', user.id)
-
-    if (perms && perms.length > 0) {
-        return perms as UserPermissionItem[]
-    }
-
-    // 2. Safe fallback via adminClient in case RLS limits regular users
     try {
         const admin = await createAdminClient()
         const { data: adminPerms } = await admin
@@ -122,6 +110,41 @@ export async function getMyPermissions(): Promise<UserPermissionItem[]> {
     } catch (err) {
         console.error('Error fetching user permissions via admin client:', err)
         return []
+    }
+}
+
+// Fetch userId, role, and permissions in a single server call (used by PermissionContext)
+export async function getMyRoleAndPermissions(): Promise<{
+    userId: string | null
+    role: string | null
+    permissions: UserPermissionItem[]
+}> {
+    const user = await getAuthenticatedUser()
+    if (!user) {
+        return { userId: null, role: null, permissions: [] }
+    }
+
+    try {
+        const admin = await createAdminClient()
+        const [profileRes, permsRes] = await Promise.all([
+            admin.from('user_profiles').select('role').eq('id', user.id).maybeSingle(),
+            admin
+                .from('user_permissions')
+                .select('id, user_id, main_page_role, sub_page_role, permission_type')
+                .eq('user_id', user.id),
+        ])
+
+        const role = profileRes.data?.role || (user.user_metadata?.role as string) || null
+        const permissions = (permsRes.data || []) as UserPermissionItem[]
+
+        return { userId: user.id, role, permissions }
+    } catch (err) {
+        console.error('Error in getMyRoleAndPermissions:', err)
+        return {
+            userId: user.id,
+            role: (user.user_metadata?.role as string) || null,
+            permissions: [],
+        }
     }
 }
 

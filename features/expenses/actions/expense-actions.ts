@@ -50,7 +50,9 @@ export async function getExpenses(params: {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
 
-    if (!user) throw new Error('Not authenticated')
+    if (!user) {
+        return { expenses: [], totalPages: 0 }
+    }
 
     // Get user role
     const { data: profile } = await supabase
