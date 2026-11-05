@@ -369,71 +369,111 @@ export async function syncDarazChatSessions(storeId: string) {
 
         console.log(`[ChatSync] Retrieved ${sessionList.length} sessions from Daraz across ${pageCount} page(s).`)
 
-        let processedSessionIndex = 0
-        for (const session of sessionList) {
+        if (sessionList.length === 0) {
+            return { success: true, count: 0 }
+        }
+
+        // Batch-fetch existing sessions for this store in 1 query to avoid N+1 lookups
+        const incomingSessionIds = sessionList.map(s => String(s.session_id)).filter(Boolean)
+        const { data: existingSessions } = await supabase
+            .from('daraz_chat_sessions')
+            .select('session_id, title, last_message_id, last_message_time')
+            .eq('store_id', storeId)
+            .in('session_id', incomingSessionIds)
+
+        const existingMap = new Map<string, { title: string | null; last_message_id: string | null; last_message_time: string | null }>()
+        for (const row of existingSessions || []) {
+            existingMap.set(row.session_id, row)
+        }
+
+        const sessionPayloads: any[] = []
+        const sessionsToSyncMessages: string[] = []
+        const nowIso = new Date().toISOString()
+        const sixtyDaysAgoIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+        let orderTitleLookupsRemaining = 5
+
+        for (let idx = 0; idx < sessionList.length; idx++) {
+            const session = sessionList[idx]
+            const existing = existingMap.get(String(session.session_id))
+
             // Self-heal buyer ID from session ID if undefined
-            let buyerId = String(session.buyer_id || '');
+            let buyerId = String(session.buyer_id || '')
             if (!buyerId || buyerId === 'undefined') {
-                const parts = String(session.session_id || '').split('_');
+                const parts = String(session.session_id || '').split('_')
                 if (parts.length >= 4) {
-                    if (parts[1] === '1') buyerId = parts[0];
-                    else if (parts[3] === '1') buyerId = parts[2];
+                    if (parts[1] === '1') buyerId = parts[0]
+                    else if (parts[3] === '1') buyerId = parts[2]
                 }
             }
 
-            // Resolve buyer's real name from order history if title is generic
-            let sessionTitle = session.title || '';
-            const isGenericTitle = !sessionTitle || sessionTitle === 'undefined' || sessionTitle === 'Buyer undefined' || sessionTitle.startsWith('Buyer ');
-            
-            if (isGenericTitle && buyerId && buyerId !== 'undefined') {
+            let sessionTitle = session.title || ''
+            const isIncomingGeneric = !sessionTitle || sessionTitle === 'undefined' || sessionTitle === 'Buyer undefined' || sessionTitle.startsWith('Buyer ')
+
+            // Reuse existing resolved non-generic title from DB if already stored
+            if (isIncomingGeneric && existing?.title && !existing.title.startsWith('Buyer ') && existing.title !== 'undefined') {
+                sessionTitle = existing.title
+            } else if (isIncomingGeneric && !existing && buyerId && buyerId !== 'undefined' && orderTitleLookupsRemaining > 0) {
+                orderTitleLookupsRemaining--
                 const { data: orderData } = await supabase
                     .from('daraz_orders')
                     .select('customer_name, shipping_name, customer_first_name, customer_last_name')
+                    .gte('order_date', sixtyDaysAgoIso)
                     .contains('items_detail', JSON.stringify([{ buyer_id: Number(buyerId) }]))
                     .limit(1)
-                    .maybeSingle();
+                    .maybeSingle()
 
                 if (orderData) {
-                    const resolvedName = orderData.customer_name || orderData.shipping_name || `${orderData.customer_first_name} ${orderData.customer_last_name}`.trim();
+                    const resolvedName = orderData.customer_name || orderData.shipping_name || `${orderData.customer_first_name} ${orderData.customer_last_name}`.trim()
                     if (resolvedName) {
-                        sessionTitle = resolvedName;
+                        sessionTitle = resolvedName
                     }
                 }
             }
 
             if (!sessionTitle || sessionTitle === 'undefined') {
-                sessionTitle = `Buyer ${buyerId}`;
+                sessionTitle = `Buyer ${buyerId}`
             }
 
-            // Upsert session details
-            const sessionPayload = {
+            const newLastMsgTimeIso = session.last_message_time ? new Date(parseInt(session.last_message_time)).toISOString() : null
+            const newLastMsgId = session.last_message_id ? String(session.last_message_id) : null
+
+            sessionPayloads.push({
                 session_id: session.session_id,
                 store_id: storeId,
                 buyer_id: buyerId,
                 title: sessionTitle,
                 head_url: session.head_url || null,
                 unread_count: parseInt(session.unread_count || '0'),
-                last_message_id: session.last_message_id || null,
-                last_message_time: session.last_message_time ? new Date(parseInt(session.last_message_time)).toISOString() : null,
+                last_message_id: newLastMsgId,
+                last_message_time: newLastMsgTimeIso,
                 last_message_summary: parseSummary(session.summary),
-                updated_at: new Date().toISOString()
-            }
+                updated_at: nowIso
+            })
 
-            const { error: sessionError } = await supabase
-                .from('daraz_chat_sessions')
-                .upsert(sessionPayload, { onConflict: 'session_id' })
-
-            if (sessionError) {
-                console.error(`[ChatSync] Error saving session ${session.session_id}:`, sessionError.message)
-                continue
+            // Only sync messages for top 15 sessions if the session is new, has unread messages, or its last_message_id changed
+            if (idx < 15 && sessionsToSyncMessages.length < 10) {
+                const hasNewMessage =
+                    !existing ||
+                    (newLastMsgId && existing.last_message_id !== newLastMsgId) ||
+                    parseInt(session.unread_count || '0') > 0 ||
+                    idx < 3
+                if (hasNewMessage) {
+                    sessionsToSyncMessages.push(session.session_id)
+                }
             }
+        }
 
-            // Sync messages for the top 20 most recent sessions during full session sync to keep sync responsive;
-            // remaining sessions will sync on demand when opened by the user
-            if (processedSessionIndex < 20) {
-                await syncDarazChatMessages(storeId, session.session_id)
-            }
-            processedSessionIndex++
+        // Batch upsert all sessions in a single database query instead of N separate upserts
+        const { error: batchSessionError } = await supabase
+            .from('daraz_chat_sessions')
+            .upsert(sessionPayloads, { onConflict: 'session_id' })
+
+        if (batchSessionError) {
+            console.error(`[ChatSync] Error batch-saving sessions for store ${storeId}:`, batchSessionError.message)
+        }
+
+        for (const sid of sessionsToSyncMessages) {
+            await syncDarazChatMessages(storeId, sid)
         }
 
         try {
@@ -522,91 +562,103 @@ export async function syncDarazChatMessages(storeId: string, sessionId: string) 
         }
 
         let newMessagesCached = 0
-        for (const msg of messageList) {
+
+        // Filter messages within 30 days first
+        const candidateMessages = messageList.filter((msg: any) => {
             const sendTime = msg.send_time ? new Date(parseInt(String(msg.send_time))).toISOString() : new Date().toISOString()
             const sendTimeMs = new Date(sendTime).getTime()
-            if (sendTimeMs < thirtyDaysAgoMs) continue // Keep within 30 days
-            
-            // Check if message already exists to avoid overwriting user/system tags
-            const { data: existingMsg } = await supabase
+            return sendTimeMs >= thirtyDaysAgoMs && Boolean(msg.message_id)
+        })
+
+        if (candidateMessages.length > 0) {
+            // Batch check existing message_ids in 1 query instead of N separate SELECT queries
+            const candidateIds = candidateMessages.map((m: any) => String(m.message_id))
+            const { data: existingRows } = await supabase
                 .from('daraz_chat_messages')
-                .select('message_id, tags')
-                .eq('message_id', msg.message_id)
-                .maybeSingle()
+                .select('message_id')
+                .in('message_id', candidateIds)
 
-            if (existingMsg) continue // Skip if already cached
+            const existingSet = new Set((existingRows || []).map((r: any) => String(r.message_id)))
+            const newPayloads: any[] = []
+            const newRawMessages: any[] = []
 
-            const fromType = String(msg.from_account_type);
-            const toType = String(msg.to_account_type);
-            
-            let fromAccountId = String(msg.from_account_id || '');
-            let toAccountId = String(msg.to_account_id || '');
-            
-            if (!fromAccountId || fromAccountId === 'undefined') {
-                fromAccountId = fromType === '1' ? sessionBuyerId : sessionSellerId;
-            }
-            if (!toAccountId || toAccountId === 'undefined') {
-                toAccountId = toType === '1' ? sessionBuyerId : sessionSellerId;
-            }
+            for (const msg of candidateMessages) {
+                if (existingSet.has(String(msg.message_id))) continue
 
-            const msgPayload = {
-                message_id: msg.message_id,
-                session_id: sessionId,
-                from_account_id: fromAccountId,
-                from_account_type: fromType,
-                to_account_id: toAccountId,
-                to_account_type: toType,
-                content: msg.content,
-                template_id: String(msg.template_id || '1'),
-                send_time: sendTime,
-                auto_reply: msg.auto_reply === 'true' || msg.auto_reply === true,
-                tags: []
-            }
+                const sendTime = msg.send_time ? new Date(parseInt(String(msg.send_time))).toISOString() : new Date().toISOString()
+                const fromType = String(msg.from_account_type)
+                const toType = String(msg.to_account_type)
 
-            const { error: msgError } = await supabase
-                .from('daraz_chat_messages')
-                .insert(msgPayload)
+                let fromAccountId = String(msg.from_account_id || '')
+                let toAccountId = String(msg.to_account_id || '')
 
-            if (msgError) {
-                console.error(`[ChatSync] Error saving message ${msg.message_id}:`, msgError.message)
-            } else {
-                newMessagesCached++
-
-                // Detect Daraz follower confirmation — persist on session so it survives message retention cleanup
-                const contentLower = String(msg.content || '').toLowerCase()
-                if (contentLower.includes('store follower') || contentLower.includes('now your store')) {
-                    await supabase
-                        .from('daraz_chat_sessions')
-                        .update({ is_follower: true, followed_at: sendTime })
-                        .eq('session_id', sessionId)
-                        .eq('is_follower', false) // Only update if not already marked
-                    console.log(`[ChatSync] Marked session ${sessionId} as follower`)
+                if (!fromAccountId || fromAccountId === 'undefined') {
+                    fromAccountId = fromType === '1' ? sessionBuyerId : sessionSellerId
+                }
+                if (!toAccountId || toAccountId === 'undefined') {
+                    toAccountId = toType === '1' ? sessionBuyerId : sessionSellerId
                 }
 
-                // Trigger AI or Keyword auto-reply process ONLY if message is:
-                // - Sent by buyer (from_account_type = '1')
-                // - Received recently (last 15 minutes, with robust timestamp parsing)
-                const isBuyer = String(msg.from_account_type) === '1'
-                
-                let msgTimeMs = Date.now()
-                if (msg.send_time) {
-                    const parsedNum = Number(msg.send_time)
-                    if (!isNaN(parsedNum) && parsedNum > 1000000000) {
-                        msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
-                    } else {
-                        const parsedDate = new Date(msg.send_time).getTime()
-                        if (!isNaN(parsedDate)) msgTimeMs = parsedDate
+                newPayloads.push({
+                    message_id: msg.message_id,
+                    session_id: sessionId,
+                    from_account_id: fromAccountId,
+                    from_account_type: fromType,
+                    to_account_id: toAccountId,
+                    to_account_type: toType,
+                    content: msg.content,
+                    template_id: String(msg.template_id || '1'),
+                    send_time: sendTime,
+                    auto_reply: msg.auto_reply === 'true' || msg.auto_reply === true,
+                    tags: []
+                })
+                newRawMessages.push({ msg, sendTime })
+            }
+
+            if (newPayloads.length > 0) {
+                const { error: batchMsgError } = await supabase
+                    .from('daraz_chat_messages')
+                    .upsert(newPayloads, { onConflict: 'message_id', ignoreDuplicates: true })
+
+                if (batchMsgError) {
+                    console.error(`[ChatSync] Error batch-saving messages for session ${sessionId}:`, batchMsgError.message)
+                } else {
+                    newMessagesCached = newPayloads.length
+
+                    for (const { msg, sendTime } of newRawMessages) {
+                        // Detect Daraz follower confirmation — persist on session so it survives message retention cleanup
+                        const contentLower = String(msg.content || '').toLowerCase()
+                        if (contentLower.includes('store follower') || contentLower.includes('now your store')) {
+                            await supabase
+                                .from('daraz_chat_sessions')
+                                .update({ is_follower: true, followed_at: sendTime })
+                                .eq('session_id', sessionId)
+                                .eq('is_follower', false)
+                            console.log(`[ChatSync] Marked session ${sessionId} as follower`)
+                        }
+
+                        const isBuyer = String(msg.from_account_type) === '1'
+                        let msgTimeMs = Date.now()
+                        if (msg.send_time) {
+                            const parsedNum = Number(msg.send_time)
+                            if (!isNaN(parsedNum) && parsedNum > 1000000000) {
+                                msgTimeMs = parsedNum < 10000000000 ? parsedNum * 1000 : parsedNum
+                            } else {
+                                const parsedDate = new Date(msg.send_time).getTime()
+                                if (!isNaN(parsedDate)) msgTimeMs = parsedDate
+                            }
+                        }
+                        const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
+
+                        if (isBuyer && isRecent) {
+                            await processIncomingMessageAutoReply(storeId, sessionId, {
+                                message_id: String(msg.message_id || ''),
+                                content: String(msg.content),
+                                from_account_type: String(msg.from_account_type),
+                                send_time: String(msg.send_time)
+                            })
+                        }
                     }
-                }
-                const isRecent = Math.abs(Date.now() - msgTimeMs) < 15 * 60 * 1000
-
-                if (isBuyer && isRecent) {
-                    await processIncomingMessageAutoReply(storeId, sessionId, {
-                        message_id: String(msg.message_id || ''),
-                        content: String(msg.content),
-                        from_account_type: String(msg.from_account_type),
-                        send_time: String(msg.send_time)
-                    })
                 }
             }
         }
@@ -1310,23 +1362,28 @@ export interface DarazMessage {
     send_time: string | number
 }
 
+// In-memory LRU set to deduplicate message_ids without bloating app_settings with thousands of rows
+const repliedMessageIdsCache = new Set<string>()
+function markMessageRepliedInMemory(messageId: string) {
+    if (!messageId) return
+    if (repliedMessageIdsCache.size >= 1000) {
+        const oldest = repliedMessageIdsCache.values().next().value
+        if (oldest) repliedMessageIdsCache.delete(oldest)
+    }
+    repliedMessageIdsCache.add(messageId)
+}
+
 // Guarded entry point: ensures only ONE auto-reply is generated per buyer burst, even when
 // Daraz fires several webhook events at once (text + order card + welcome message) or the
 // manual sync runs in parallel. Uses an atomic insert on app_settings(key) as a cross-instance lock.
 export async function processIncomingMessageAutoReply(storeId: string, sessionId: string, msg: DarazMessage) {
-    const supabase = await createAdminClient()
-
-    // 0. Deduplicate by message_id if available to prevent double processing across webhook and sync
-    if (msg.message_id) {
-        const markerKey = `ai_replied_msg_${msg.message_id}`
-        const { data: alreadyReplied } = await supabase.from('app_settings').select('key').eq('key', markerKey).maybeSingle()
-        if (alreadyReplied) {
-            console.log(`[AutoReply] Message ${msg.message_id} was already processed/replied to, skipping duplicate.`)
-            return
-        }
+    // 0. Fast in-memory deduplication by message_id (zero DB cost)
+    if (msg.message_id && repliedMessageIdsCache.has(String(msg.message_id))) {
+        console.log(`[AutoReply] Message ${msg.message_id} was already processed in memory, skipping duplicate.`)
+        return
     }
 
-    // 1. Ignore non-text events (order cards / product cards / follow cards / greetings) as reply triggers
+    // 1. Ignore non-text events (order cards / product cards / follow cards / greetings) BEFORE making any DB calls
     let extractedUserText = ''
     try {
         const parsed = JSON.parse(msg.content)
@@ -1359,6 +1416,7 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
         return
     }
 
+    const supabase = await createAdminClient()
     const lockKey = `ai_reply_lock_${sessionId}`
 
     // 2. Acquire atomic lock (key is unique). Break stale locks older than 60s.
@@ -1391,17 +1449,14 @@ export async function processIncomingMessageAutoReply(storeId: string, sessionId
         const topMsg = latestMsgs?.[0]
         if (topMsg && String(topMsg.from_account_type) === '2') {
             console.log(`[AutoReply] Latest message in session ${sessionId} is already from seller/AI, skipping duplicate reply.`)
+            if (msg.message_id) markMessageRepliedInMemory(String(msg.message_id))
             return
         }
 
         await runAutoReply(storeId, sessionId, msg)
 
-        // Mark this message as replied to prevent any parallel sync or re-poll from replying again
         if (msg.message_id) {
-            await supabase.from('app_settings').upsert({
-                key: `ai_replied_msg_${msg.message_id}`,
-                value: { replied_at: Date.now(), session_id: sessionId }
-            })
+            markMessageRepliedInMemory(String(msg.message_id))
         }
     } finally {
         await supabase.from('app_settings').delete().eq('key', lockKey)
@@ -1841,6 +1896,17 @@ Response:`
 export async function processPendingDelayedMessagesAction(limit = 10) {
     try {
         const supabase = await createAdminClient()
+
+        // Fast read-only check first: if no pending/processing rows exist, return immediately with zero writes/locks
+        const { data: hasAnyActive } = await supabase
+            .from('daraz_delayed_messages')
+            .select('id')
+            .in('status', ['pending', 'processing'])
+            .limit(1)
+
+        if (!hasAnyActive || hasAnyActive.length === 0) {
+            return { success: true, processed: 0 }
+        }
 
         // First: reset any tasks stuck in 'processing' for >5 minutes
         // (handles crashed workers from previous runs)

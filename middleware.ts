@@ -272,24 +272,46 @@ export async function middleware(request: NextRequest) {
     }
 
     let user = null
+    let isTransientAuthFailure = false
 
     try {
-        // Refresh session using getUser()
+        // Refresh session using getUser() with an 8s timeout for Free Tier Nano cold-starts
         const authResult = await Promise.race([
             supabase.auth.getUser().catch((err: any) => ({ data: { user: null }, error: err })),
             new Promise<{ data: { user: null }; error?: any }>((resolve) =>
-                setTimeout(() => resolve({ data: { user: null }, error: new Error('Auth timeout') }), 6000)
+                setTimeout(() => resolve({ data: { user: null }, error: new Error('Auth timeout') }), 8000)
             )
         ])
 
         user = authResult.data?.user || null
+
+        if (!user && authResult.error) {
+            const errMsg = String(authResult.error?.message || authResult.error || '').toLowerCase()
+            if (
+                errMsg.includes('timeout') ||
+                errMsg.includes('fetch failed') ||
+                errMsg.includes('network') ||
+                errMsg.includes('econnrefused') ||
+                errMsg.includes('522') ||
+                errMsg.includes('503') ||
+                errMsg.includes('504')
+            ) {
+                isTransientAuthFailure = true
+            }
+        }
     } catch (e: any) {
         console.warn('[Middleware] Auth check notice:', e?.message || e)
+        isTransientAuthFailure = true
     }
 
     // Protected Routes Logic
     if (isDashboardRoute) {
         if (!user) {
+            // Do NOT log the user out or wipe cookies if Supabase Nano DB temporarily timed out
+            if (isTransientAuthFailure && hasAuthCookie) {
+                console.warn('[Middleware] Transient DB/Auth timeout — preserving existing session cookies.')
+                return response
+            }
             const redirectResponse = createRedirect('/login')
             clearAuthCookies(redirectResponse)
             return redirectResponse
@@ -302,8 +324,10 @@ export async function middleware(request: NextRequest) {
         if (user) {
             return createRedirect('/dashboard')
         }
-        // If expired on login page, clean dead cookies
-        clearAuthCookies(response)
+        // Only clean dead cookies if auth explicitly failed (not on transient DB timeout)
+        if (!isTransientAuthFailure) {
+            clearAuthCookies(response)
+        }
         return response
     }
 

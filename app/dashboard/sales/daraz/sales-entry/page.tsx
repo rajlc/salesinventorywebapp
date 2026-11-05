@@ -297,12 +297,11 @@ export default function DarazSalesEntryPage() {
     })
     const stockInfo = stockInfoData || {}
 
-    // Query for active purchase plans (cached and throttled)
+    // Query for active purchase plans (cached and throttled for Supabase Free Tier)
     const { data: activePlanProductIds = [] } = useQuery({
         queryKey: ['active-purchase-plans'],
         queryFn: () => getActivePlanProductIds(),
-        refetchInterval: 60000,
-        staleTime: 60000,
+        staleTime: 5 * 60 * 1000,
         refetchOnWindowFocus: false
     })
 

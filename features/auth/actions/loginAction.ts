@@ -23,15 +23,37 @@ export async function loginAction(
 
     const supabase = await createClient()
 
-    const { data: { user }, error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-    })
+    let authData: { user: any } | null = null
+    let signInError: any = null
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await supabase.auth.signInWithPassword({
+            email,
+            password,
+        })
+        authData = res.data
+        signInError = res.error
+
+        if (!signInError) break
+
+        const errMsg = String(signInError?.message || '').toLowerCase()
+        const isTransient =
+            errMsg.includes('fetch failed') ||
+            errMsg.includes('timeout') ||
+            errMsg.includes('network') ||
+            errMsg.includes('522') ||
+            errMsg.includes('503') ||
+            errMsg.includes('504')
+
+        if (!isTransient || attempt === 1) break
+        await new Promise((r) => setTimeout(r, 800))
+    }
 
     if (signInError) {
         return { error: signInError.message }
     }
 
+    const user = authData?.user
     if (!user) {
         return { error: 'Login failed. Please verify your credentials.' }
     }

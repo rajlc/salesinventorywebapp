@@ -523,6 +523,7 @@ function ChatAiDashboardContent() {
                 .select('*')
                 .eq('store_id', activeStoreId)
                 .order('last_message_time', { ascending: false })
+                .limit(300)
 
             if (error) {
                 console.error(error)
@@ -536,6 +537,23 @@ function ChatAiDashboardContent() {
             setLoadingSessions(false)
         }
         fetchSessions()
+
+        // Helper to fetch a single missing session only if it belongs to activeStoreId
+        async function fetchSingleMissingSession(missingSessionId: string) {
+            const { data: singleSession } = await supabase
+                .from('daraz_chat_sessions')
+                .select('*')
+                .eq('session_id', missingSessionId)
+                .eq('store_id', activeStoreId)
+                .maybeSingle()
+
+            if (singleSession) {
+                setSessions(prev => {
+                    if (prev.some(s => s.session_id === singleSession.session_id)) return prev
+                    return [singleSession as ChatSession, ...prev].sort((a, b) => getSessionTimeMs(b) - getSessionTimeMs(a))
+                })
+            }
+        }
 
         // Realtime Subscription for Session List updates & incoming messages
         const channel = supabase
@@ -585,7 +603,7 @@ function ChatAiDashboardContent() {
                 setSessions(prev => {
                     const existing = prev.find(s => s.session_id === newMsg.session_id)
                     if (!existing) {
-                        fetchSessions()
+                        fetchSingleMissingSession(newMsg.session_id)
                         return prev
                     }
 

@@ -35,7 +35,8 @@ export default function StockLedgerTable({ initialData, initialTotal, initialPag
             totalPages: initialPages,
             currentPage: 1
         } : undefined,
-        refetchInterval: 30000, // Auto-refresh every 30 seconds
+        staleTime: 2 * 60 * 1000,
+        refetchOnWindowFocus: false,
     })
 
     const ledgerItems = data?.data || []

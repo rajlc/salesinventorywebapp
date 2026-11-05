@@ -22,7 +22,8 @@ export default function StockValuationTable() {
     const { data, isLoading } = useQuery({
         queryKey: ['stock-valuation', page, limit, debouncedSearch],
         queryFn: () => getStockValuation(page, limit, debouncedSearch),
-        refetchInterval: 30000,
+        staleTime: 2 * 60 * 1000,
+        refetchOnWindowFocus: false,
     })
 
     const items = data?.data || []

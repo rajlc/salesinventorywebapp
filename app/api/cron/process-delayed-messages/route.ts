@@ -39,17 +39,22 @@ export async function GET(request: NextRequest) {
             }, { status: 200 }) // ← 200 so cron-job.org doesn't count as failure
         }
 
-        // Trigger retention policy cleanup function in Supabase (non-critical)
-        try {
-            const supabase = await createAdminClient()
-            const { error: cleanError } = await supabase.rpc('clean_daraz_chat_messages')
-            if (cleanError) {
-                console.warn('[Cron] Cleanup function warning (non-critical):', cleanError.message)
-            } else {
-                console.log('[Cron] ✅ Message retention cleanup completed.')
+        // Trigger retention policy cleanup function in Supabase at most once per day (around 02:00 UTC)
+        // Running this on every 1-5 min cron tick previously caused constant Disk IO & WAL churn on Free Tier
+        const nowUtc = new Date()
+        const shouldRunRetentionCleanup = nowUtc.getUTCHours() === 2 && nowUtc.getUTCMinutes() < 5
+        if (shouldRunRetentionCleanup) {
+            try {
+                const supabase = await createAdminClient()
+                const { error: cleanError } = await supabase.rpc('clean_daraz_chat_messages')
+                if (cleanError) {
+                    console.warn('[Cron] Cleanup function warning (non-critical):', cleanError.message)
+                } else {
+                    console.log('[Cron] ✅ Daily message retention cleanup completed.')
+                }
+            } catch (cleanErr: any) {
+                console.warn('[Cron] Cleanup skipped (non-critical):', cleanErr.message)
             }
-        } catch (cleanErr: any) {
-            console.warn('[Cron] Cleanup skipped (non-critical):', cleanErr.message)
         }
 
         return NextResponse.json({
