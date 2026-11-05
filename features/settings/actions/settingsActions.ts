@@ -136,7 +136,7 @@ export async function deleteFiscalYear(id: string) {
 // ONLINE STORES ACTIONS
 // ============================================
 
-export async function getOnlineStores(options?: { onlyOrderSync?: boolean; onlyChatReview?: boolean }) {
+export async function getOnlineStores(options?: { onlyOrderSync?: boolean; onlyChatReview?: boolean; [key: string]: any }) {
     const supabase = await getSupabaseServer()
 
     const { data, error } = await supabase

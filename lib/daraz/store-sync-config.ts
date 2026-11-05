@@ -65,7 +65,7 @@ export async function enrichStoresWithSyncModes<T extends { id: string; order_sy
 export async function isStoreOrderSyncEnabled(
     storeId: string,
     supabaseClient?: any,
-    storeRow?: { order_sync_enabled?: boolean } | null
+    storeRow?: { order_sync_enabled?: boolean; [key: string]: any } | null
 ): Promise<boolean> {
     if (!storeId) return true
     const modesMap = await getStoreSyncModesMap(supabaseClient)
@@ -85,7 +85,7 @@ export async function isStoreOrderSyncEnabled(
 export async function isStoreChatReviewEnabled(
     storeId: string,
     supabaseClient?: any,
-    storeRow?: { chat_review_enabled?: boolean } | null
+    storeRow?: { chat_review_enabled?: boolean; [key: string]: any } | null
 ): Promise<boolean> {
     if (!storeId) return true
     const modesMap = await getStoreSyncModesMap(supabaseClient)
