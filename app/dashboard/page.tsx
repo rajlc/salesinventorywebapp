@@ -1,6 +1,9 @@
+'use client'
+
+import React, { useEffect, useState } from "react"
 import Link from "next/link"
-import { Metadata } from "next"
-import { getDashboardMetrics } from "@/features/dashboard/actions/dashboard-actions"
+import { useQuery } from "@tanstack/react-query"
+import { getDashboardMetrics, type DashboardMetrics } from "@/features/dashboard/actions/dashboard-actions"
 import {
     ShoppingBag,
     Globe,
@@ -21,15 +24,72 @@ import {
     CheckCircle2
 } from "lucide-react"
 
-export const metadata: Metadata = {
-    title: "Dashboard Overview | Bagmati Traders",
+const DASHBOARD_CACHE_KEY = "bagmati_dashboard_metrics_v1"
+
+const DEFAULT_METRICS: DashboardMetrics = {
+    userName: "Admin User",
+    timeGreeting: "day",
+    headerTitle: "Welcome back.",
+    headerSubtitle: "Welcome to your dashboard. Below is a summary of today's Orders, Inventory, and Purchasing activities.",
+    activeFiscalYear: null,
+    darazToday: {
+        total: 0,
+        pending: 0,
+        packed: 0,
+        readyToShip: 0,
+        shipped: 0,
+        returnedDelivered: 0,
+        customerReturnDelivered: 0,
+    },
+    websiteSalesToday: { count: 0, totalAmount: 0 },
+    storeSalesToday: { count: 0, totalAmount: 0 },
+    purchaseToday: {
+        itemCount: 0,
+        purchaseAmount: 0,
+        salesAmount: 0,
+        transactions: { online: 0, cash: 0, due: 0, others: 0 },
+    },
+    inventory: { totalProducts: 0, totalValuation: 0, damagedCount: 0 },
+    financials: {
+        pendingSupplierDue: 0,
+        purchaseBillingTotal: 0,
+        salesBillingTotal: 0,
+        estShippedTotal: 0,
+    },
+    notifications: {
+        unreadDarazChats5Days: 0,
+        unrepliedTextReviews: 0,
+        openReminders: [],
+    },
 }
 
-// Cache dashboard metrics for 30s so page loads instantly while staying fresh
-export const revalidate = 30
+export default function DashboardPage() {
+    const [cachedMetrics, setCachedMetrics] = useState<DashboardMetrics | null>(null)
 
-export default async function DashboardPage() {
-    const metrics = await getDashboardMetrics()
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem(DASHBOARD_CACHE_KEY)
+            if (raw) {
+                setCachedMetrics(JSON.parse(raw))
+            }
+        } catch {}
+    }, [])
+
+    const { data: liveMetrics } = useQuery({
+        queryKey: ["dashboard-metrics"],
+        queryFn: async () => {
+            const res = await getDashboardMetrics()
+            try {
+                localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(res))
+            } catch {}
+            return res
+        },
+        staleTime: 2 * 60 * 1000,
+        gcTime: 30 * 60 * 1000,
+        refetchOnWindowFocus: false,
+    })
+
+    const metrics = liveMetrics || cachedMetrics || DEFAULT_METRICS
 
     const {
         headerTitle,

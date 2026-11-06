@@ -1,6 +1,4 @@
-
 import { Metadata } from 'next'
-import { getStockLedger } from '@/features/inventory/services/stock-ledger-service'
 import StockLedgerView from '@/features/inventory/components/StockLedgerView'
 import { ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
@@ -10,10 +8,7 @@ export const metadata: Metadata = {
     description: 'View detailed stock movement history'
 }
 
-export default async function StockLedgerPage() {
-    // Initial fetch (100 per page to match component)
-    const { data, totalCount, totalPages } = await getStockLedger(1, 100, '')
-
+export default function StockLedgerPage() {
     return (
         <div className="p-0 md:p-6 space-y-6">
             {/* Header - Global Top Bar style on Mobile */}
@@ -35,13 +30,8 @@ export default async function StockLedgerPage() {
             {/* Content Spacer for Mobile Fixed Header */}
             <div className="h-16 md:hidden"></div>
 
-            {/* Client Table */}
-            {/* Client View with Tabs */}
-            <StockLedgerView
-                initialData={data}
-                initialTotal={totalCount}
-                initialPages={totalPages}
-            />
+            {/* Instant Client View with React Query Caching */}
+            <StockLedgerView />
         </div>
     )
 }

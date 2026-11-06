@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
-import { StockLedgerItem } from './stock-ledger-service'
+import { getMemoryCache, setMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface StockValuationItem {
     id: string
@@ -9,7 +9,7 @@ export interface StockValuationItem {
     total_stock: number
     stock_value: number | 'Missing'
     total_valuation: number | 'Error'
-    stock_value_source: 'average' | 'est' | 'missing' // For debugging/UI hints if needed
+    stock_value_source: 'average' | 'est' | 'missing'
 }
 
 export interface ValuationSummary {
@@ -25,162 +25,133 @@ export interface ValuationResponse {
     summary: ValuationSummary
 }
 
-// Reuse helper
-function datSum(...args: number[]) {
-    return args.reduce((a, b) => a + (b || 0), 0)
+interface CachedFullValuation {
+    items: StockValuationItem[]
+    summary: ValuationSummary
 }
 
 export async function getStockValuation(page = 1, limit = 50, search = ''): Promise<ValuationResponse> {
-    const supabase = await createClient()
+    const fullCacheKey = 'stock_valuation_full_items'
+    let fullValuation = getMemoryCache<CachedFullValuation>(fullCacheKey)
 
-    // 1. Fetch ALL Products and their Total Stock from stock_ledger_view
-    const CHUNK_SIZE = 1000
-    let allProducts: any[] = []
-    let offset = 0
-    let hasMore = true
+    if (!fullValuation) {
+        const supabase = await createClient()
 
-    while (hasMore) {
-        let q = supabase
-            .from('stock_ledger_view')
-            .select('id, product_name, product_type, total_stock')
-            .order('id', { ascending: true })
-            .range(offset, offset + CHUNK_SIZE - 1)
+        // Fetch non-zero stock products, average prices, and est_prices in 3 parallel queries (instead of 16+ chunk queries)
+        const [ledgerRes, priceReportsRes, productsExtraRes] = await Promise.all([
+            supabase
+                .from('stock_ledger_view')
+                .select('id, product_name, product_type, total_stock')
+                .neq('total_stock', 0)
+                .limit(3000),
+            supabase
+                .from('inventory_price_reports_view')
+                .select('product_id, average_price')
+                .limit(3000),
+            supabase
+                .from('products')
+                .select('id, est_price')
+                .eq('is_deleted', false)
+                .gt('est_price', 0)
+                .limit(3000),
+        ])
 
-        if (search && search.trim()) {
-            const searchTerm = `%${search.trim()}%`
-            q = q.ilike('product_name', searchTerm)
-        }
+        if (ledgerRes.error) throw new Error(ledgerRes.error.message)
 
-        const { data: chunk, error } = await q
-        if (error) throw new Error(error.message)
-
-        if (!chunk || chunk.length === 0) {
-            hasMore = false
-        } else {
-            allProducts = [...allProducts, ...chunk]
-            offset += CHUNK_SIZE
-            if (chunk.length < CHUNK_SIZE) hasMore = false
-        }
-    }
-
-    if (allProducts.length === 0) {
-        return {
-            data: [],
-            totalCount: 0,
-            totalPages: 0,
-            currentPage: page,
-            summary: { missingCount: 0, totalValuation: 0 }
-        }
-    }
-
-    const productIds = allProducts.map(p => p.id)
-
-    // 2. Fetch Prices (Parallelized Chunks)
-    const RELATED_CHUNK_SIZE = 100
-    const chunks: string[][] = []
-    for (let i = 0; i < productIds.length; i += RELATED_CHUNK_SIZE) {
-        chunks.push(productIds.slice(i, i + RELATED_CHUNK_SIZE))
-    }
-
-    const chunkResults = await Promise.all(
-        chunks.map(async chunk => {
-            const [prices, extras] = await Promise.all([
-                supabase.from('inventory_price_reports_view').select('product_id, average_price').in('product_id', chunk),
-                supabase.from('products').select('id, est_price').in('id', chunk)
-            ])
-            return {
-                prices: prices.data || [],
-                extras: extras.data || []
-            }
+        const allProducts = ledgerRes.data || []
+        const priceMap = new Map<string, number>()
+        ;(priceReportsRes.data || []).forEach((p: any) => {
+            if (p.average_price) priceMap.set(p.product_id, Number(p.average_price))
         })
-    )
 
-    const allPriceReports: any[] = []
-    const allProductsExtra: any[] = []
-    for (const res of chunkResults) {
-        allPriceReports.push(...res.prices)
-        allProductsExtra.push(...res.extras)
-    }
+        const estPriceMap = new Map<string, number>()
+        ;(productsExtraRes.data || []).forEach((p: any) => {
+            if (p.est_price) estPriceMap.set(p.id, Number(p.est_price))
+        })
 
-    const priceMap = new Map<string, number>()
-    allPriceReports.forEach(p => {
-        if (p.average_price) priceMap.set(p.product_id, p.average_price)
-    })
+        let globalMissingCount = 0
+        let globalTotalValuation = 0
+        const valuationItems: StockValuationItem[] = []
 
-    const estPriceMap = new Map<string, number>()
-    allProductsExtra.forEach(p => {
-        if (p.est_price) estPriceMap.set(p.id, p.est_price)
-    })
+        allProducts.forEach((product: any) => {
+            const pid = product.id
+            const totalStock = Number(product.total_stock) || 0
+            if (totalStock === 0) return
 
-    // 3. Calculate Valuation
-    let globalMissingCount = 0
-    let globalTotalValuation = 0
-    const valuationItems: StockValuationItem[] = []
+            const avgPrice = priceMap.get(pid)
+            const estPrice = estPriceMap.get(pid)
 
-    allProducts.forEach(product => {
-        const pid = product.id
-        const totalStock = Number(product.total_stock) || 0
+            let stockValue: number | 'Missing' = 'Missing'
+            let source: 'average' | 'est' | 'missing' = 'missing'
 
-        // FILTER: Ignore if Stock is 0
-        if (totalStock === 0) return
+            if (avgPrice && avgPrice > 0) {
+                stockValue = avgPrice
+                source = 'average'
+            } else if (estPrice && estPrice > 0) {
+                stockValue = estPrice
+                source = 'est'
+            }
 
-        const avgPrice = priceMap.get(pid)
-        const estPrice = estPriceMap.get(pid)
-
-        let stockValue: number | 'Missing' = 'Missing'
-        let source: 'average' | 'est' | 'missing' = 'missing'
-
-        if (avgPrice && avgPrice > 0) {
-            stockValue = avgPrice
-            source = 'average'
-        } else if (estPrice && estPrice > 0) {
-            stockValue = estPrice
-            source = 'est'
-        }
-
-        // Valuation Logic
-        let totalValuation: number | 'Error' = 'Error'
-
-        if (stockValue !== 'Missing') {
-            // "if Total Stock is in negative then show 'Error'"
-            if (totalStock < 0) {
-                totalValuation = 'Error'
+            let totalValuation: number | 'Error' = 'Error'
+            if (stockValue !== 'Missing') {
+                if (totalStock < 0) {
+                    totalValuation = 'Error'
+                } else {
+                    totalValuation = (stockValue as number) * totalStock
+                    globalTotalValuation += totalValuation
+                }
             } else {
-                totalValuation = (stockValue as number) * totalStock
-                globalTotalValuation += totalValuation
+                globalMissingCount++
             }
-        } else {
-            // Missing price -> count as missing
-            globalMissingCount++
-        }
 
-        valuationItems.push({
-            id: pid,
-            product_name: product.product_name,
-            total_stock: totalStock,
-            stock_value: stockValue,
-            total_valuation: totalValuation,
-            stock_value_source: source
+            valuationItems.push({
+                id: pid,
+                product_name: product.product_name,
+                total_stock: totalStock,
+                stock_value: stockValue,
+                total_valuation: totalValuation,
+                stock_value_source: source,
+            })
         })
-    })
 
-    // 6. Sort
-    // User Request: "in stock valuation table , in column total stock show top quantity stock in top of page"
-    valuationItems.sort((a, b) => b.total_stock - a.total_stock)
+        valuationItems.sort((a, b) => b.total_stock - a.total_stock)
 
-    // 7. Paginate
-    const totalCount = valuationItems.length
+        fullValuation = {
+            items: valuationItems,
+            summary: {
+                missingCount: globalMissingCount,
+                totalValuation: globalTotalValuation,
+            },
+        }
+        setMemoryCache(fullCacheKey, fullValuation, 60)
+    }
+
+    // Apply search filter & pagination in 0ms from cached full valuation
+    const cleanSearch = (search || '').trim().toLowerCase()
+    const filteredItems = cleanSearch
+        ? fullValuation.items.filter(item => (item.product_name || '').toLowerCase().includes(cleanSearch))
+        : fullValuation.items
+
+    let summary = fullValuation.summary
+    if (cleanSearch) {
+        let missingCount = 0
+        let totalValuation = 0
+        filteredItems.forEach(item => {
+            if (item.stock_value === 'Missing') missingCount++
+            else if (typeof item.total_valuation === 'number') totalValuation += item.total_valuation
+        })
+        summary = { missingCount, totalValuation }
+    }
+
+    const totalCount = filteredItems.length
     const totalPages = Math.ceil(totalCount / limit)
-    const paginatedData = valuationItems.slice((page - 1) * limit, page * limit)
+    const paginatedData = filteredItems.slice((page - 1) * limit, page * limit)
 
     return {
         data: paginatedData,
         totalCount,
         totalPages,
         currentPage: page,
-        summary: {
-            missingCount: globalMissingCount,
-            totalValuation: globalTotalValuation
-        }
+        summary,
     }
 }

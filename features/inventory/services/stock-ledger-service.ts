@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { getMemoryCache, setMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface StockLedgerItem {
     id: string
@@ -24,6 +25,10 @@ interface LedgerResponse {
 }
 
 export async function getStockLedger(page = 1, limit = 100, search = ''): Promise<LedgerResponse> {
+    const cacheKey = `stock_ledger:${page}:${limit}:${(search || '').trim().toLowerCase()}`
+    const cached = getMemoryCache<LedgerResponse>(cacheKey)
+    if (cached) return cached
+
     const supabase = await createClient()
 
     // 1. Base Query with Count
@@ -78,12 +83,14 @@ export async function getStockLedger(page = 1, limit = 100, search = ''): Promis
     }))
 
     const totalCount = count || 0
-    return {
+    const result: LedgerResponse = {
         data: ledger,
         totalCount,
         totalPages: Math.ceil(totalCount / limit),
         currentPage: page
     }
+    setMemoryCache(cacheKey, result, 45)
+    return result
 }
 
 // Detail View

@@ -7,12 +7,12 @@ import { StockLedgerItem, getStockLedger } from '../services/stock-ledger-servic
 import Link from 'next/link'
 
 interface Props {
-    initialData: StockLedgerItem[]
-    initialTotal: number
-    initialPages: number
+    initialData?: StockLedgerItem[]
+    initialTotal?: number
+    initialPages?: number
 }
 
-export default function StockLedgerTable({ initialData, initialTotal, initialPages }: Props) {
+export default function StockLedgerTable({ initialData = [], initialTotal = 0, initialPages = 1 }: Props) {
     const [page, setPage] = useState(1)
     const [search, setSearch] = useState('')
     const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -29,7 +29,7 @@ export default function StockLedgerTable({ initialData, initialTotal, initialPag
         queryKey: ['stock-ledger', page, debouncedSearch],
         queryFn: () => getStockLedger(page, 100, debouncedSearch),
         placeholderData: (previousData) => previousData,
-        initialData: page === 1 && !debouncedSearch ? {
+        initialData: page === 1 && !debouncedSearch && initialData.length > 0 ? {
             data: initialData,
             totalCount: initialTotal,
             totalPages: initialPages,

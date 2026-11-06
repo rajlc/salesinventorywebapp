@@ -7,12 +7,12 @@ import { StockLedgerItem } from '../services/stock-ledger-service'
 import { usePermissions } from '@/lib/permissions/PermissionContext'
 
 interface Props {
-    initialData: StockLedgerItem[]
-    initialTotal: number
-    initialPages: number
+    initialData?: StockLedgerItem[]
+    initialTotal?: number
+    initialPages?: number
 }
 
-export default function StockLedgerView({ initialData, initialTotal, initialPages }: Props) {
+export default function StockLedgerView({ initialData = [], initialTotal = 0, initialPages = 1 }: Props) {
     const { hasPermission, isLoading } = usePermissions()
     const canViewLedger = hasPermission('Inventory', 'Stock Ledger')
     const canViewValuation = hasPermission('Inventory', 'Stock Valuation')

@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
+import { getMemoryCache, setMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 export interface StoreSyncMode {
     order_sync_enabled: boolean
@@ -6,13 +7,17 @@ export interface StoreSyncMode {
 }
 
 export const STORE_SYNC_MODES_KEY = 'daraz_store_sync_modes'
+const STORE_MODES_CACHE_KEY = 'store_sync_modes_map'
 
 /**
- * Fetches the store sync modes map from `app_settings` (`daraz_store_sync_modes`).
+ * Fetches the store sync modes map from `app_settings` (`daraz_store_sync_modes`) with 120s in-memory caching.
  * Works immediately without requiring manual DDL changes on `online_stores`,
  * while also honoring `online_stores.order_sync_enabled` / `chat_review_enabled` if present.
  */
 export async function getStoreSyncModesMap(supabaseClient?: any): Promise<Record<string, StoreSyncMode>> {
+    const cached = getMemoryCache<Record<string, StoreSyncMode>>(STORE_MODES_CACHE_KEY)
+    if (cached) return cached
+
     try {
         const supabase = supabaseClient || (await createAdminClient())
         const { data, error } = await supabase
@@ -22,12 +27,16 @@ export async function getStoreSyncModesMap(supabaseClient?: any): Promise<Record
             .maybeSingle()
 
         if (!error && data?.value && typeof data.value === 'object') {
-            return data.value as Record<string, StoreSyncMode>
+            const map = data.value as Record<string, StoreSyncMode>
+            setMemoryCache(STORE_MODES_CACHE_KEY, map, 120)
+            return map
         }
     } catch (err) {
         console.warn('[StoreSyncConfig] Failed to read daraz_store_sync_modes:', err)
     }
-    return {}
+    const empty = {}
+    setMemoryCache(STORE_MODES_CACHE_KEY, empty, 60)
+    return empty
 }
 
 /**
@@ -124,6 +133,10 @@ export async function saveStoreSyncMode(
         ...currentMap,
         [storeId]: updated,
     }
+
+    // Immediately update in-memory cache so subsequent reads are instant and consistent
+    setMemoryCache(STORE_MODES_CACHE_KEY, nextMap, 120)
+    invalidateMemoryCachePrefix('disabled_order_sync_stores')
 
     const { error: upsertError } = await supabase
         .from('app_settings')

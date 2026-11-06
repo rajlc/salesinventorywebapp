@@ -1,37 +1,16 @@
+'use client'
 
-import { Metadata } from "next"
-import { getUserProfile, getUserPermissions } from "@/features/user-management/actions/user-actions"
-import { createClient } from "@/lib/supabase/server"
 import StockAdjustmentClient from "@/features/inventory/components/stock-adjustment/StockAdjustmentClient"
-import { redirect } from "next/navigation"
+import { usePermissions } from "@/lib/permissions/PermissionContext"
 
-export const metadata: Metadata = {
-    title: "Stock Adjustment | Bagmati ERP",
-    description: "Manage stock adjustments, opening stock, and transfers",
-}
+export default function StockAdjustmentPage() {
+    const { userRole, hasPermission, isLoading } = usePermissions()
 
-export default async function StockAdjustmentPage() {
-    const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-
-    if (!user) {
-        redirect("/login")
+    if (isLoading) {
+        return <StockAdjustmentClient />
     }
 
-    // Access Control
-    const profile = await getUserProfile(user.id)
-
-    let hasAccess = false
-    if (profile.role === 'admin') {
-        hasAccess = true
-    } else {
-        const permissions = await getUserPermissions(user.id)
-        hasAccess = permissions.some(p =>
-            p.main_page_role === 'Inventory' &&
-            p.sub_page_role === 'Stock Adjustment' &&
-            (p.permission_type === 'view' || p.permission_type === 'all')
-        )
-    }
+    const hasAccess = userRole === 'admin' || hasPermission('Inventory', 'Stock Adjustment')
 
     if (!hasAccess) {
         return (

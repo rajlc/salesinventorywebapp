@@ -4,8 +4,13 @@ import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { calculateOrderProfitsForOrders, clearOrderProfitCalculatorCache } from '@/features/sales/utils/daraz-order-profit'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
+import { getMemoryCache, setMemoryCache } from '@/lib/cache/memory-cache'
 
 async function getDisabledOrderSyncStores(supabase: any) {
+    const cacheKey = 'disabled_order_sync_stores_list'
+    const cached = getMemoryCache<{ disabledAccounts: string[]; disabledStoreIds: string[] }>(cacheKey)
+    if (cached) return cached
+
     try {
         const { data: stores } = await supabase
             .from('online_stores')
@@ -20,7 +25,9 @@ async function getDisabledOrderSyncStores(supabase: any) {
                 if (s.id) disabledStoreIds.push(s.id)
             }
         })
-        return { disabledAccounts, disabledStoreIds }
+        const result = { disabledAccounts, disabledStoreIds }
+        setMemoryCache(cacheKey, result, 60)
+        return result
     } catch {
         return { disabledAccounts: [] as string[], disabledStoreIds: [] as string[] }
     }
