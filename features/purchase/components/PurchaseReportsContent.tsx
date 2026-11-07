@@ -26,7 +26,7 @@ export default function PurchaseReportsContent({ isEmbedded = false }: PurchaseR
 
     // Fetch fiscal years
     const { data: fiscalYearsData } = useQuery({
-        queryKey: ['fiscal-years'],
+        queryKey: ['purchase-fiscal-years'],
         queryFn: () => getFiscalYears()
     })
 

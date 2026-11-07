@@ -2,6 +2,7 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { getActiveFiscalYear } from '@/features/settings/actions/settingsActions'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface StockAnalysisItem {
     particulars: string
@@ -30,6 +31,18 @@ export async function getStockAnalysisData(filters?: {
     search?: string
     asOfDate?: string
 }): Promise<StockAnalysisItem[]> {
+    const cacheKey = `stock_analysis:data:${JSON.stringify(filters || {})}`
+    return withMemoryCache(cacheKey, 45_000, async () => {
+        return getStockAnalysisDataUncached(filters)
+    })
+}
+
+async function getStockAnalysisDataUncached(filters?: {
+    fiscalYearId?: string
+    companyId?: string
+    search?: string
+    asOfDate?: string
+}): Promise<StockAnalysisItem[]> {
     const supabase = await createClient()
 
     const asOfDate = filters?.asOfDate
@@ -39,7 +52,6 @@ export async function getStockAnalysisData(filters?: {
     let endDate: string
 
     if (asOfDate) {
-        // When checking stock as of a specific date, opening includes all older history up to asOfDate
         startDate = '2000-01-01'
         endDate = asOfDate
     } else if (filters?.fiscalYearId && filters.fiscalYearId !== 'all') {
@@ -53,7 +65,6 @@ export async function getStockAnalysisData(filters?: {
         startDate = fy.start_date
         endDate = fy.end_date
     } else {
-        // If 'all' is explicitly passed, we set a very old start date
         if (filters?.fiscalYearId === 'all') {
             startDate = '2000-01-01'
             endDate = new Date().toISOString()
@@ -65,7 +76,7 @@ export async function getStockAnalysisData(filters?: {
         }
     }
 
-    // 2. Fetch All Valid Purchase Items to Aggregate (no date filter — we need all-time for rate fallback)
+    // 2 & 3. Fetch All Valid Purchase Items & Sales Items concurrently
     let purchaseQuery = supabase
         .from('pan_vat_bill_items')
         .select(`
@@ -78,7 +89,6 @@ export async function getStockAnalysisData(filters?: {
         `)
         .eq('pan_vat_bills.is_deleted', false)
 
-    // Filter by company (buyer)
     if (filters?.companyId && filters.companyId !== 'all') {
         purchaseQuery = purchaseQuery.eq('pan_vat_bills.buyer_company_id', filters.companyId)
     }
@@ -87,14 +97,6 @@ export async function getStockAnalysisData(filters?: {
         purchaseQuery = purchaseQuery.ilike('particulars', `%${filters.search}%`)
     }
 
-    const { data: allPurchaseItems, error: purchaseError } = await purchaseQuery
-
-    if (purchaseError) {
-        console.error('Error fetching purchase stock data:', purchaseError)
-        throw purchaseError
-    }
-
-    // 3. Fetch All Valid Sales Items to Aggregate
     let salesQuery = supabase
         .from('sales_bill_items')
         .select(`
@@ -107,7 +109,6 @@ export async function getStockAnalysisData(filters?: {
         `)
         .eq('sales_bills.is_deleted', false)
 
-    // Filter by company (seller)
     if (filters?.companyId && filters.companyId !== 'all') {
         salesQuery = salesQuery.eq('sales_bills.seller_company_id', filters.companyId)
     }
@@ -116,7 +117,15 @@ export async function getStockAnalysisData(filters?: {
         salesQuery = salesQuery.ilike('particulars', `%${filters.search}%`)
     }
 
-    const { data: allSalesItems, error: salesError } = await salesQuery
+    const [{ data: allPurchaseItems, error: purchaseError }, { data: allSalesItems, error: salesError }] = await Promise.all([
+        purchaseQuery,
+        salesQuery
+    ])
+
+    if (purchaseError) {
+        console.error('Error fetching purchase stock data:', purchaseError)
+        throw purchaseError
+    }
 
     if (salesError) {
         console.error('Error fetching sales stock data:', salesError)

@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface ProductStockInfo {
     product_id: string
@@ -25,81 +26,91 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
         return {}
     }
 
-    const supabase = await createClient()
+    const sortedKey = [...orderIds].sort().join(',')
+    return withMemoryCache(`order_stock_info:${sortedKey}`, 30_000, async () => {
+        const supabase = await createClient()
 
-    // 1. Fetch all order items for the given orders (chunked to prevent URL length overflow)
-    const CHUNK_SIZE = 50
-    const chunks: string[][] = []
-    for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
-        chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
-    }
+        // 1. Fetch all order items for the given orders (chunked to prevent URL length overflow)
+        const CHUNK_SIZE = 150
+        const chunks: string[][] = []
+        for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
+            chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
+        }
 
-    const chunkResults = await Promise.all(
-        chunks.map(chunk =>
-            supabase
-                .from('daraz_order_items')
-                .select(`
-                    order_id,
-                    product_id,
-                    quantity,
-                    product:products(
-                        id,
-                        product_name,
-                        image_url,
-                        product_type
-                    )
-                `)
-                .in('order_id', chunk)
+        const chunkResults = await Promise.all(
+            chunks.map(chunk =>
+                supabase
+                    .from('daraz_order_items')
+                    .select(`
+                        order_id,
+                        product_id,
+                        quantity,
+                        product:products(
+                            id,
+                            product_name,
+                            image_url,
+                            product_type
+                        )
+                    `)
+                    .in('order_id', chunk)
+            )
         )
-    )
 
-    const orderItems: any[] = []
-    for (const res of chunkResults) {
-        if (res.error) {
-            console.error('Error fetching order items chunk:', res.error)
+        const orderItems: any[] = []
+        for (const res of chunkResults) {
+            if (res.error) {
+                console.error('Error fetching order items chunk:', res.error)
+            }
+            if (res.data) {
+                orderItems.push(...res.data)
+            }
         }
-        if (res.data) {
-            orderItems.push(...res.data)
+
+        if (orderItems.length === 0) {
+            return {}
         }
-    }
 
-    if (orderItems.length === 0) {
-        return {}
-    }
+        // 2. Get unique product IDs
+        const productIds = [...new Set(orderItems.map(item => item.product_id))]
 
-    // 2. Get unique product IDs
-    const productIds = [...new Set(orderItems.map(item => item.product_id))]
+        // 3. Calculate stock for each product (batch processing)
+        const stockMap = await calculateProductStocks(productIds)
 
-    // 3. Calculate stock for each product (batch processing)
-    const stockMap = await calculateProductStocks(productIds)
+        // 4. Group by order and build response
+        const result: Record<string, OrderStockInfo> = {}
+        const itemsByOrder = new Map<string, any[]>()
+        for (const item of orderItems) {
+            if (!itemsByOrder.has(item.order_id)) {
+                itemsByOrder.set(item.order_id, [])
+            }
+            itemsByOrder.get(item.order_id)!.push(item)
+        }
 
-    // 4. Group by order and build response
-    const result: Record<string, OrderStockInfo> = {}
+        orderIds.forEach(orderId => {
+            const items = itemsByOrder.get(orderId) || []
 
-    orderIds.forEach(orderId => {
-        const items = orderItems.filter(item => item.order_id === orderId)
+            const products: ProductStockInfo[] = items.map(item => {
+                const product = item.product as any
+                return {
+                    product_id: item.product_id,
+                    product_name: product?.product_name || 'Unknown Product',
+                    image_url: product?.image_url || null,
+                    total_stock: stockMap.get(item.product_id) || 0
+                }
+            })
 
-        const products: ProductStockInfo[] = items.map(item => {
-            const product = item.product as any
-            return {
-                product_id: item.product_id,
-                product_name: product?.product_name || 'Unknown Product',
-                image_url: product?.image_url || null,
-                total_stock: stockMap.get(item.product_id) || 0
+            const in_stock_count = products.filter(p => p.total_stock > 0).length
+
+            result[orderId] = {
+                order_id: orderId,
+                products,
+                in_stock_count,
+                total_count: products.length
             }
         })
 
-        const in_stock_count = products.filter(p => p.total_stock > 0).length
-
-        result[orderId] = {
-            order_id: orderId,
-            products,
-            in_stock_count,
-            total_count: products.length
-        }
+        return result
     })
-
-    return result
 }
 
 /**
@@ -110,60 +121,35 @@ export async function getProductsStock(productIds: string[]): Promise<Record<str
     return Object.fromEntries(map)
 }
 
-// In-memory cache for product stocks with 30s TTL to speed up repeated order stock lookups
-const stockCache = new Map<string, { stock: number; timestamp: number }>()
-const STOCK_CACHE_TTL = 30 * 1000 // 30 seconds
+async function getAllStockTotalsMap(): Promise<Map<string, number>> {
+    return withMemoryCache('stock_ledger:all_totals_map', 60_000, async () => {
+        const supabase = await createClient()
+        const { data, error } = await supabase
+            .from('stock_ledger_view')
+            .select('id, total_stock')
+            .limit(10000)
+
+        if (error) {
+            console.error('Error fetching stock_ledger_view totals:', error)
+        }
+
+        const map = new Map<string, number>()
+        data?.forEach((item: any) => {
+            map.set(item.id, Number(item.total_stock) || 0)
+        })
+        return map
+    })
+}
 
 async function calculateProductStocks(rawProductIds: string[]): Promise<Map<string, number>> {
     const stockMap = new Map<string, number>()
     const productIds = rawProductIds.filter(Boolean)
     if (productIds.length === 0) return stockMap
 
-    const now = Date.now()
-    const missingIds: string[] = []
-
-    // Read from in-memory cache if fresh
+    const fullMap = await getAllStockTotalsMap()
     productIds.forEach(id => {
-        const cached = stockCache.get(id)
-        if (cached && (now - cached.timestamp) < STOCK_CACHE_TTL) {
-            stockMap.set(id, cached.stock)
-        } else {
-            missingIds.push(id)
-        }
+        stockMap.set(id, fullMap.get(id) ?? 0)
     })
-
-    if (missingIds.length === 0) {
-        return stockMap
-    }
-
-    const supabase = await createClient()
-
-    // Query only the uncached products in chunks to prevent URL length overflow
-    const CHUNK_SIZE = 50
-    const chunks: string[][] = []
-    for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
-        chunks.push(missingIds.slice(i, i + CHUNK_SIZE))
-    }
-
-    const chunkResults = await Promise.all(
-        chunks.map(chunk =>
-            supabase
-                .from('stock_ledger_view')
-                .select('id, total_stock')
-                .in('id', chunk)
-        )
-    )
-
-    for (const res of chunkResults) {
-        if (res.error) {
-            console.error('Error fetching stock_ledger_view chunk:', res.error)
-        }
-        res.data?.forEach(item => {
-            const stockVal = Number(item.total_stock) || 0
-            stockMap.set(item.id, stockVal)
-            stockCache.set(item.id, { stock: stockVal, timestamp: now })
-        })
-    }
 
     return stockMap
 }

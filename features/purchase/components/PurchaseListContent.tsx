@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, Fragment } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPurchases, Purchase } from '@/features/purchase/actions/purchase-actions'
 import { getSuppliers } from '@/features/suppliers/actions/supplier-actions'
@@ -249,9 +249,9 @@ export default function PurchaseListContent({ isEmbedded = false }: PurchaseList
                                         <tr><td colSpan={11} className="p-4 text-center text-sm text-gray-500">No purchases found.</td></tr>
                                     ) : (
                                         groupedPurchases.map(([date, group]) => (
-                                            <>
+                                            <Fragment key={`group-${date}`}>
                                                 {/* Group Header */}
-                                                <tr key={`header-${date}`} className="bg-gray-100 dark:bg-zinc-800/80">
+                                                <tr className="bg-gray-100 dark:bg-zinc-800/80">
                                                     <td colSpan={11} className="px-3 py-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
                                                         <div className="flex justify-between items-center">
                                                             <span>{date}</span>
@@ -308,7 +308,7 @@ export default function PurchaseListContent({ isEmbedded = false }: PurchaseList
                                                         </tr>
                                                     )
                                                 })}
-                                            </>
+                                            </Fragment>
                                         ))
                                     )}
                                 </tbody>

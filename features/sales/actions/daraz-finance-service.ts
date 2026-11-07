@@ -7,6 +7,7 @@ import { revalidatePath } from 'next/cache'
 import { format } from 'date-fns'
 import { getStatementBreakdown, extractTaxInvoicesFromBreakdown } from '@/features/sales/utils/daraz-statement-calculator'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
+import { withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 // Helper to sign extraction requests
 function signRequest(apiName: string, params: Record<string, any>, appSecret: string) {
@@ -298,6 +299,7 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
             throw new Error('Failed to save transactions to database')
         }
 
+        invalidateMemoryCachePrefix('daraz_finance:')
         revalidatePath('/dashboard/account/daraz-account')
         return { count: uniqueRows.length, message: `Successfully synced ${uniqueRows.length} transactions` }
 
@@ -309,6 +311,13 @@ export async function syncDarazFinances(storeIdentifier: string, startDateStr: s
 
 // 3. Fetch Payout Status API (/finance/payout/status/get)
 export async function fetchDarazPayoutStatus(storeId?: string, createdAfter?: string) {
+    const cacheKey = `daraz_finance:payout_status:${storeId || 'All'}:${createdAfter || 'default'}`
+    return withMemoryCache(cacheKey, 120_000, async () => {
+        return fetchDarazPayoutStatusUncached(storeId, createdAfter)
+    })
+}
+
+async function fetchDarazPayoutStatusUncached(storeId?: string, createdAfter?: string) {
     const supabase = await createAdminClient()
 
     // Query online_stores table and filter out Product-Listing-Only stores
@@ -708,7 +717,8 @@ export async function fetchDarazStatementLineItems(
     storeId?: string,
     period?: string,
     itemRevenue?: number,
-    allowLiveApi: boolean = true
+    allowLiveApi: boolean = true,
+    prefetchedRows?: any[]
 ) {
     const supabase = await createAdminClient()
 
@@ -716,30 +726,34 @@ export async function fetchDarazStatementLineItems(
     let transactions: any[] = []
 
     let dbRows: any[] = []
-    let from = 0
-    const step = 1000
-    while (true) {
-        let chunkQuery = supabase
-            .from('daraz_finance_transactions')
-            // Select only the columns used downstream — avoids transferring unused fields on each 1000-row page
-            .select('id, statement, store_id, fee_name, fee_amount, order_no, transaction_date, transaction_type, created_at')
+    if (prefetchedRows !== undefined) {
+        dbRows = prefetchedRows
+    } else {
+        let from = 0
+        const step = 1000
+        while (true) {
+            let chunkQuery = supabase
+                .from('daraz_finance_transactions')
+                // Select only the columns used downstream — avoids transferring unused fields on each 1000-row page
+                .select('id, statement, store_id, fee_name, amount, order_no, transaction_date, transaction_type, created_at')
 
-        if (period && period.includes(' - ')) {
-            chunkQuery = chunkQuery.or(`statement.eq."${statementNumber}",statement.eq."${period}",statement.ilike."%${period}%"`)
-        } else {
-            chunkQuery = chunkQuery.eq('statement', statementNumber)
+            if (period && period.includes(' - ')) {
+                chunkQuery = chunkQuery.or(`statement.eq."${statementNumber}",statement.eq."${period}",statement.ilike."%${period}%"`)
+            } else {
+                chunkQuery = chunkQuery.eq('statement', statementNumber)
+            }
+
+            if (storeId && storeId !== 'All') {
+                const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storeId)
+                if (isUUID) chunkQuery = chunkQuery.eq('store_id', storeId)
+            }
+
+            const { data: chunk, error: chunkErr } = await chunkQuery.range(from, from + step - 1)
+            if (chunkErr || !chunk || chunk.length === 0) break
+            dbRows.push(...chunk)
+            if (chunk.length < step) break
+            from += step
         }
-
-        if (storeId && storeId !== 'All') {
-            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storeId)
-            if (isUUID) chunkQuery = chunkQuery.eq('store_id', storeId)
-        }
-
-        const { data: chunk, error: chunkErr } = await chunkQuery.range(from, from + step - 1)
-        if (chunkErr || !chunk || chunk.length === 0) break
-        dbRows.push(...chunk)
-        if (chunk.length < step) break
-        from += step
     }
 
     // Check if we have complete data (at least some revenue line items, not just fee deduction items)
@@ -1107,6 +1121,66 @@ export async function extractTaxInvoicesFromGrouped(grouped: Record<string, Arra
         })
 }
 
+async function getAllStatementTransactionsMap(): Promise<Map<string, any[]>> {
+    return withMemoryCache('daraz_finance:all_statement_txs_map', 120_000, async () => {
+        const supabase = await createAdminClient()
+        const allRows: any[] = []
+        let from = 0
+        const step = 1000
+        while (true) {
+            const { data, error } = await supabase
+                .from('daraz_finance_transactions')
+                .select('id, statement, store_id, fee_name, amount, order_no, transaction_date, transaction_type, created_at')
+                .not('statement', 'is', null)
+                .range(from, from + step - 1)
+            if (error || !data || data.length === 0) break
+            allRows.push(...data)
+            if (data.length < step) break
+            from += step
+        }
+
+        const map = new Map<string, any[]>()
+        for (const r of allRows) {
+            const key = String(r.statement || '').trim().toLowerCase()
+            if (!key) continue
+            if (!map.has(key)) map.set(key, [])
+            map.get(key)!.push(r)
+        }
+        return map
+    })
+}
+
+function matchStatementRowsFromMap(
+    stmtMap: Map<string, any[]>,
+    statementNumber: string,
+    storeId?: string,
+    period?: string
+): any[] {
+    const matched = new Map<string, any>()
+    const numKey = (statementNumber || '').trim().toLowerCase()
+    const perKey = (period || '').trim().toLowerCase()
+
+    const addFromList = (list?: any[]) => {
+        if (!list) return
+        const isUUID = storeId && storeId !== 'All' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storeId)
+        for (const r of list) {
+            if (isUUID && r.store_id !== storeId) continue
+            matched.set(r.id || `${r.statement}_${r.fee_name}_${r.amount}_${r.order_no}`, r)
+        }
+    }
+
+    if (numKey) addFromList(stmtMap.get(numKey))
+    if (perKey && perKey.includes(' - ')) {
+        addFromList(stmtMap.get(perKey))
+        for (const [k, list] of stmtMap.entries()) {
+            if (k !== numKey && k !== perKey && k.includes(perKey)) {
+                addFromList(list)
+            }
+        }
+    }
+    return Array.from(matched.values())
+}
+
 /**
  * Batch loads real tax invoices for multiple statements
  */
@@ -1117,44 +1191,50 @@ export async function fetchStatementTaxInvoicesBatch(statements: Array<{
     itemRevenue?: number
     storeName?: string
 }>) {
-    const resultMap: Record<string, Array<{
-        desc: string
-        net: number
-        taxableAmt: number
-        vatAmt: number
-        grandTotal: number
-    }>> = {}
+    if (!statements || statements.length === 0) return {}
+    const cacheKey = `daraz_finance:tax_batch:${statements.length}:${statements[0]?.statementNumber || ''}`
+    return withMemoryCache(cacheKey, 120_000, async () => {
+        const resultMap: Record<string, Array<{
+            desc: string
+            net: number
+            taxableAmt: number
+            vatAmt: number
+            grandTotal: number
+        }>> = {}
 
-    for (let idx = 0; idx < statements.length; idx++) {
-        const stmt = statements[idx]
-        if (!stmt.statementNumber && !stmt.period) continue
+        const stmtMap = await getAllStatementTransactionsMap()
 
-        try {
-            const allowLiveApi = idx < 2 // Only call live API for the top 2 statements, DB for all others
-            const res = await fetchDarazStatementLineItems(stmt.statementNumber, stmt.storeId, stmt.period, stmt.itemRevenue, allowLiveApi)
-            if (res.found && res.grouped) {
-                const taxItems = await extractTaxInvoicesFromGrouped(res.grouped)
-                if (taxItems.length > 0) {
-                    if (stmt.statementNumber) {
-                        resultMap[stmt.statementNumber.toLowerCase()] = taxItems
-                        if (stmt.storeName) {
-                            resultMap[`${stmt.statementNumber.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = taxItems
+        for (let idx = 0; idx < statements.length; idx++) {
+            const stmt = statements[idx]
+            if (!stmt.statementNumber && !stmt.period) continue
+
+            try {
+                const prefetched = matchStatementRowsFromMap(stmtMap, stmt.statementNumber, stmt.storeId, stmt.period)
+                const res = await fetchDarazStatementLineItems(stmt.statementNumber, stmt.storeId, stmt.period, stmt.itemRevenue, false, prefetched)
+                if (res.found && res.grouped) {
+                    const taxItems = await extractTaxInvoicesFromGrouped(res.grouped)
+                    if (taxItems.length > 0) {
+                        if (stmt.statementNumber) {
+                            resultMap[stmt.statementNumber.toLowerCase()] = taxItems
+                            if (stmt.storeName) {
+                                resultMap[`${stmt.statementNumber.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = taxItems
+                            }
                         }
-                    }
-                    if (stmt.period) {
-                        resultMap[stmt.period.toLowerCase()] = taxItems
-                        if (stmt.storeName) {
-                            resultMap[`${stmt.period.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = taxItems
+                        if (stmt.period) {
+                            resultMap[stmt.period.toLowerCase()] = taxItems
+                            if (stmt.storeName) {
+                                resultMap[`${stmt.period.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = taxItems
+                            }
                         }
                     }
                 }
+            } catch (e: any) {
+                console.warn(`[Batch Tax Invoices] Error loading statement ${stmt.statementNumber}:`, e.message)
             }
-        } catch (e: any) {
-            console.warn(`[Batch Tax Invoices] Error loading statement ${stmt.statementNumber}:`, e.message)
         }
-    }
 
-    return resultMap
+        return resultMap
+    })
 }
 
 /**
@@ -1167,139 +1247,145 @@ export async function getBatchStatementBreakdowns(statements: Array<{
     itemRevenue?: number
     storeName?: string
 }>) {
-    const resultMap: Record<string, {
-        ratio: number
-        baseClosing: number
-        salesAmt: number
-        commFeesAmt: number
-        tdsAmt: number
-        returnedAmt: number
-        netClosingCalc: number
-        prodPricePaidByBuyer: number
-        shipPaidByBuyer: number
-        coFundedVoucher: number
-        paymentFee: number
-        commissionFee: number
-        shippingFee: number
-        shippingFeeDiscount: number
-        freeShippingMaxFee: number
-        coinsFee: number
-        returnedProdPrice: number
-        voucherReversal: number
-        gstDebit: number
-        gstCredit: number
-        handlingFee: number
-        merchantCharge: number
-        returnHandlingFee: number
-        paymentFeeRefunded: number
-        commissionRefunded: number
-        freeShipRefunded: number
-        coinsFeeRefunded: number
-    }> = {}
+    if (!statements || statements.length === 0) return {}
+    const cacheKey = `daraz_finance:breakdown_batch:${statements.length}:${statements[0]?.statementNumber || ''}`
+    return withMemoryCache(cacheKey, 120_000, async () => {
+        const resultMap: Record<string, {
+            ratio: number
+            baseClosing: number
+            salesAmt: number
+            commFeesAmt: number
+            tdsAmt: number
+            returnedAmt: number
+            netClosingCalc: number
+            prodPricePaidByBuyer: number
+            shipPaidByBuyer: number
+            coFundedVoucher: number
+            paymentFee: number
+            commissionFee: number
+            shippingFee: number
+            shippingFeeDiscount: number
+            freeShippingMaxFee: number
+            coinsFee: number
+            returnedProdPrice: number
+            voucherReversal: number
+            gstDebit: number
+            gstCredit: number
+            handlingFee: number
+            merchantCharge: number
+            returnHandlingFee: number
+            paymentFeeRefunded: number
+            commissionRefunded: number
+            freeShipRefunded: number
+            coinsFeeRefunded: number
+        }> = {}
 
-    for (let idx = 0; idx < statements.length; idx++) {
-        const stmt = statements[idx]
-        if (!stmt.statementNumber && !stmt.period) continue
+        const stmtMap = await getAllStatementTransactionsMap()
 
-        try {
-            const allowLiveApi = idx < 2 // Only call live API for top 2 statements
-            const res = await fetchDarazStatementLineItems(stmt.statementNumber, stmt.storeId, stmt.period, stmt.itemRevenue, allowLiveApi)
-            if (res.found && res.grouped) {
-                const grouped: Record<string, Array<{ feeName: string; amount: number }>> = res.grouped
+        for (let idx = 0; idx < statements.length; idx++) {
+            const stmt = statements[idx]
+            if (!stmt.statementNumber && !stmt.period) continue
 
-                const findFee = (category: string, searchName: string) => {
-                    const items = grouped[category] || []
-                    const q = searchName.toLowerCase().trim()
-                    const exact = items.find(i => i.feeName.toLowerCase().trim() === q)
-                    if (exact) return exact.amount
-                    const partial = items.find(i => i.feeName.toLowerCase().trim().includes(q))
-                    return partial ? partial.amount : 0
-                }
+            try {
+                const prefetched = matchStatementRowsFromMap(stmtMap, stmt.statementNumber, stmt.storeId, stmt.period)
+                const res = await fetchDarazStatementLineItems(stmt.statementNumber, stmt.storeId, stmt.period, stmt.itemRevenue, false, prefetched)
+                if (res.found && res.grouped) {
+                    const grouped: Record<string, Array<{ feeName: string; amount: number }>> = res.grouped
 
-                const findAnyFee = (searchName: string) => {
-                    const q = searchName.toLowerCase().trim()
-                    for (const cat of Object.keys(grouped)) {
-                        for (const item of (grouped[cat] || [])) {
-                            if (item.feeName.toLowerCase().trim() === q) return item.amount
+                    const findFee = (category: string, searchName: string) => {
+                        const items = grouped[category] || []
+                        const q = searchName.toLowerCase().trim()
+                        const exact = items.find(i => i.feeName.toLowerCase().trim() === q)
+                        if (exact) return exact.amount
+                        const partial = items.find(i => i.feeName.toLowerCase().trim().includes(q))
+                        return partial ? partial.amount : 0
+                    }
+
+                    const findAnyFee = (searchName: string) => {
+                        const q = searchName.toLowerCase().trim()
+                        for (const cat of Object.keys(grouped)) {
+                            for (const item of (grouped[cat] || [])) {
+                                if (item.feeName.toLowerCase().trim() === q) return item.amount
+                            }
+                        }
+                        for (const cat of Object.keys(grouped)) {
+                            for (const item of (grouped[cat] || [])) {
+                                if (item.feeName.toLowerCase().trim().includes(q)) return item.amount
+                            }
+                        }
+                        return 0
+                    }
+
+                    const prodPrice = Math.abs(findFee('Delivered Orders', 'Product Price Paid by Buyer')) || (stmt.itemRevenue || 0)
+                    const shipPaid = Math.abs(findFee('Delivered Orders', 'Shipping Fee Paid by Buyer'))
+                    const salesAmt = Math.round((prodPrice + shipPaid) * 100) / 100
+
+                    // Tax invoices calculation for Commission Fees column
+                    const taxItems = await extractTaxInvoicesFromGrouped(grouped)
+                    const commFeesAmt = Math.round(taxItems.reduce((s, t) => s + t.grandTotal, 0) * 100) / 100
+
+                    // TDS Withholding
+                    const gstDeb = findFee('Withholding', 'General Sales Tax Withholding')
+                    const withItems = grouped['Withholding'] || []
+                    const tdsAmt = Math.round(withItems.reduce((s, i) => s + i.amount, 0) * 100) / 100
+
+                    // Returned Orders
+                    const retItems = grouped['Returned Orders'] || []
+                    const returnedAmt = Math.round(retItems.reduce((s, i) => s + i.amount, 0) * 100) / 100
+
+                    // Net Closing Receivable
+                    const netClosingCalc = res.summary?.closingBalance || 0
+
+                    const detail = {
+                        ratio: 1.0,
+                        baseClosing: netClosingCalc,
+                        salesAmt: salesAmt > 0 ? salesAmt : prodPrice,
+                        commFeesAmt,
+                        tdsAmt,
+                        returnedAmt,
+                        netClosingCalc,
+                        prodPricePaidByBuyer: prodPrice,
+                        shipPaidByBuyer: shipPaid,
+                        coFundedVoucher: findAnyFee('Co-funded Voucher Max'),
+                        paymentFee: findAnyFee('Payment Fee'),
+                        commissionFee: findAnyFee('Commission Fee'),
+                        shippingFee: findAnyFee('Shipping Fee'),
+                        shippingFeeDiscount: Math.abs(findAnyFee('Shipping Fee Discount')),
+                        freeShippingMaxFee: findAnyFee('Free Shipping Max Fee'),
+                        coinsFee: findAnyFee('Daraz Coins Discount Participation Fee'),
+                        returnedProdPrice: findAnyFee('Product Price Refunded to Buyer'),
+                        voucherReversal: Math.abs(findAnyFee('Co-funded Voucher Max Reversal')),
+                        gstDebit: gstDeb < 0 ? gstDeb : -gstDeb,
+                        gstCredit: Math.abs(findAnyFee('General Sales Tax Withholding')),
+                        handlingFee: findAnyFee('Handling Fee'),
+                        merchantCharge: findAnyFee('Merchant Managed Services Charge'),
+                        returnHandlingFee: findAnyFee('Handling Fee for Return'),
+                        paymentFeeRefunded: Math.abs(findAnyFee('Payment Fee Refunded')),
+                        commissionRefunded: Math.abs(findAnyFee('Commission Fee Refunded')),
+                        freeShipRefunded: Math.abs(findAnyFee('Reversal of Free Shipping Max Fee')),
+                        coinsFeeRefunded: Math.abs(findAnyFee('Reversal of DARAZ Coins Discount Participation Fee'))
+                    }
+
+                    if (stmt.statementNumber) {
+                        resultMap[stmt.statementNumber.toLowerCase()] = detail
+                        if (stmt.storeName) {
+                            resultMap[`${stmt.statementNumber.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = detail
                         }
                     }
-                    for (const cat of Object.keys(grouped)) {
-                        for (const item of (grouped[cat] || [])) {
-                            if (item.feeName.toLowerCase().trim().includes(q)) return item.amount
+                    if (stmt.period) {
+                        resultMap[stmt.period.toLowerCase()] = detail
+                        if (stmt.storeName) {
+                            resultMap[`${stmt.period.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = detail
                         }
                     }
-                    return 0
                 }
-
-                const prodPrice = Math.abs(findFee('Delivered Orders', 'Product Price Paid by Buyer')) || (stmt.itemRevenue || 0)
-                const shipPaid = Math.abs(findFee('Delivered Orders', 'Shipping Fee Paid by Buyer'))
-                const salesAmt = Math.round((prodPrice + shipPaid) * 100) / 100
-
-                // Tax invoices calculation for Commission Fees column
-                const taxItems = await extractTaxInvoicesFromGrouped(grouped)
-                const commFeesAmt = Math.round(taxItems.reduce((s, t) => s + t.grandTotal, 0) * 100) / 100
-
-                // TDS Withholding
-                const gstDeb = findFee('Withholding', 'General Sales Tax Withholding')
-                const withItems = grouped['Withholding'] || []
-                const tdsAmt = Math.round(withItems.reduce((s, i) => s + i.amount, 0) * 100) / 100
-
-                // Returned Orders
-                const retItems = grouped['Returned Orders'] || []
-                const returnedAmt = Math.round(retItems.reduce((s, i) => s + i.amount, 0) * 100) / 100
-
-                // Net Closing Receivable
-                const netClosingCalc = res.summary?.closingBalance || 0
-
-                const detail = {
-                    ratio: 1.0,
-                    baseClosing: netClosingCalc,
-                    salesAmt: salesAmt > 0 ? salesAmt : prodPrice,
-                    commFeesAmt,
-                    tdsAmt,
-                    returnedAmt,
-                    netClosingCalc,
-                    prodPricePaidByBuyer: prodPrice,
-                    shipPaidByBuyer: shipPaid,
-                    coFundedVoucher: findAnyFee('Co-funded Voucher Max'),
-                    paymentFee: findAnyFee('Payment Fee'),
-                    commissionFee: findAnyFee('Commission Fee'),
-                    shippingFee: findAnyFee('Shipping Fee'),
-                    shippingFeeDiscount: Math.abs(findAnyFee('Shipping Fee Discount')),
-                    freeShippingMaxFee: findAnyFee('Free Shipping Max Fee'),
-                    coinsFee: findAnyFee('Daraz Coins Discount Participation Fee'),
-                    returnedProdPrice: findAnyFee('Product Price Refunded to Buyer'),
-                    voucherReversal: Math.abs(findAnyFee('Co-funded Voucher Max Reversal')),
-                    gstDebit: gstDeb < 0 ? gstDeb : -gstDeb,
-                    gstCredit: Math.abs(findAnyFee('General Sales Tax Withholding')),
-                    handlingFee: findAnyFee('Handling Fee'),
-                    merchantCharge: findAnyFee('Merchant Managed Services Charge'),
-                    returnHandlingFee: findAnyFee('Handling Fee for Return'),
-                    paymentFeeRefunded: Math.abs(findAnyFee('Payment Fee Refunded')),
-                    commissionRefunded: Math.abs(findAnyFee('Commission Fee Refunded')),
-                    freeShipRefunded: Math.abs(findAnyFee('Reversal of Free Shipping Max Fee')),
-                    coinsFeeRefunded: Math.abs(findAnyFee('Reversal of DARAZ Coins Discount Participation Fee'))
-                }
-
-                if (stmt.statementNumber) {
-                    resultMap[stmt.statementNumber.toLowerCase()] = detail
-                    if (stmt.storeName) {
-                        resultMap[`${stmt.statementNumber.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = detail
-                    }
-                }
-                if (stmt.period) {
-                    resultMap[stmt.period.toLowerCase()] = detail
-                    if (stmt.storeName) {
-                        resultMap[`${stmt.period.toLowerCase()}_${stmt.storeName.toLowerCase()}`] = detail
-                    }
-                }
+            } catch (e: any) {
+                console.warn(`[Batch Statement Breakdowns] Error for ${stmt.statementNumber}:`, e.message)
             }
-        } catch (e: any) {
-            console.warn(`[Batch Statement Breakdowns] Error for ${stmt.statementNumber}:`, e.message)
         }
-    }
 
-    return resultMap
+        return resultMap
+    })
 }
 
 export async function getStoredFinanceApiTransactions(params: {
@@ -1309,63 +1395,65 @@ export async function getStoredFinanceApiTransactions(params: {
     storeId?: string
     transType?: string
 }) {
-    const page = params.page || 1
-    const limit = params.limit || 20
-    const offset = (page - 1) * limit
-    const supabase = await createAdminClient()
+    const cacheKey = `daraz_finance:stored_txs:${JSON.stringify(params || {})}`
+    return withMemoryCache(cacheKey, 60_000, async () => {
+        const page = params.page || 1
+        const limit = params.limit || 20
+        const offset = (page - 1) * limit
+        const supabase = await createAdminClient()
 
-    let query = supabase
-        .from('daraz_finance_transactions')
-        .select('*', { count: 'exact' })
+        let query = supabase
+            .from('daraz_finance_transactions')
+            .select('*', { count: 'exact' })
 
-    if (params.search) {
-        query = query.or(`order_no.ilike.%${params.search}%,transaction_number.ilike.%${params.search}%`)
-    }
+        if (params.search) {
+            query = query.or(`order_no.ilike.%${params.search}%,transaction_number.ilike.%${params.search}%`)
+        }
 
-    if (params.storeId && params.storeId !== 'All' && params.storeId !== 'Account Not Found') {
-        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.storeId)
-        if (isUUID) {
-            query = query.eq('store_id', params.storeId)
-        } else {
-            // Find store UUID from online_stores seller_account or daraz_api_tokens account
-            const { data: storeObj } = await supabase
-                .from('online_stores')
-                .select('id')
-                .ilike('seller_account', params.storeId)
-                .maybeSingle()
-
-            if (storeObj?.id) {
-                query = query.eq('store_id', storeObj.id)
+        if (params.storeId && params.storeId !== 'All' && params.storeId !== 'Account Not Found') {
+            const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.storeId)
+            if (isUUID) {
+                query = query.eq('store_id', params.storeId)
             } else {
-                const { data: tokenObj } = await supabase
-                    .from('daraz_api_tokens')
-                    .select('store_id')
-                    .ilike('account', params.storeId)
+                const { data: storeObj } = await supabase
+                    .from('online_stores')
+                    .select('id')
+                    .ilike('seller_account', params.storeId)
                     .maybeSingle()
 
-                if (tokenObj?.store_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tokenObj.store_id)) {
-                    query = query.eq('store_id', tokenObj.store_id)
+                if (storeObj?.id) {
+                    query = query.eq('store_id', storeObj.id)
+                } else {
+                    const { data: tokenObj } = await supabase
+                        .from('daraz_api_tokens')
+                        .select('store_id')
+                        .ilike('account', params.storeId)
+                        .maybeSingle()
+
+                    if (tokenObj?.store_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tokenObj.store_id)) {
+                        query = query.eq('store_id', tokenObj.store_id)
+                    }
                 }
             }
         }
-    }
 
-    if (params.transType && params.transType !== 'All') {
-        query = query.eq('transaction_type', params.transType)
-    }
+        if (params.transType && params.transType !== 'All') {
+            query = query.eq('transaction_type', params.transType)
+        }
 
-    query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1)
+        query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1)
 
-    const { data, count, error } = await query
+        const { data, count, error } = await query
 
-    if (error) {
-        console.error('Error fetching stored finance transactions:', error)
-        return { data: [], totalCount: 0, totalPages: 0 }
-    }
+        if (error) {
+            console.error('Error fetching stored finance transactions:', error)
+            return { data: [], totalCount: 0, totalPages: 0 }
+        }
 
-    return {
-        data: data || [],
-        totalCount: count || 0,
-        totalPages: Math.ceil((count || 0) / limit)
-    }
+        return {
+            data: data || [],
+            totalCount: count || 0,
+            totalPages: Math.ceil((count || 0) / limit)
+        }
+    })
 }

@@ -1,36 +1,11 @@
 'use server'
 
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
+import { createClient } from '@/lib/supabase/server'
 import { enrichStoresWithSyncModes, saveStoreSyncMode } from '@/lib/daraz/store-sync-config'
+import { withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 async function getSupabaseServer() {
-    const cookieStore = await cookies()
-    return createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-            cookies: {
-                get(name: string) {
-                    return cookieStore.get(name)?.value
-                },
-                set(name: string, value: string, options: any) {
-                    try {
-                        cookieStore.set(name, value, options)
-                    } catch (error) {
-                        // Cookie setting error
-                    }
-                },
-                remove(name: string, options: any) {
-                    try {
-                        cookieStore.set(name, '', options)
-                    } catch (error) {
-                        // Cookie removal error
-                    }
-                },
-            },
-        }
-    )
+    return createClient()
 }
 
 // ============================================
@@ -38,34 +13,38 @@ async function getSupabaseServer() {
 // ============================================
 
 export async function getFiscalYears() {
-    const supabase = await getSupabaseServer()
+    return withMemoryCache('fiscal_years:settings_list', 60_000, async () => {
+        const supabase = await getSupabaseServer()
 
-    const { data, error } = await supabase
-        .from('fiscal_years')
-        .select('*')
-        .order('start_date', { ascending: false })
+        const { data, error } = await supabase
+            .from('fiscal_years')
+            .select('*')
+            .order('start_date', { ascending: false })
 
-    if (error) {
-        return { error: error.message }
-    }
+        if (error) {
+            return { error: error.message }
+        }
 
-    return { data }
+        return { data }
+    })
 }
 
 export async function getActiveFiscalYear() {
-    const supabase = await getSupabaseServer()
+    return withMemoryCache('fiscal_years:settings_active', 60_000, async () => {
+        const supabase = await getSupabaseServer()
 
-    const { data, error } = await supabase
-        .from('fiscal_years')
-        .select('*')
-        .eq('is_active', true)
-        .single()
+        const { data, error } = await supabase
+            .from('fiscal_years')
+            .select('*')
+            .eq('is_active', true)
+            .single()
 
-    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows
-        return { error: error.message }
-    }
+        if (error && error.code !== 'PGRST116') { // PGRST116 = no rows
+            return { error: error.message }
+        }
 
-    return { data }
+        return { data }
+    })
 }
 
 export async function createFiscalYear(fiscalYear: {
@@ -137,28 +116,31 @@ export async function deleteFiscalYear(id: string) {
 // ============================================
 
 export async function getOnlineStores(options?: { onlyOrderSync?: boolean; onlyChatReview?: boolean; [key: string]: any }) {
-    const supabase = await getSupabaseServer()
+    const cacheKey = `online_stores:list:${JSON.stringify(options || {})}`
+    return withMemoryCache(cacheKey, 60_000, async () => {
+        const supabase = await getSupabaseServer()
 
-    const { data, error } = await supabase
-        .from('online_stores')
-        .select('*')
-        .order('created_at', { ascending: false })
+        const { data, error } = await supabase
+            .from('online_stores')
+            .select('*')
+            .order('created_at', { ascending: false })
 
-    if (error) {
-        return { error: error.message }
-    }
+        if (error) {
+            return { error: error.message }
+        }
 
-    let enriched = await enrichStoresWithSyncModes(data || [])
+        let enriched = await enrichStoresWithSyncModes(data || [])
 
-    if (options?.onlyOrderSync) {
-        enriched = enriched.filter(s => s.order_sync_enabled !== false)
-    }
+        if (options?.onlyOrderSync) {
+            enriched = enriched.filter(s => s.order_sync_enabled !== false)
+        }
 
-    if (options?.onlyChatReview) {
-        enriched = enriched.filter(s => s.chat_review_enabled !== false)
-    }
+        if (options?.onlyChatReview) {
+            enriched = enriched.filter(s => s.chat_review_enabled !== false)
+        }
 
-    return { data: enriched }
+        return { data: enriched }
+    })
 }
 
 export async function createOnlineStore(store: {

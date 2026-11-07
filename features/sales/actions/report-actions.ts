@@ -8,6 +8,7 @@ import { format } from 'date-fns'
 import { calculateDarazFeeBreakdown } from '@/features/sales/utils/daraz-fee-calculator'
 import { getDarazOtherFees } from './daraz-commission-actions'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface OrderReportItem {
     order_primary_id: string
@@ -445,6 +446,13 @@ export async function getSellerAccounts(): Promise<string[]> {
 }
 
 export async function getProfitTrackerData(params: GetOrderReportParams) {
+    const cacheKey = `profit_tracker:list:${JSON.stringify(params || {})}`
+    return withMemoryCache(cacheKey, 60_000, async () => {
+        return getProfitTrackerDataUncached(params)
+    })
+}
+
+async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
     const { page = 1, limit = 50, search, startDate, endDate, syncStatus = 'all', sellerAccount } = params
 
     try {

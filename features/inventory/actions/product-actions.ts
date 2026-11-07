@@ -3,6 +3,7 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -228,58 +229,39 @@ export async function searchProducts(search: string) {
  * Implements caching to avoid repeated API calls.
  */
 export async function getAllProductOptions() {
-    // Check for cached data first
-    if (typeof window !== 'undefined') {
-        const cachedData = sessionStorage.getItem('allProductsCache');
-        if (cachedData) {
-            const { data, timestamp } = JSON.parse(cachedData);
-            // Cache for 5 minutes (300,000 ms)
-            if (Date.now() - timestamp < 300000) {
-                return data;
+    return withMemoryCache('products:all_options', 60_000, async () => {
+        const supabase = await createClient()
+
+        let allProducts: any[] = []
+        let page = 0
+        const pageSize = 1000
+
+        while (true) {
+            const from = page * pageSize
+            const to = from + pageSize - 1
+
+            const { data, error } = await supabase
+                .from('products')
+                .select('id, product_name, seller_sku1, seller_sku2, product_type')
+                .eq('is_deleted', false) // Only show non-deleted products
+                .order('product_name', { ascending: true })
+                .range(from, to)
+
+            if (error) {
+                console.error('Get all products error:', error)
+                throw new Error(error.message)
             }
-        }
-    }
 
-    const supabase = await createClient()
+            if (!data || data.length === 0) break
 
-    let allProducts: any[] = []
-    let page = 0
-    const pageSize = 1000
+            allProducts = allProducts.concat(data)
 
-    while (true) {
-        const from = page * pageSize
-        const to = from + pageSize - 1
-
-        const { data, error } = await supabase
-            .from('products')
-            .select('id, product_name, seller_sku1, seller_sku2, product_type')
-            .eq('is_deleted', false) // Only show non-deleted products
-            // .eq('status', 'Active') // Removed to show Inactive products too
-            .order('product_name', { ascending: true })
-            .range(from, to)
-
-        if (error) {
-            console.error('Get all products error:', error)
-            throw new Error(error.message)
+            if (data.length < pageSize) break
+            page++
         }
 
-        if (!data || data.length === 0) break
-
-        allProducts = allProducts.concat(data)
-
-        if (data.length < pageSize) break
-        page++
-    }
-
-    // Cache the data in sessionStorage
-    if (typeof window !== 'undefined') {
-        sessionStorage.setItem('allProductsCache', JSON.stringify({
-            data: allProducts,
-            timestamp: Date.now()
-        }));
-    }
-
-    return allProducts
+        return allProducts
+    })
 }
 
 /**
@@ -287,38 +269,40 @@ export async function getAllProductOptions() {
  * Optimized for client-side search/filtering
  */
 export async function getAllPosProducts() {
-    const supabase = await createClient()
+    return withMemoryCache('products:all_pos', 60_000, async () => {
+        const supabase = await createClient()
 
-    let allProducts: any[] = []
-    let page = 0
-    const pageSize = 1000
+        let allProducts: any[] = []
+        let page = 0
+        const pageSize = 1000
 
-    while (true) {
-        const from = page * pageSize
-        const to = from + pageSize - 1
+        while (true) {
+            const from = page * pageSize
+            const to = from + pageSize - 1
 
-        const { data, error } = await supabase
-            .from('products')
-            .select('id, product_name, product_id, seller_sku1, image_url, est_price, product_type')
-            .eq('is_deleted', false)
-            .eq('status', 'Active')
-            .order('product_name', { ascending: true })
-            .range(from, to)
+            const { data, error } = await supabase
+                .from('products')
+                .select('id, product_name, product_id, seller_sku1, image_url, est_price, product_type')
+                .eq('is_deleted', false)
+                .eq('status', 'Active')
+                .order('product_name', { ascending: true })
+                .range(from, to)
 
-        if (error) {
-            console.error('Get POS products error:', error)
-            throw new Error(error.message)
+            if (error) {
+                console.error('Get POS products error:', error)
+                throw new Error(error.message)
+            }
+
+            if (!data || data.length === 0) break
+
+            allProducts = allProducts.concat(data)
+
+            if (data.length < pageSize) break
+            page++
         }
 
-        if (!data || data.length === 0) break
-
-        allProducts = allProducts.concat(data)
-
-        if (data.length < pageSize) break
-        page++
-    }
-
-    return allProducts
+        return allProducts
+    })
 }
 
 /**

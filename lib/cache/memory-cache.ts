@@ -13,6 +13,7 @@ const MAX_ENTRIES = 500
 
 const globalForCache = globalThis as unknown as {
     __bagmatiMemoryCache?: Map<string, CacheEntry>
+    __bagmatiInFlight?: Map<string, Promise<any>>
 }
 
 function getStore(): Map<string, CacheEntry> {
@@ -20,6 +21,13 @@ function getStore(): Map<string, CacheEntry> {
         globalForCache.__bagmatiMemoryCache = new Map<string, CacheEntry>()
     }
     return globalForCache.__bagmatiMemoryCache
+}
+
+function getInFlight(): Map<string, Promise<any>> {
+    if (!globalForCache.__bagmatiInFlight) {
+        globalForCache.__bagmatiInFlight = new Map<string, Promise<any>>()
+    }
+    return globalForCache.__bagmatiInFlight
 }
 
 export function getMemoryCache<T>(key: string): T | null {
@@ -56,5 +64,37 @@ export function invalidateMemoryCachePrefix(prefix: string): void {
 
 export function clearAllMemoryCache(): void {
     getStore().clear()
+}
+
+export async function withMemoryCache<T>(
+    key: string,
+    ttlMsOrSec: number,
+    fetcher: () => Promise<T>
+): Promise<T> {
+    const cached = getMemoryCache<T>(key)
+    if (cached !== null) {
+        return cached
+    }
+
+    const inFlight = getInFlight()
+    const existing = inFlight.get(key)
+    if (existing) {
+        return existing as Promise<T>
+    }
+
+    const ttlSeconds = ttlMsOrSec >= 1000 ? ttlMsOrSec / 1000 : ttlMsOrSec
+    const promise = fetcher()
+        .then(res => {
+            setMemoryCache(key, res, ttlSeconds)
+            inFlight.delete(key)
+            return res
+        })
+        .catch(err => {
+            inFlight.delete(key)
+            throw err
+        })
+
+    inFlight.set(key, promise)
+    return promise
 }
 

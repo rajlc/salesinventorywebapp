@@ -12,10 +12,15 @@ import {
 export function useFiscalYears() {
     return useQuery({
         queryKey: ['fiscal-years'],
-        queryFn: async () => {
+        queryFn: async (): Promise<any[]> => {
             const result = await getFiscalYears()
             if (result.error) throw new Error(result.error)
             return result.data || []
+        },
+        select: (val: any): any[] => {
+            if (Array.isArray(val)) return val
+            if (val && Array.isArray(val.data)) return val.data
+            return []
         },
         staleTime: 1000 * 60 * 10,
     })
@@ -28,6 +33,10 @@ export function useActiveFiscalYear() {
             const result = await getActiveFiscalYear()
             if (result.error) throw new Error(result.error)
             return result.data || null
+        },
+        select: (val: any) => {
+            if (val && typeof val === 'object' && 'data' in val) return val.data || null
+            return val || null
         },
         staleTime: 1000 * 60 * 10,
     })

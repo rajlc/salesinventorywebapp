@@ -53,6 +53,15 @@ const cachedPurchasesMap = new Map<string, { price: number, time: number }>()
 const cachedViewPurchasesMap = new Map<string, { price: number, time: number }>()
 const PURCHASES_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
+// In-memory cache for full active products catalog & price reports view
+let cachedCatalogIdMap: Map<string, any> | null = null
+let cachedCatalogSkuMap: Map<string, any> | null = null
+let cachedCatalogTime = 0
+const CATALOG_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
+let cachedFullPriceViewMap: Map<string, number> | null = null
+let cachedFullPriceViewTime = 0
+
 /**
  * Fetch and cache full category commissions map with pagination (all 5,200+ categories)
  */
@@ -142,6 +151,11 @@ export function clearOrderProfitCalculatorCache() {
     cachedCombosMap = null
     cachedWholesaleMap = null
     cachedCombosAndWholesaleTime = 0
+    cachedCatalogIdMap = null
+    cachedCatalogSkuMap = null
+    cachedCatalogTime = 0
+    cachedFullPriceViewMap = null
+    cachedFullPriceViewTime = 0
     cachedPurchasesMap.clear()
     cachedViewPurchasesMap.clear()
 }
@@ -229,77 +243,54 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
         getCachedOtherFees()
     ])
 
-    // 3. Fetch matching products from inventory
-    // We search products where any of seller_sku 1-4 matches OR id in product IDs
-    let matchedProducts: any[] = []
-    if (skuList.length > 0 || productIdList.length > 0) {
-        // Query products by ID (chunked by 50 to prevent URL length overflow)
-        const idChunks: string[][] = []
-        const CHUNK_SIZE = 50
-        for (let i = 0; i < productIdList.length; i += CHUNK_SIZE) {
-            idChunks.push(productIdList.slice(i, i + CHUNK_SIZE))
-        }
+    // 3. Fetch matching products from inventory (using 5-minute full-catalog in-memory cache)
+    const nowTime = Date.now()
+    let skuToProductMap: Map<string, any>
+    let idToProductMap: Map<string, any>
 
-        const idPromises = idChunks.map(chunk =>
-            supabase
-                .from('products')
-                .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
-                .in('id', chunk)
-                .eq('is_deleted', false)
-        )
+    if (
+        cachedCatalogIdMap &&
+        cachedCatalogSkuMap &&
+        (nowTime - cachedCatalogTime) < CATALOG_CACHE_TTL
+    ) {
+        idToProductMap = cachedCatalogIdMap
+        skuToProductMap = cachedCatalogSkuMap
+    } else {
+        const { data: allProducts } = await supabase
+            .from('products')
+            .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
+            .eq('is_deleted', false)
+            .limit(10000)
 
-        // Query products by SKU matching (batch size 15 for safe URL lengths)
-        const skuPromises: Promise<any>[] = []
-        const BATCH = 15
-        for (let i = 0; i < skuList.length; i += BATCH) {
-            const batch = skuList.slice(i, i + BATCH)
-            const orConditions = batch
-                .map(s => {
-                    const clean = s.replace(/["\\]/g, '')
-                    return `seller_sku1.eq."${clean}",seller_sku2.eq."${clean}",seller_sku3.eq."${clean}",seller_sku4.eq."${clean}"`
-                })
-                .join(',')
+        skuToProductMap = new Map<string, any>()
+        idToProductMap = new Map<string, any>()
 
-            skuPromises.push(
-                Promise.resolve(
-                    supabase
-                        .from('products')
-                        .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
-                        .or(orConditions)
-                        .eq('is_deleted', false)
-                )
-            )
-        }
+        ;(allProducts || []).forEach((p: any) => {
+            idToProductMap.set(p.id, p)
+            ;[p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                if (sku) {
+                    skuToProductMap.set(String(sku).trim().toLowerCase(), p)
+                }
+            })
+        })
 
-        const allResults = await Promise.all([...idPromises, ...skuPromises])
-        const productMapById = new Map<string, any>()
-
-        for (const res of allResults) {
-            if (res.data) {
-                res.data.forEach((p: any) => productMapById.set(p.id, p))
-            }
-        }
-        matchedProducts = Array.from(productMapById.values())
+        cachedCatalogIdMap = idToProductMap
+        cachedCatalogSkuMap = skuToProductMap
+        cachedCatalogTime = nowTime
     }
 
-    // Build fast lookup maps
-    const skuToProductMap = new Map<string, any>()
-    const idToProductMap = new Map<string, any>()
-
-    matchedProducts.forEach(p => {
-        idToProductMap.set(p.id, p);
-        [p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
-            if (sku) {
-                skuToProductMap.set(String(sku).trim().toLowerCase(), p)
-            }
-        })
+    const matchedIdsSet = new Set<string>()
+    productIdList.forEach(pid => {
+        if (idToProductMap.has(pid)) matchedIdsSet.add(pid)
     })
+    skuList.forEach(sku => {
+        const prod = skuToProductMap.get(sku)
+        if (prod) matchedIdsSet.add(prod.id)
+    })
+    const allMatchedIds = Array.from(matchedIdsSet)
 
     // 4. Fetch purchasing prices, combos, and variations
-    const allMatchedIds = matchedProducts.map(p => p.id)
-
     // A. Fetch combos and wholesale prices (using in-memory cache)
-    const nowTime = Date.now()
     let comboComponentsMap: Map<string, Array<{ child_product_id: string, quantity: number }>>
     let bestWholesaleMap: Map<string, number>
 
@@ -363,58 +354,60 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
 
     const queryIdList = Array.from(allPriceQueryIds)
     const latestPurchasesMap = new Map<string, number>()
-    const viewPurchasesMap = new Map<string, number>()
+    let viewPurchasesMap: Map<string, number>
 
-    // Check which IDs need fetching vs already cached
+    if (cachedFullPriceViewMap && (nowTime - cachedFullPriceViewTime) < PURCHASES_CACHE_TTL) {
+        viewPurchasesMap = cachedFullPriceViewMap
+    } else {
+        const { data: viewRows } = await supabase
+            .from('inventory_price_reports_view')
+            .select('product_id, last_price, est_price')
+            .limit(10000)
+
+        viewPurchasesMap = new Map<string, number>()
+        ;(viewRows || []).forEach((vp: any) => {
+            const price = Number(vp.last_price || vp.est_price || 0)
+            if (price > 0) {
+                viewPurchasesMap.set(vp.product_id, price)
+            }
+        })
+        cachedFullPriceViewMap = viewPurchasesMap
+        cachedFullPriceViewTime = nowTime
+    }
+
+    // Check which IDs still need fallback purchase lookup
     const missingIds: string[] = []
     queryIdList.forEach(id => {
+        if (viewPurchasesMap.has(id)) return
         const cachedPu = cachedPurchasesMap.get(id)
-        const cachedVp = cachedViewPurchasesMap.get(id)
-
         if (cachedPu && (nowTime - cachedPu.time < PURCHASES_CACHE_TTL)) {
-            latestPurchasesMap.set(id, cachedPu.price)
-        }
-        if (cachedVp && (nowTime - cachedVp.time < PURCHASES_CACHE_TTL)) {
-            viewPurchasesMap.set(id, cachedVp.price)
-        }
-        if (!cachedPu || !cachedVp || (nowTime - (cachedPu?.time || 0) >= PURCHASES_CACHE_TTL)) {
+            if (cachedPu.price > 0) {
+                latestPurchasesMap.set(id, cachedPu.price)
+            }
+        } else {
             missingIds.push(id)
         }
     })
 
     if (missingIds.length > 0) {
-        const CHUNK_SIZE = 50
+        const CHUNK_SIZE = 100
         const idChunks: string[][] = []
         for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
             idChunks.push(missingIds.slice(i, i + CHUNK_SIZE))
         }
 
-        const chunkPromises = idChunks.map(chunk =>
-            Promise.all([
-                supabase
-                    .from('inventory_price_reports_view')
-                    .select('product_id, last_price, est_price')
-                    .in('product_id', chunk),
+        const chunkResults = await Promise.all(
+            idChunks.map(chunk =>
                 supabase
                     .from('purchases')
                     .select('product_id, unit_amount, purchase_date')
                     .in('product_id', chunk)
                     .gt('unit_amount', 0)
                     .order('purchase_date', { ascending: false })
-            ])
+            )
         )
 
-        const chunkResults = await Promise.all(chunkPromises)
-
-        for (const [viewRes, purchasesRes] of chunkResults) {
-            viewRes.data?.forEach((vp: any) => {
-                const price = Number(vp.last_price || vp.est_price || 0)
-                if (price > 0) {
-                    viewPurchasesMap.set(vp.product_id, price)
-                    cachedViewPurchasesMap.set(vp.product_id, { price, time: nowTime })
-                }
-            })
-
+        for (const purchasesRes of chunkResults) {
             purchasesRes.data?.forEach((pu: any) => {
                 if (!latestPurchasesMap.has(pu.product_id)) {
                     const price = Number(pu.unit_amount)
@@ -423,6 +416,13 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
                 }
             })
         }
+
+        // Also cache negative/zero results so missingIds doesn't re-query on every request
+        missingIds.forEach(id => {
+            if (!cachedPurchasesMap.has(id)) {
+                cachedPurchasesMap.set(id, { price: 0, time: nowTime })
+            }
+        })
     }
 
     // Helper to resolve single item base price from view -> purchases -> wholesale -> product est_price
@@ -462,9 +462,18 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
         return getSingleItemBasePrice(productId, product)
     }
 
+    // Pre-group order items by order_id in O(M) instead of O(N*M)
+    const itemsByOrderId = new Map<string, any[]>()
+    for (const item of allItems) {
+        if (!itemsByOrderId.has(item.order_id)) {
+            itemsByOrderId.set(item.order_id, [])
+        }
+        itemsByOrderId.get(item.order_id)!.push(item)
+    }
+
     // 5. Calculate profit info for each order
     const enrichedOrders = orders.map(order => {
-        const orderItems = allItems.filter(i => i.order_id === order.id)
+        const orderItems = itemsByOrderId.get(order.id) || []
 
         if (orderItems.length === 0) {
             const profitInfo: OrderProfitInfo = {

@@ -4,7 +4,7 @@ import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { calculateOrderProfitsForOrders, clearOrderProfitCalculatorCache } from '@/features/sales/utils/daraz-order-profit'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
-import { getMemoryCache, setMemoryCache } from '@/lib/cache/memory-cache'
+import { getMemoryCache, setMemoryCache, withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 async function getDisabledOrderSyncStores(supabase: any) {
     const cacheKey = 'disabled_order_sync_stores_list'
@@ -153,6 +153,7 @@ export async function createDarazOrder(data: CreateDarazOrderData) {
             console.error('[FinalStock] Decrement FAILED on createDarazOrder:', fsErr.message)
         }
 
+        invalidateMemoryCachePrefix('daraz_orders:')
         revalidatePath('/dashboard/sales/daraz')
         return { success: true, order }
     } catch (error: any) {
@@ -163,136 +164,139 @@ export async function createDarazOrder(data: CreateDarazOrderData) {
 
 // Get Daraz orders with filters (for Sales Entry page)
 export async function getDarazOrders(params: GetDarazOrdersParams) {
-    const supabase = await createClient()
-    const { page = 1, limit = 50, status, todayOnly = false, fiscalYearId, sellerAccount, unprintedOnly } = params
+    const cacheKey = `daraz_orders:entry:${JSON.stringify(params || {})}`
+    return withMemoryCache(cacheKey, 30_000, async () => {
+        const supabase = await createClient()
+        const { page = 1, limit = 50, status, todayOnly = false, fiscalYearId, sellerAccount, unprintedOnly } = params
 
-    // Strategy: Use the VIEW which already has totals and user joins
-    let query = supabase
-        .from('daraz_orders_with_totals')
-        .select('*', { count: 'exact' })
-        .or('deleted.is.null,deleted.eq.false')
+        // Strategy: Use the VIEW which already has totals and user joins
+        let query = supabase
+            .from('daraz_orders_with_totals')
+            .select('*', { count: 'exact' })
+            .or('deleted.is.null,deleted.eq.false')
 
-    const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
-    if (disabledAccounts.length > 0) {
-        for (const acc of disabledAccounts) {
-            query = query.neq('seller_account', acc)
-        }
-    }
-
-    // Seller Account Filter
-    // Note: 'seller_account' column is now added to the 'daraz_orders_with_totals' view via migration.
-    if (sellerAccount && sellerAccount !== 'all') {
-        query = query.eq('seller_account', sellerAccount)
-    }
-
-    // Fiscal Year Filter
-    if (fiscalYearId) {
-        const { data: fy } = await supabase.from('fiscal_years').select('start_date, end_date').eq('id', fiscalYearId).single()
-        if (fy) query = query.gte('order_date', fy.start_date).lte('order_date', fy.end_date)
-    }
-
-    // Date/Status Logic
-    if (todayOnly) {
-        // Today Only logic: Pending OR Order Date is Today OR Shipped Today (via updated_at)
-        const today = new Date().toISOString().split('T')[0]
-        const todayStart = `${today}T00:00:00.000Z` // UTC start
-
-        // Note: We use shipped_at for "Shipped" status to avoid re-appearing on random updates (like printing).
-        // Logic: Show ALL Pending, Packed, Ready to Ship + Orders from Today (Created) + Shipped Today (by shipped_at)
-        query = query.or(`order_status.eq.Pending,order_status.eq.Packed,order_status.eq."Ready to Ship",order_date.eq.${today},and(order_status.eq.Shipped,shipped_at.gte.${todayStart})`)
-    }
-
-    if (status && status !== 'all') query = query.eq('order_status', status)
-
-    // Unprinted Filter
-    if (unprintedOnly) {
-        query = query.or('is_printed.is.null,is_printed.eq.false')
-    }
-
-    const from = (page - 1) * limit
-    const to = from + limit - 1
-
-    const { data, error, count } = await query
-        .order('daraz_created_at', { ascending: false, nullsFirst: false }) // Primary: Real Daraz Time
-        .order('created_at', { ascending: false }) // Fallback: DB Insert Time
-        .range(from, to)
-
-    if (error) throw error
-
-    // Transform and Aggegrate
-    // Fetch items for these orders to get statuses (chunked by 50 to prevent URL length overflow)
-    const orderIds = data?.map((o: any) => o.id) || []
-    let allItems: any[] = []
-    if (orderIds.length > 0) {
-        const CHUNK_SIZE = 50
-        const chunks: string[][] = []
-        for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
-            chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
-        }
-
-        const chunkResults = await Promise.all(
-            chunks.map(chunk =>
-                supabase
-                    .from('daraz_order_items')
-                    .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
-                    .in('order_id', chunk)
-            )
-        )
-
-        chunkResults.forEach(res => {
-            if (res.data) allItems.push(...res.data)
-        })
-    }
-
-    const rawOrders = data?.map((order: any) => {
-        let orderItems = allItems.filter((i: any) => i.order_id === order.id)
-
-        // Fallback: If no rows in daraz_order_items table yet, normalize order.items_detail from Daraz sync
-        if (orderItems.length === 0 && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
-            orderItems = order.items_detail.map((i: any) => ({
-                id: String(i.order_item_id || i.id || ''),
-                order_id: order.id,
-                item_status: i.status || order.order_status,
-                quantity: Number(i.quantity) || 1,
-                product_id: null,
-                product_name: i.name,
-                seller_sku: i.sku || i.shop_sku,
-                amount: Number(i.paid_price || i.item_price || 0),
-                total_amount: Number(i.paid_price || i.item_price || 0)
-            }))
-            allItems.push(...orderItems)
-        }
-
-        // Calculate item statuses - use item_status if set, otherwise fallback to main order status
-        // Expand based on item quantity to show one status badge per unit
-        const itemStatuses: string[] = []
-        orderItems.forEach((i: any) => {
-            const status = i.item_status || order.order_status
-            const qty = i.quantity || 1
-            for (let k = 0; k < qty; k++) {
-                itemStatuses.push(status)
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        if (disabledAccounts.length > 0) {
+            for (const acc of disabledAccounts) {
+                query = query.neq('seller_account', acc)
             }
-        })
+        }
+
+        // Seller Account Filter
+        if (sellerAccount && sellerAccount !== 'all') {
+            query = query.eq('seller_account', sellerAccount)
+        }
+
+        // Fiscal Year Filter
+        if (fiscalYearId) {
+            const { data: fy } = await supabase.from('fiscal_years').select('start_date, end_date').eq('id', fiscalYearId).single()
+            if (fy) query = query.gte('order_date', fy.start_date).lte('order_date', fy.end_date)
+        }
+
+        // Date/Status Logic
+        if (todayOnly) {
+            const today = new Date().toISOString().split('T')[0]
+            const todayStart = `${today}T00:00:00.000Z`
+            query = query.or(`order_status.eq.Pending,order_status.eq.Packed,order_status.eq."Ready to Ship",order_date.eq.${today},and(order_status.eq.Shipped,shipped_at.gte.${todayStart})`)
+        }
+
+        if (status && status !== 'all') query = query.eq('order_status', status)
+
+        // Unprinted Filter
+        if (unprintedOnly) {
+            query = query.or('is_printed.is.null,is_printed.eq.false')
+        }
+
+        const from = (page - 1) * limit
+        const to = from + limit - 1
+
+        const { data, error, count } = await query
+            .order('daraz_created_at', { ascending: false, nullsFirst: false })
+            .order('created_at', { ascending: false })
+            .range(from, to)
+
+        if (error) throw error
+
+        // Transform and Aggregate
+        const orderIds = data?.map((o: any) => o.id) || []
+        const allItems: any[] = []
+        if (orderIds.length > 0) {
+            const CHUNK_SIZE = 150
+            const chunks: string[][] = []
+            for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
+                chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
+            }
+
+            const chunkResults = await Promise.all(
+                chunks.map(chunk =>
+                    supabase
+                        .from('daraz_order_items')
+                        .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
+                        .in('order_id', chunk)
+                )
+            )
+
+            chunkResults.forEach(res => {
+                if (res.data) allItems.push(...res.data)
+            })
+        }
+
+        const itemsByOrderId = new Map<string, any[]>()
+        for (const item of allItems) {
+            if (!itemsByOrderId.has(item.order_id)) {
+                itemsByOrderId.set(item.order_id, [])
+            }
+            itemsByOrderId.get(item.order_id)!.push(item)
+        }
+
+        const rawOrders = data?.map((order: any) => {
+            let orderItems = itemsByOrderId.get(order.id) || []
+
+            // Fallback: If no rows in daraz_order_items table yet, normalize order.items_detail from Daraz sync
+            if (orderItems.length === 0 && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
+                orderItems = order.items_detail.map((i: any) => ({
+                    id: String(i.order_item_id || i.id || ''),
+                    order_id: order.id,
+                    item_status: i.status || order.order_status,
+                    quantity: Number(i.quantity) || 1,
+                    product_id: null,
+                    product_name: i.name,
+                    seller_sku: i.sku || i.shop_sku,
+                    amount: Number(i.paid_price || i.item_price || 0),
+                    total_amount: Number(i.paid_price || i.item_price || 0)
+                }))
+                allItems.push(...orderItems)
+            }
+
+            const itemStatuses: string[] = []
+            orderItems.forEach((i: any) => {
+                const st = i.item_status || order.order_status
+                const qty = i.quantity || 1
+                for (let k = 0; k < qty; k++) {
+                    itemStatuses.push(st)
+                }
+            })
+
+            return {
+                ...order,
+                items: orderItems,
+                item_statuses: itemStatuses
+            }
+        }) || []
+
+        // Calculate exact dynamic profit, receivable or invalid status based on Daraz fees and purchasing prices
+        const orders = await calculateOrderProfitsForOrders(rawOrders, allItems)
 
         return {
-            ...order,
-            items: orderItems,
-            item_statuses: itemStatuses
+            orders,
+            pagination: {
+                page,
+                limit,
+                total: count || 0,
+                totalPages: Math.ceil((count || 0) / limit)
+            }
         }
-    }) || []
-
-    // Calculate exact dynamic profit, receivable or invalid status based on Daraz fees and purchasing prices
-    const orders = await calculateOrderProfitsForOrders(rawOrders, allItems)
-
-    return {
-        orders,
-        pagination: {
-            page,
-            limit,
-            total: count || 0,
-            totalPages: Math.ceil((count || 0) / limit)
-        }
-    }
+    })
 }
 
 // Get all Daraz orders (for Order List page)
@@ -308,179 +312,153 @@ export async function getAllDarazOrders(params: {
     sellerAccount?: string // New: filter by seller account
     ignoreStatusFilter?: boolean // New: for Status Sync to show ALL orders
 }) {
-    const supabase = await createClient()
-    const { page = 1, limit = 50, search, status, fromDate, toDate, fiscalYearId, timestampField = 'order_date', sellerAccount, ignoreStatusFilter } = params
+    const cacheKey = `daraz_orders:list:${JSON.stringify(params || {})}`
+    return withMemoryCache(cacheKey, 30_000, async () => {
+        const supabase = await createClient()
+        const { page = 1, limit = 50, search, status, fromDate, toDate, fiscalYearId, timestampField = 'order_date', sellerAccount, ignoreStatusFilter } = params
 
+        let query = supabase
+            .from('daraz_orders_with_totals')
+            .select('*', { count: 'exact' })
+            .or('deleted.is.null,deleted.eq.false')
 
-
-    let query = supabase
-        .from('daraz_orders_with_totals')
-        .select('*', { count: 'exact' })
-        .or('deleted.is.null,deleted.eq.false') // Show only non-deleted orders
-
-    const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
-    if (disabledAccounts.length > 0) {
-        for (const acc of disabledAccounts) {
-            query = query.neq('seller_account', acc)
-        }
-    }
-
-    // Filter Logic: Hide "Cancel" and "Unpaid" orders from the order list
-    // UNLESS ignoreStatusFilter is true (for Status Sync page)
-    if (!ignoreStatusFilter) {
-        if (!status || status === 'all') {
-            query = query
-                .not('order_status', 'ilike', '%cancel%')
-                .not('order_status', 'ilike', '%unpaid%')
-        }
-    }
-
-    if (status && status !== 'all') {
-        // Match either the main status OR if the statuses array (if exists) contains the status
-        // Using raw PostgREST syntax string for mixed logic
-        query = query.or(`order_status.eq."${status}",statuses.cs.{${status}}`)
-    }
-
-    if (sellerAccount && sellerAccount !== 'all') {
-        query = query.eq('seller_account', sellerAccount)
-    }
-
-    // Search Logic
-    if (search && search.trim()) {
-        const term = search.trim()
-        // Complex Search: Order details OR Related Items Product Name
-        // We use !inner join to filter parents by child matches for product name
-        // OR standard column matches for order/tracking/customer
-        // Note: OR logic across tables is tricky in PostgREST (order.id=... OR items.name=...).
-        // Simplest valid approach:
-        // Use an RPC or a dedicated text search index/function would be best, but here we can try:
-        // Filter where (Order Number ILIKE term) OR (Tracking Number ILIKE term) OR (Customer ILIKE term) ...
-        // For Product Name, we need to inspect the items.
-        // PostgREST doesn't easily support "Parent Column OR Child Column".
-        // Strategy: We will search main columns. If the user wants product, we might need a separate check or RPC.
-        // HOWEVER, let's try to map the view's potential fields or just stick to the main ones first, 
-        // OR try the text search approach if implemented.
-        // Given Supabase limitations on mixed ORs, we'll try a comprehensive OR filter on the main table columns first.
-        // To search Product Name, we'll use the 'order_items' relationship filter if possible, but that restricts to ONLY matching orders.
-        // If we want "OR", we can't easily do (sku.eq.1 OR items.sku.eq.1).
-        // Use a heuristic: If the search looks like an Order ID (digits), search Order ID.
-        // If it looks like text, search Customer/Product?
-
-        // Actually, let's use the 'or' filter string with embedded relations if supported, or just the main columns.
-        // The user specifically asked for "order number, tracking number AND product name".
-        // Let's rely on `daraz_order_items` lookup separate or use a subquery approach?
-        // Easier: Search strictly on the main table columns for now. If product search is critical, we might need an RPC `search_orders(term)`.
-
-        // Let's add the basic fields first as requested.
-        // Note: `product_names` text array column might exist in the view? If not, we can't search it easily without RPC.
-        // Checking schema mentally... we don't have product names in `daraz_orders_with_totals` usually. 
-        // Let's implement Order Number, Tracking, Customer Name.
-
-        const searchFilter = `order_number.ilike.%${term}%,tracking_number.ilike.%${term}%,customer_name.ilike.%${term}%,first_product_name.ilike.%${term}%`
-        query = query.or(searchFilter)
-    }
-
-    // Fiscal Year Filter (takes precedence over fromDate/toDate)
-    if (fiscalYearId) {
-        const { data: fy } = await supabase
-            .from('fiscal_years')
-            .select('start_date, end_date')
-            .eq('id', fiscalYearId)
-            .single()
-
-        if (fy) {
-            query = query
-                .gte('order_date', fy.start_date)
-                .lte('order_date', fy.end_date)
-        }
-    } else {
-        // Date range filter using the selected timestamp field
-        if (fromDate) {
-            query = query.gte(timestampField, fromDate)
-        }
-        if (toDate) {
-            query = query.lte(timestampField, toDate)
-        }
-    }
-
-    // Pagination
-    const from = (page - 1) * limit
-    const to = from + limit - 1
-
-    const { data, error, count } = await query
-        .order('created_at', { ascending: false })
-        .range(from, to)
-
-    if (error) throw error
-
-
-
-    // Enrich orders with product_id from the first item (Optimized: Single Query)
-    const orderIds = (data || []).map((o: any) => o.id)
-
-    // Fetch all items for these orders in one go
-    // We only need the first item per order for the display, but to replicate "limit(1)" logic per order in SQL is hard without lateral joins.
-    // Simpler efficient approach: Fetch all items for these orders, filtering to sequence 1 if possible or just sorting.
-    // Since we only need the "first" item, we can fetch items where item_sequence = 1 (assuming it starts at 1) OR fetch all and pick.
-    // Fetching all is safer if sequences are messy.
-    const { data: allItems } = await supabase
-        .from('daraz_order_items')
-        .select(`
-            order_id,
-            item_sequence,
-            product_id,
-            product_name,
-            item_status,
-            quantity,
-            product:products(product_id)
-        `)
-        .in('order_id', orderIds)
-        .order('item_sequence') // Ensure we can pick the first one deterministically
-
-    // Group items by order_id
-    const itemsMap = new Map()
-    if (allItems) {
-        for (const item of allItems) {
-            if (!itemsMap.has(item.order_id)) {
-                itemsMap.set(item.order_id, item) // Set the first one we find (due to sort order)
+        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
+        if (disabledAccounts.length > 0) {
+            for (const acc of disabledAccounts) {
+                query = query.neq('seller_account', acc)
             }
         }
-    }
 
-    const enrichedOrders = (data || []).map((order: any) => {
-        const firstItem = itemsMap.get(order.id)
+        if (!ignoreStatusFilter) {
+            if (!status || status === 'all') {
+                query = query
+                    .not('order_status', 'ilike', '%cancel%')
+                    .not('order_status', 'ilike', '%unpaid%')
+            }
+        }
 
-        // Calculate item statuses for this order
-        // Calculate item statuses for this order
-        const orderItems = allItems?.filter((i: any) => i.order_id === order.id) || []
+        if (status && status !== 'all') {
+            query = query.or(`order_status.eq."${status}",statuses.cs.{${status}}`)
+        }
 
-        // Expand statuses based on quantity
-        const itemStatuses: string[] = []
-        orderItems.forEach((i: any) => {
-            const status = i.item_status || order.order_status
-            const qty = i.quantity || 1
-            for (let k = 0; k < qty; k++) {
-                itemStatuses.push(status)
+        if (sellerAccount && sellerAccount !== 'all') {
+            query = query.eq('seller_account', sellerAccount)
+        }
+
+        // Search Logic
+        if (search && search.trim()) {
+            const term = search.trim()
+            const searchFilter = `order_number.ilike.%${term}%,tracking_number.ilike.%${term}%,customer_name.ilike.%${term}%,first_product_name.ilike.%${term}%`
+            query = query.or(searchFilter)
+        }
+
+        // Fiscal Year Filter (takes precedence over fromDate/toDate)
+        if (fiscalYearId) {
+            const { data: fy } = await supabase
+                .from('fiscal_years')
+                .select('start_date, end_date')
+                .eq('id', fiscalYearId)
+                .single()
+
+            if (fy) {
+                query = query
+                    .gte('order_date', fy.start_date)
+                    .lte('order_date', fy.end_date)
+            }
+        } else {
+            if (fromDate) {
+                query = query.gte(timestampField, fromDate)
+            }
+            if (toDate) {
+                query = query.lte(timestampField, toDate)
+            }
+        }
+
+        // Pagination
+        const from = (page - 1) * limit
+        const to = from + limit - 1
+
+        const { data, error, count } = await query
+            .order('created_at', { ascending: false })
+            .range(from, to)
+
+        if (error) throw error
+
+        const orderIds = (data || []).map((o: any) => o.id)
+        const allItems: any[] = []
+        if (orderIds.length > 0) {
+            const CHUNK_SIZE = 150
+            const chunks: string[][] = []
+            for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
+                chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
+            }
+
+            const chunkResults = await Promise.all(
+                chunks.map(chunk =>
+                    supabase
+                        .from('daraz_order_items')
+                        .select(`
+                            order_id,
+                            item_sequence,
+                            product_id,
+                            product_name,
+                            item_status,
+                            quantity,
+                            product:products(product_id)
+                        `)
+                        .in('order_id', chunk)
+                        .order('item_sequence')
+                )
+            )
+            chunkResults.forEach(res => {
+                if (res.data) allItems.push(...res.data)
+            })
+        }
+
+        // Group items by order_id
+        const itemsMap = new Map()
+        const orderItemsGroup = new Map<string, any[]>()
+        for (const item of allItems) {
+            if (!itemsMap.has(item.order_id)) {
+                itemsMap.set(item.order_id, item)
+            }
+            if (!orderItemsGroup.has(item.order_id)) {
+                orderItemsGroup.set(item.order_id, [])
+            }
+            orderItemsGroup.get(item.order_id)!.push(item)
+        }
+
+        const enrichedOrders = (data || []).map((order: any) => {
+            const firstItem = itemsMap.get(order.id)
+            const orderItems = orderItemsGroup.get(order.id) || []
+
+            const itemStatuses: string[] = []
+            orderItems.forEach((i: any) => {
+                const st = i.item_status || order.order_status
+                const qty = i.quantity || 1
+                for (let k = 0; k < qty; k++) {
+                    itemStatuses.push(st)
+                }
+            })
+
+            return {
+                ...order,
+                product_name: firstItem?.product_name || 'N/A',
+                first_product_code: (firstItem?.product as any)?.product_id || null,
+                item_statuses: itemStatuses
             }
         })
 
         return {
-            ...order,
-            product_name: firstItem?.product_name || 'N/A',
-            first_product_code: (firstItem?.product as any)?.product_id || null,
-            item_statuses: itemStatuses
+            orders: enrichedOrders,
+            pagination: {
+                page,
+                limit,
+                total: count || 0,
+                totalPages: Math.ceil((count || 0) / limit)
+            }
         }
     })
-
-    return {
-        orders: enrichedOrders,
-        pagination: {
-            page,
-            limit,
-            total: count || 0,
-            totalPages: Math.ceil((count || 0) / limit)
-        }
-    }
 }
 
 // Get single order by ID with items
@@ -656,6 +634,7 @@ export async function updateDarazOrder(orderId: string, data: Partial<CreateDara
             if (itemsError) throw itemsError
         }
 
+        invalidateMemoryCachePrefix('daraz_orders:')
         revalidatePath('/dashboard/sales/daraz')
         return { success: true }
     } catch (error: any) {
@@ -749,6 +728,7 @@ export async function updateDarazOrderStatus(orderIds: string[], newStatus: stri
 
     if (error) throw error
 
+    invalidateMemoryCachePrefix('daraz_orders:')
     revalidatePath('/dashboard/sales/daraz')
     return { success: true, count: orderIds.length }
 }
@@ -767,6 +747,7 @@ export async function markDarazOrdersAsPrinted(orderIds: string[]) {
 
     if (error) throw error
 
+    invalidateMemoryCachePrefix('daraz_orders:')
     revalidatePath('/dashboard/sales/daraz')
     return { success: true }
 }
@@ -782,6 +763,7 @@ export async function deleteDarazOrder(orderId: string) {
 
     if (error) throw error
 
+    invalidateMemoryCachePrefix('daraz_orders:')
     revalidatePath('/dashboard/sales/daraz')
     return { success: true }
 }
@@ -1001,6 +983,7 @@ export async function bulkImportDarazOrders(rows: any[]) {
             existingOrderMap.set(orderNumber, { id: orderId, order_number: orderNumber, deleted: false })
         }
 
+        invalidateMemoryCachePrefix('daraz_orders:')
         revalidatePath('/dashboard/sales/daraz/sales-entry')
         revalidatePath('/dashboard/sales/daraz/order-list')
 
@@ -1018,29 +1001,33 @@ export async function bulkImportDarazOrders(rows: any[]) {
 
 // Get active fiscal year
 export async function getActiveFiscalYear() {
-    const supabase = await createClient()
+    return withMemoryCache('fiscal_years:active', 120_000, async () => {
+        const supabase = await createClient()
 
-    const { data, error } = await supabase
-        .from('fiscal_years')
-        .select('*')
-        .eq('is_active', true)
-        .single()
+        const { data, error } = await supabase
+            .from('fiscal_years')
+            .select('*')
+            .eq('is_active', true)
+            .single()
 
-    if (error && error.code !== 'PGRST116') throw error
-    return data
+        if (error && error.code !== 'PGRST116') throw error
+        return data
+    })
 }
 
 // Get all fiscal years
 export async function getAllFiscalYears() {
-    const supabase = await createClient()
+    return withMemoryCache('fiscal_years:all', 120_000, async () => {
+        const supabase = await createClient()
 
-    const { data, error } = await supabase
-        .from('fiscal_years')
-        .select('*')
-        .order('start_date', { ascending: false })
+        const { data, error } = await supabase
+            .from('fiscal_years')
+            .select('*')
+            .order('start_date', { ascending: false })
 
-    if (error) throw error
-    return data || []
+        if (error) throw error
+        return data || []
+    })
 }
 
 // Get fiscal year by ID
@@ -2784,6 +2771,7 @@ export async function updateDarazOrderRemarks(orderId: string, remarks: string |
 
         if (error) throw error
 
+        invalidateMemoryCachePrefix('daraz_orders:')
         return { success: true }
     } catch (error: any) {
         console.error('Error updating remarks:', error)
@@ -2796,47 +2784,53 @@ export async function checkDeliveredCustomerOrders(
     lookups: { customerName: string; last4: string }[]
 ): Promise<string[]> {
     if (!lookups || lookups.length === 0) return []
-    const supabase = await createClient()
 
-    try {
-        const uniqueLookups = Array.from(
-            new Map(
-                lookups
-                    .filter(l => l && l.customerName && l.last4 && l.last4.length >= 4)
-                    .map(l => [`${l.customerName.trim().toLowerCase()}|${l.last4.trim()}`, l])
-            ).values()
-        )
+    const uniqueMap = new Map(
+        lookups
+            .filter(l => l && l.customerName && l.last4 && l.last4.length >= 4)
+            .map(l => [`${l.customerName.trim().toLowerCase()}|${l.last4.trim()}`, l])
+    )
+    const uniqueLookups = Array.from(uniqueMap.values())
+    if (uniqueLookups.length === 0) return []
 
-        if (uniqueLookups.length === 0) return []
+    const cacheKey = `daraz_orders:delivered_check:${Array.from(uniqueMap.keys()).sort().join(',')}`
+    return withMemoryCache(cacheKey, 120_000, async () => {
+        const supabase = await createClient()
+        try {
+            const matchedKeys = new Set<string>()
+            const chunkSize = 100
+            const chunks: { customerName: string; last4: string }[][] = []
+            for (let i = 0; i < uniqueLookups.length; i += chunkSize) {
+                chunks.push(uniqueLookups.slice(i, i + chunkSize))
+            }
 
-        const matchedKeys: string[] = []
-        const chunkSize = 20
-        for (let i = 0; i < uniqueLookups.length; i += chunkSize) {
-            const chunk = uniqueLookups.slice(i, i + chunkSize)
-            const customerNames = Array.from(new Set(chunk.map(c => c.customerName.trim())))
+            await Promise.all(
+                chunks.map(async chunk => {
+                    const customerNames = Array.from(new Set(chunk.map(c => c.customerName.trim())))
+                    const { data, error } = await supabase
+                        .from('daraz_orders')
+                        .select('customer_name, order_number')
+                        .eq('order_status', 'Delivered')
+                        .or('deleted.is.null,deleted.eq.false')
+                        .in('customer_name', customerNames)
+                        .limit(500)
 
-            const { data, error } = await supabase
-                .from('daraz_orders')
-                .select('customer_name, order_number')
-                .eq('order_status', 'Delivered')
-                .or('deleted.is.null,deleted.eq.false')
-                .in('customer_name', customerNames)
-                .limit(200)
-
-            if (!error && data) {
-                data.forEach((d: any) => {
-                    const rowName = String(d.customer_name || '').trim().toLowerCase()
-                    const rowLast4 = String(d.order_number || '').trim().slice(-4)
-                    const key = `${rowName}|${rowLast4}`
-                    if (chunk.some(c => c.customerName.trim().toLowerCase() === rowName && c.last4.trim() === rowLast4)) {
-                        matchedKeys.push(key)
+                    if (!error && data) {
+                        data.forEach((d: any) => {
+                            const rowName = String(d.customer_name || '').trim().toLowerCase()
+                            const rowLast4 = String(d.order_number || '').trim().slice(-4)
+                            const key = `${rowName}|${rowLast4}`
+                            if (uniqueMap.has(key)) {
+                                matchedKeys.add(key)
+                            }
+                        })
                     }
                 })
-            }
+            )
+            return Array.from(matchedKeys)
+        } catch (err) {
+            console.error('Error checking delivered customer orders:', err)
+            return []
         }
-        return Array.from(new Set(matchedKeys))
-    } catch (err) {
-        console.error('Error checking delivered customer orders:', err)
-        return []
-    }
+    })
 }

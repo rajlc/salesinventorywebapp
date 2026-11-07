@@ -63,6 +63,7 @@ function getWeeksInInterval(startDateStr: string, endDateStr: string) {
 
 export default function PanVatBillingPage() {
     const [fiscalYearId, setFiscalYearId] = useState<string>('all')
+    const [hasInitFy, setHasInitFy] = useState(false)
     const [isAddBillModalOpen, setIsAddBillModalOpen] = useState(false)
     const [isAddCompanyModalOpen, setIsAddCompanyModalOpen] = useState(false)
     const queryClient = useQueryClient()
@@ -70,7 +71,7 @@ export default function PanVatBillingPage() {
     // Fetch fiscal years
     const { data: rawFiscalYears } = useFiscalYears()
     const fiscalYears = Array.isArray(rawFiscalYears) ? rawFiscalYears : []
-    const { data: activeFiscalYear } = useActiveFiscalYear()
+    const { data: activeFiscalYear, isLoading: isLoadingActiveFy } = useActiveFiscalYear()
 
     // Get selected fiscal year data
     const selectedFiscalYear = useMemo(() => {
@@ -116,10 +117,13 @@ export default function PanVatBillingPage() {
 
     // Set active fiscal year as default on mount
     useEffect(() => {
-        if (activeFiscalYear && fiscalYearId === 'all') {
-            setFiscalYearId(activeFiscalYear.id)
+        if (!isLoadingActiveFy && !hasInitFy) {
+            if (activeFiscalYear?.id) {
+                setFiscalYearId(activeFiscalYear.id)
+            }
+            setHasInitFy(true)
         }
-    }, [activeFiscalYear])
+    }, [activeFiscalYear, isLoadingActiveFy, hasInitFy])
 
     // Fetch company details (our own company details)
     const { data: companies = [], isLoading: isLoadingCompanies } = useQuery({
@@ -136,6 +140,7 @@ export default function PanVatBillingPage() {
             startDate: selectedFiscalYear?.start_date,
             endDate: selectedFiscalYear?.end_date,
         }),
+        enabled: hasInitFy,
         staleTime: 1000 * 60 * 2,
     })
 
@@ -147,7 +152,7 @@ export default function PanVatBillingPage() {
             companyId: undefined,
             search: undefined
         }),
-        enabled: !!fiscalYearId,
+        enabled: hasInitFy && !!fiscalYearId,
         staleTime: 1000 * 60 * 5,
     })
 
@@ -163,7 +168,7 @@ export default function PanVatBillingPage() {
         queryFn: () => getSalesBills({
             fiscalYearId: fiscalYearId !== 'all' ? fiscalYearId : undefined
         }),
-        enabled: !!fiscalYearId,
+        enabled: hasInitFy && !!fiscalYearId,
         staleTime: 1000 * 60 * 2,
     })
 

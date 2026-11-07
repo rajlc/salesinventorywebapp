@@ -16,23 +16,27 @@ interface PanVatBillListProps {
 
 export function PanVatBillList({ onAddBill }: PanVatBillListProps) {
     const [fiscalYearId, setFiscalYearId] = useState<string>('all')
+    const [hasInitFy, setHasInitFy] = useState(false)
     const [search, setSearch] = useState('')
     const [selectedBillId, setSelectedBillId] = useState<string | null>(null)
 
     // Fetch fiscal years
     const { data: fiscalYearsData } = useFiscalYears()
-    const fiscalYears = fiscalYearsData || []
-    const { data: activeFiscalYear } = useActiveFiscalYear()
+    const fiscalYears = Array.isArray(fiscalYearsData) ? fiscalYearsData : []
+    const { data: activeFiscalYear, isLoading: isLoadingActiveFy } = useActiveFiscalYear()
 
     // Set active fiscal year as default on mount
     useEffect(() => {
-        if (activeFiscalYear && fiscalYearId === 'all') {
-            setFiscalYearId(activeFiscalYear.id)
+        if (!isLoadingActiveFy && !hasInitFy) {
+            if (activeFiscalYear?.id) {
+                setFiscalYearId(activeFiscalYear.id)
+            }
+            setHasInitFy(true)
         }
-    }, [activeFiscalYear])
+    }, [activeFiscalYear, isLoadingActiveFy, hasInitFy])
 
     // Get selected fiscal year data
-    const selectedFiscalYear = fiscalYearId !== 'all' ? fiscalYears.find(fy => fy.id === fiscalYearId) : null
+    const selectedFiscalYear = fiscalYearId !== 'all' ? fiscalYears.find((fy: any) => fy.id === fiscalYearId) : null
 
     const { data: bills = [], isLoading } = useQuery({
         queryKey: ['pan-vat-bills', fiscalYearId, search, selectedFiscalYear?.start_date, selectedFiscalYear?.end_date],
@@ -42,6 +46,7 @@ export function PanVatBillList({ onAddBill }: PanVatBillListProps) {
             endDate: selectedFiscalYear?.end_date,
             search: search || undefined,
         }),
+        enabled: hasInitFy,
         staleTime: 1000 * 60 * 2,
     })
 

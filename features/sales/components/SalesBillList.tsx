@@ -15,22 +15,28 @@ interface SalesBillListProps {
 
 export function SalesBillList({ onViewBill }: SalesBillListProps) {
     const [fiscalYearId, setFiscalYearId] = useState<string>('all')
+    const [hasInitFy, setHasInitFy] = useState(false)
     const [search, setSearch] = useState('')
 
     // Fetch fiscal years
-    const { data: fiscalYears = [] } = useFiscalYears()
-    const { data: activeFy } = useActiveFiscalYear()
+    const { data: rawFiscalYears } = useFiscalYears()
+    const fiscalYears = Array.isArray(rawFiscalYears) ? rawFiscalYears : []
+    const { data: activeFy, isLoading: isLoadingActiveFy } = useActiveFiscalYear()
 
     // Initialize with active FY
     useEffect(() => {
-        if (activeFy && fiscalYearId === 'all') {
-            setFiscalYearId(activeFy.id)
+        if (!isLoadingActiveFy && !hasInitFy) {
+            if (activeFy?.id) {
+                setFiscalYearId(activeFy.id)
+            }
+            setHasInitFy(true)
         }
-    }, [activeFy])
+    }, [activeFy, isLoadingActiveFy, hasInitFy])
 
     const { data: bills = [], isLoading } = useQuery({
         queryKey: ['sales-bills', fiscalYearId, search],
         queryFn: () => getSalesBills({ fiscalYearId, search }),
+        enabled: hasInitFy,
         staleTime: 1000 * 60 * 2,
     })
 

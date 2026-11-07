@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface SupplierLedgerEntry {
     supplier_id: string
@@ -50,6 +51,8 @@ export async function getSupplierLedger({
     fiscalYearId?: string
     search?: string
 }): Promise<{ ledger: SupplierLedgerEntry[], error?: string }> {
+    const cacheKey = `supplier_ledger:${fiscalYearId || 'active'}:${search.trim().toLowerCase()}`
+    return withMemoryCache(cacheKey, 30_000, async () => {
     const supabase = await createClient()
 
     // 1. Get Fiscal Year Dates
@@ -211,6 +214,7 @@ export async function getSupplierLedger({
     })
 
     return { ledger: results }
+    })
 }
 
 /**

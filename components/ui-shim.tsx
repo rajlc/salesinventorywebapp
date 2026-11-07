@@ -283,7 +283,7 @@ DialogDescription.displayName = DialogPrimitive.Description.displayName
 const Select = (props: any) => <>{props.children}</>
 const SelectGroup = (props: any) => <>{props.children}</>
 const SelectValue = (props: any) => <>{props.placeholder}</>
-const SelectTrigger = (props: any) => <div {...props}>{props.children}</div>
+const SelectTrigger = ({ asChild, ...props }: any) => <div {...props}>{props.children}</div>
 const SelectContent = (props: any) => <div {...props}>{props.children}</div>
 const SelectLabel = (props: any) => <div {...props}>{props.children}</div>
 const SelectItem = (props: any) => <div {...props}>{props.children}</div>
@@ -446,7 +446,7 @@ Textarea.displayName = "Textarea"
 
 // --- ALERT DIALOG (simplified) ---
 const AlertDialog = (props: any) => <>{props.children}</>
-const AlertDialogTrigger = (props: any) => <div {...props}>{props.children}</div>
+const AlertDialogTrigger = ({ asChild, ...props }: any) => <div {...props}>{props.children}</div>
 const AlertDialogContent = (props: any) => <div className={cn("bg-white dark:bg-zinc-900 p-6 rounded-lg shadow-lg", props.className)} {...props}>{props.children}</div>
 const AlertDialogHeader = (props: any) => <div className="mb-4" {...props}>{props.children}</div>
 const AlertDialogTitle = (props: any) => <h2 className="text-lg font-semibold" {...props}>{props.children}</h2>
@@ -458,7 +458,7 @@ const AlertDialogCancel = (props: any) => <button className="px-4 py-2 border ro
 // --- TOOLTIP (simplified) ---
 const TooltipProvider = (props: any) => <>{props.children}</>
 const Tooltip = (props: any) => <>{props.children}</>
-const TooltipTrigger = (props: any) => <div {...props}>{props.children}</div>
+const TooltipTrigger = ({ asChild, ...props }: any) => <div {...props}>{props.children}</div>
 const TooltipContent = (props: any) => <div className={cn("absolute z-50 overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md", props.className)} {...props}>{props.children}</div>
 
 // --- FORM (react-hook-form compatible) ---

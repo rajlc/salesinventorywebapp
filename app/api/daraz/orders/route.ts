@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
 import { isStoreOrderSyncEnabled, isStoreChatReviewEnabled } from '@/lib/daraz/store-sync-config'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -92,16 +93,21 @@ export async function GET(request: NextRequest) {
     // Check if we just want to load local data
     const source = searchParams.get('source')
     if (source === 'db') {
-        const { data: localOrders, error: localError } = await supabase
-            .from('daraz_orders')
-            .select('*')
-            .eq('store_id', storeId)
-            .order('daraz_created_at', { ascending: false })
+        try {
+            const payload = await withMemoryCache(`daraz_orders:api_db:${storeId}`, 30_000, async () => {
+                const { data: localOrders, error: localError } = await supabase
+                    .from('daraz_orders')
+                    .select('*')
+                    .eq('store_id', storeId)
+                    .order('daraz_created_at', { ascending: false })
 
-        if (localError) {
+                if (localError) throw localError
+                return { orders: localOrders || [], count: localOrders?.length || 0 }
+            })
+            return NextResponse.json(payload)
+        } catch (localError) {
             return NextResponse.json({ error: 'Failed to fetch local orders', details: localError }, { status: 500 })
         }
-        return NextResponse.json({ orders: localOrders || [], count: localOrders?.length || 0 })
     }
 
     try {
