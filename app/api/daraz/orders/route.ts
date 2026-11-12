@@ -4,7 +4,7 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { syncOrderPurchaseCost } from '@/features/sales/actions/report-actions'
 import { isStoreOrderSyncEnabled, isStoreChatReviewEnabled } from '@/lib/daraz/store-sync-config'
-import { withMemoryCache } from '@/lib/cache/memory-cache'
+import { withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -78,19 +78,7 @@ export async function GET(request: NextRequest) {
         })
     }
 
-    // 1. Get Token
-    const { data: tokenData, error: dbError } = await supabase
-        .from('daraz_api_tokens')
-        .select('*')
-        .eq('store_id', storeId)
-        .eq('app_type', 'order')
-        .single()
-
-    if (dbError || !tokenData) {
-        return NextResponse.json({ error: 'No active connection found for this store. Please connect first.' }, { status: 401 })
-    }
-
-    // Check if we just want to load local data
+    // Fast-path: If source=db, return cached local store orders immediately without querying daraz_api_tokens
     const source = searchParams.get('source')
     if (source === 'db') {
         try {
@@ -99,6 +87,7 @@ export async function GET(request: NextRequest) {
                     .from('daraz_orders')
                     .select('*')
                     .eq('store_id', storeId)
+                    .or('deleted.is.null,deleted.eq.false')
                     .order('daraz_created_at', { ascending: false })
 
                 if (localError) throw localError
@@ -108,6 +97,18 @@ export async function GET(request: NextRequest) {
         } catch (localError) {
             return NextResponse.json({ error: 'Failed to fetch local orders', details: localError }, { status: 500 })
         }
+    }
+
+    // 1. Get Token (only required for live Daraz API sync)
+    const { data: tokenData, error: dbError } = await supabase
+        .from('daraz_api_tokens')
+        .select('*')
+        .eq('store_id', storeId)
+        .eq('app_type', 'order')
+        .single()
+
+    if (dbError || !tokenData) {
+        return NextResponse.json({ error: 'No active connection found for this store. Please connect first.' }, { status: 401 })
     }
 
     try {
@@ -250,11 +251,22 @@ export async function GET(request: NextRequest) {
 
         // 4. Upsert to Database (Persistence) & Auto-Sync Logic
         if (finalOrders.length > 0) {
-            // A. Fetch Products for SKU matching
-            const { data: products } = await supabase
-                .from('products')
-                .select('id, seller_sku1, seller_sku2, seller_sku3, seller_sku4, product_name, seller_account')
-                .limit(10000)
+            // A. Fetch Products for SKU matching (paginated across all 1000+ products)
+            const products: any[] = []
+            const PROD_BATCH_SIZE = 1000
+            let prodPage = 0
+            while (prodPage < 50) {
+                const { data: batch } = await supabase
+                    .from('products')
+                    .select('id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, product_name')
+                    .eq('is_deleted', false)
+                    .order('id')
+                    .range(prodPage * PROD_BATCH_SIZE, (prodPage + 1) * PROD_BATCH_SIZE - 1)
+                if (!batch || batch.length === 0) break
+                products.push(...batch)
+                if (batch.length < PROD_BATCH_SIZE) break
+                prodPage++
+            }
 
             // Fetch Sync Settings (Cutoff Date)
             let cutoffDate: Date | null = null
@@ -276,12 +288,12 @@ export async function GET(request: NextRequest) {
             const skuMap = new Map<string, any>()
             const nameMap = new Map<string, any>()
 
-            products?.forEach(p => {
-                if (p.seller_sku1) skuMap.set(p.seller_sku1.toLowerCase(), p)
-                if (p.seller_sku2) skuMap.set(p.seller_sku2.toLowerCase(), p)
-                if (p.seller_sku3) skuMap.set(p.seller_sku3.toLowerCase(), p)
-                if (p.seller_sku4) skuMap.set(p.seller_sku4.toLowerCase(), p)
-                if (p.product_name) nameMap.set(p.product_name.toLowerCase().trim(), p)
+            products.forEach(p => {
+                if (p.seller_sku1) skuMap.set(p.seller_sku1.trim().toLowerCase(), { ...p, seller_account: p.seller_account1 })
+                if (p.seller_sku2) skuMap.set(p.seller_sku2.trim().toLowerCase(), { ...p, seller_account: p.seller_account2 })
+                if (p.seller_sku3) skuMap.set(p.seller_sku3.trim().toLowerCase(), { ...p, seller_account: p.seller_account3 })
+                if (p.seller_sku4) skuMap.set(p.seller_sku4.trim().toLowerCase(), { ...p, seller_account: p.seller_account4 })
+                if (p.product_name) nameMap.set(p.product_name.toLowerCase().trim(), { ...p, seller_account: p.seller_account1 })
             })
 
             // B. Batch fetch ALL existing orders to avoid N queries in the loop
@@ -525,14 +537,21 @@ export async function GET(request: NextRequest) {
                 }
             }
 
-            // Step 5: Execute batch updates
+            // Step 5: Execute batch updates concurrently in chunks of 20
             if (ordersToUpdate.length > 0) {
                 console.log(`[DarazSync] Batch updating ${ordersToUpdate.length} existing orders`)
-                for (const { id, payload } of ordersToUpdate) {
-                    const { error } = await supabase.from('daraz_orders').update(payload).eq('id', id)
-                    if (error) console.error(`[DarazSync] Update failed for order id ${id}:`, error)
+                const UPDATE_CHUNK_SIZE = 20
+                for (let i = 0; i < ordersToUpdate.length; i += UPDATE_CHUNK_SIZE) {
+                    const chunk = ordersToUpdate.slice(i, i + UPDATE_CHUNK_SIZE)
+                    await Promise.all(
+                        chunk.map(async ({ id, payload }) => {
+                            const { error } = await supabase.from('daraz_orders').update(payload).eq('id', id)
+                            if (error) console.error(`[DarazSync] Update failed for order id ${id}:`, error)
+                        })
+                    )
                 }
             }
+            invalidateMemoryCachePrefix('daraz_orders:')
 
             // Step 6: Execute batch inserts using upsert
             let insertedOrders: any[] = []

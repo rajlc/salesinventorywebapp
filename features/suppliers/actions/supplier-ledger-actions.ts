@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface SupplierLedgerEntry {
@@ -223,62 +223,72 @@ export async function getSupplierLedger({
  * Avoids loading all suppliers and 50,000+ purchase rows into memory.
  */
 export async function getPendingSupplierDue({
-    fiscalYearId
+    fiscalYearId,
+    endDate: providedEndDate
 }: {
     fiscalYearId?: string
+    endDate?: string
 }): Promise<number> {
-    const supabase = await createClient()
+    const cacheKey = `supplier_pending_due:${providedEndDate || fiscalYearId || 'active'}`
 
-    // 1. Get Fiscal Year End Date
-    let endDate: string
+    return withMemoryCache(cacheKey, 60_000, async () => {
+        const supabase = await createAdminClient()
 
-    if (fiscalYearId) {
-        const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('id', fiscalYearId).maybeSingle()
-        if (!fy) return 0
-        endDate = fy.end_date
-    } else {
-        const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('is_active', true).maybeSingle()
-        if (!fy) return 0
-        endDate = fy.end_date
-    }
+        // 1. Get Fiscal Year End Date (skip query if caller already resolved endDate)
+        let endDate = providedEndDate
 
-    // 2. Fetch only due purchases and transactions up to endDate concurrently
-    const [purchasesRes, transactionsRes] = await Promise.all([
-        supabase
-            .from('purchases')
-            .select('purchase_type, total_amount')
-            .ilike('payment_type', 'due')
-            .lte('purchase_date', endDate),
-        supabase
-            .from('supplier_transactions')
-            .select('transaction_type, amount')
-            .lte('transaction_date', endDate)
-    ])
-
-    let balance = 0
-
-    const purchases = purchasesRes.data || []
-    for (const p of purchases) {
-        const amt = Number(p.total_amount) || 0
-        const type = (p.purchase_type || 'Buy').toLowerCase()
-        if (type === 'buy') {
-            balance += amt
-        } else if (type === 'sell') {
-            balance -= amt
+        if (!endDate) {
+            if (fiscalYearId) {
+                const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('id', fiscalYearId).maybeSingle()
+                if (!fy) return 0
+                endDate = fy.end_date
+            } else {
+                const { data: fy } = await supabase.from('fiscal_years').select('end_date').eq('is_active', true).maybeSingle()
+                if (!fy) return 0
+                endDate = fy.end_date
+            }
         }
-    }
 
-    const transactions = transactionsRes.data || []
-    for (const t of transactions) {
-        const amt = Number(t.amount) || 0
-        if (t.transaction_type === 'Received') {
-            balance += amt
-        } else if (t.transaction_type === 'Paid') {
-            balance -= amt
+        if (!endDate) return 0
+
+        // 2. Fetch only due purchases and transactions up to endDate concurrently
+        const [purchasesRes, transactionsRes] = await Promise.all([
+            supabase
+                .from('purchases')
+                .select('purchase_type, total_amount')
+                .ilike('payment_type', 'due')
+                .lte('purchase_date', endDate),
+            supabase
+                .from('supplier_transactions')
+                .select('transaction_type, amount')
+                .lte('transaction_date', endDate)
+        ])
+
+        let balance = 0
+
+        const purchases = purchasesRes.data || []
+        for (const p of purchases) {
+            const amt = Number(p.total_amount) || 0
+            const type = (p.purchase_type || 'Buy').toLowerCase()
+            if (type === 'buy') {
+                balance += amt
+            } else if (type === 'sell') {
+                balance -= amt
+            }
         }
-    }
 
-    return balance
+        const transactions = transactionsRes.data || []
+        for (const t of transactions) {
+            const amt = Number(t.amount) || 0
+            if (t.transaction_type === 'Received') {
+                balance += amt
+            } else if (t.transaction_type === 'Paid') {
+                balance -= amt
+            }
+        }
+
+        return balance
+    })
 }
 
 

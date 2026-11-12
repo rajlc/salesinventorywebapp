@@ -205,7 +205,7 @@ const getCustomerOrderKey = (customerName: string, orderNumber: string | number)
 }
 
 export default function DarazSalesEntryPage() {
-    const { canEdit, hasPermission } = usePermissions()
+    const { canEdit, hasPermission, userRole: contextUserRole } = usePermissions()
     const canEditOrderEntry = canEdit('Daraz', 'Order Entry')
     const canViewSalesDashboard = hasPermission('Daraz', 'Order List')
 
@@ -404,10 +404,14 @@ export default function DarazSalesEntryPage() {
         return 'normal'
     }
 
-    // Fetch user role on mount
+    // Sync user role from PermissionContext (avoids redundant getUserRole() RPC on mount)
     useEffect(() => {
-        getUserRole().then(role => setUserRole(role))
-    }, [])
+        if (contextUserRole) {
+            setUserRole(contextUserRole === 'admin' ? 'admin' : 'user')
+        } else {
+            getUserRole().then(role => setUserRole(role))
+        }
+    }, [contextUserRole])
 
     // Copy order number handler
     const handleCopyOrderNumber = (e: React.MouseEvent, orderNumber: string) => {

@@ -10,7 +10,10 @@ import {
     pushProductToDaraz,
     searchDarazCategoriesAction,
     extractProductLinkAction,
-    viewDraftImages
+    viewDraftImages,
+    calculateDarazProfitAction,
+    generateStudioImagesAction,
+    searchSuppliersAction
 } from '@/lib/claude/connector-service'
 
 // ── CORS Helper ─────────────────────────────────────────────────────────────
@@ -145,7 +148,47 @@ const CLAUDE_TOOLS = [
                 },
                 wholesale_price: {
                     type: 'number',
-                    description: 'Cost or wholesale purchase price in NPR'
+                    description: 'Cost or wholesale purchase price in NPR (synced to product_wholesale_prices)'
+                },
+                campaign_price: {
+                    type: 'number',
+                    description: 'Optional Daraz campaign price in NPR (synced to daraz_avg_prices)'
+                },
+                mrp_price: {
+                    type: 'number',
+                    description: 'Optional explicit regular MRP price in NPR (synced to mrp_prices)'
+                },
+                supplier_name: {
+                    type: 'string',
+                    description: 'Optional supplier name (e.g. "Ram"). The system checks the suppliers database: if an exact match exists, it links automatically; if only a close/fuzzy match exists (e.g. "Ramu"), it returns suggested_suppliers and asks you to confirm with the user before saving.'
+                },
+                supplier_id: {
+                    type: 'string',
+                    description: 'Optional exact supplier UUID from our database'
+                },
+                confirm_supplier: {
+                    type: 'boolean',
+                    description: 'Set to true after the user confirms a fuzzy-matched supplier name (e.g. confirming "Ramu" when they said "Ram")'
+                },
+                include_image_in_description: {
+                    type: 'boolean',
+                    description: 'Set to true to embed a product image (<img> tag) inside the HTML main description'
+                },
+                description_image_url: {
+                    type: 'string',
+                    description: 'Optional specific image URL to embed inside the HTML product description'
+                },
+                generate_studio_images: {
+                    type: 'boolean',
+                    description: 'Set to true to generate AI studio product image(s) and attach them to this draft'
+                },
+                image_prompt: {
+                    type: 'string',
+                    description: 'Visual prompt describing the product (used when the user uploads a raw mobile photo in ChatGPT/Claude and asks to generate a studio product image and save to database)'
+                },
+                replace_existing_images: {
+                    type: 'boolean',
+                    description: 'Set to true to replace/delete old draft images with the newly generated studio images'
                 },
                 product_link: {
                     type: 'string',
@@ -156,13 +199,17 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'update_product_draft',
-        description: 'Update or edit an existing product draft in the database. Can find the draft by "id" or by "raw_name". You can update its price, special price, variants, specifications, title, description, highlights, stores, or status.',
+        description: 'Update or edit an existing product draft in the database. Can find the draft by "id" ("draft_id") or by "raw_name". Supports updating price, special_price, wholesale_price, campaign_price, supplier_name (with fuzzy match confirmation), variants, specifications, title, description (including embedding an image), highlights, stores, generating new studio images, or deleting old images.',
         inputSchema: {
             type: 'object',
             properties: {
                 id: {
                     type: 'string',
                     description: 'Draft UUID (if known)'
+                },
+                draft_id: {
+                    type: 'string',
+                    description: 'Alias for id (Draft UUID)'
                 },
                 raw_name: {
                     type: 'string',
@@ -176,6 +223,30 @@ const CLAUDE_TOOLS = [
                     type: 'number',
                     description: 'Updated special price in NPR'
                 },
+                wholesale_price: {
+                    type: 'number',
+                    description: 'Updated purchase/wholesale cost price in NPR (saved to draft and synced to inventory database)'
+                },
+                campaign_price: {
+                    type: 'number',
+                    description: 'Updated campaign price in NPR (synced to database)'
+                },
+                mrp_price: {
+                    type: 'number',
+                    description: 'Updated MRP price in NPR (synced to database)'
+                },
+                supplier_name: {
+                    type: 'string',
+                    description: 'Supplier name (e.g. "Ram"). Checks database and asks confirmation if only a fuzzy match like "Ramu" is found.'
+                },
+                supplier_id: {
+                    type: 'string',
+                    description: 'Exact supplier UUID'
+                },
+                confirm_supplier: {
+                    type: 'boolean',
+                    description: 'Set to true once the user confirms a suggested fuzzy-matched supplier'
+                },
                 variants: {
                     type: 'array',
                     description: 'Updated list of variations/colors/sizes (e.g. ["Black", "Red"] or with individual prices). Stock defaults to 100.',
@@ -183,6 +254,7 @@ const CLAUDE_TOOLS = [
                         type: 'object',
                         properties: {
                             name: { type: 'string' },
+                            values: { type: 'array', items: { type: 'string' } },
                             color: { type: 'string' },
                             size: { type: 'string' },
                             price: { type: 'number' },
@@ -196,14 +268,30 @@ const CLAUDE_TOOLS = [
                     type: 'string',
                     description: 'Updated Daraz SEO title'
                 },
+                titles_per_store: {
+                    type: 'object',
+                    description: 'Updated unique SEO titles per store account'
+                },
                 description: {
                     type: 'string',
                     description: 'Updated product description'
+                },
+                include_image_in_description: {
+                    type: 'boolean',
+                    description: 'Set to true to embed a product image inside the HTML product description'
+                },
+                description_image_url: {
+                    type: 'string',
+                    description: 'Specific image URL to embed inside the HTML product description'
                 },
                 highlights: {
                     type: 'array',
                     items: { type: 'string' },
                     description: 'Updated bullet point highlights'
+                },
+                category_id: {
+                    type: 'number',
+                    description: 'Updated Daraz category ID'
                 },
                 category_path: {
                     type: 'string',
@@ -218,10 +306,40 @@ const CLAUDE_TOOLS = [
                     items: { type: 'string' },
                     description: 'Updated target stores'
                 },
+                store_account_name: {
+                    type: 'string',
+                    description: 'Single target store account name'
+                },
                 images: {
                     type: 'array',
                     items: { type: 'string' },
                     description: 'Updated product image URLs'
+                },
+                generate_studio_images: {
+                    type: 'boolean',
+                    description: 'Set to true to generate AI studio product image(s) for this draft'
+                },
+                image_prompt: {
+                    type: 'string',
+                    description: 'Detailed visual prompt to generate a new studio product image and attach it to this draft'
+                },
+                replace_existing_images: {
+                    type: 'boolean',
+                    description: 'Set to true to delete old images from the draft and replace them with newly provided or generated images'
+                },
+                delete_old_images: {
+                    type: 'boolean',
+                    description: 'Set to true to delete existing images from the draft'
+                },
+                delete_image_indices: {
+                    type: 'array',
+                    items: { type: 'number' },
+                    description: 'Optional 0-based indices of images to delete from the draft (e.g. [0] deletes the first old image)'
+                },
+                delete_image_urls: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional specific image URLs to delete from the draft'
                 },
                 product_link: {
                     type: 'string',
@@ -301,13 +419,29 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'push_product_to_daraz',
-        description: 'Push a product directly to the Daraz seller account (e.g. Bagmati). Auto-generates AI title, rich description, highlights with bullet points, and category if omitted. Supports variants and dynamic specifications. Note: Daraz marketplace requires at least 1 image URL to publish.',
+        description: 'Push a product or existing draft directly to one or multiple Daraz seller accounts (e.g. ["Bagmati Traders", "Balaju Shop"]). Automatically generates a UNIQUE Seller SKU per store (e.g. BT-... for Bagmati Traders and BS-... for Balaju Shop) so SKUs never collide across accounts, and syncs pricing/supplier/SKUs to the inventory database. Can push an existing draft by passing "id" ("draft_id") or "product_name".',
         inputSchema: {
             type: 'object',
             properties: {
+                id: {
+                    type: 'string',
+                    description: 'Optional existing Draft UUID to push to Daraz'
+                },
+                draft_id: {
+                    type: 'string',
+                    description: 'Alias for id (existing Draft UUID to push)'
+                },
                 product_name: {
                     type: 'string',
                     description: 'Product name to push to Daraz'
+                },
+                title: {
+                    type: 'string',
+                    description: 'Optional Daraz SEO title'
+                },
+                titles_per_store: {
+                    type: 'object',
+                    description: 'Optional unique SEO titles per store account'
                 },
                 price: {
                     type: 'number',
@@ -316,6 +450,30 @@ const CLAUDE_TOOLS = [
                 special_price: {
                     type: 'number',
                     description: 'Optional discounted/special promotional price in NPR'
+                },
+                wholesale_price: {
+                    type: 'number',
+                    description: 'Optional purchase/wholesale cost price in NPR'
+                },
+                campaign_price: {
+                    type: 'number',
+                    description: 'Optional campaign price in NPR'
+                },
+                mrp_price: {
+                    type: 'number',
+                    description: 'Optional regular MRP price in NPR'
+                },
+                supplier_name: {
+                    type: 'string',
+                    description: 'Optional supplier name (checks database and asks confirmation if only a fuzzy match is found)'
+                },
+                supplier_id: {
+                    type: 'string',
+                    description: 'Optional supplier UUID'
+                },
+                confirm_supplier: {
+                    type: 'boolean',
+                    description: 'Set to true after user confirms a fuzzy-matched supplier'
                 },
                 variants: {
                     type: 'array',
@@ -327,7 +485,12 @@ const CLAUDE_TOOLS = [
                 },
                 store_account_name: {
                     type: 'string',
-                    description: 'Daraz seller store account name (e.g. "Bagmati" or "Bagmati Traders")'
+                    description: 'Single Daraz seller store account name (e.g. "Bagmati Traders")'
+                },
+                store_accounts: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Multiple Daraz seller store accounts (e.g. ["Bagmati Traders", "Balaju Shop"]). Each store gets its own unique Seller SKU!'
                 },
                 images: {
                     type: 'array',
@@ -337,6 +500,10 @@ const CLAUDE_TOOLS = [
                 description: {
                     type: 'string',
                     description: 'Optional custom product description'
+                },
+                include_image_in_description: {
+                    type: 'boolean',
+                    description: 'Set to true to embed a product image inside the HTML description'
                 },
                 highlights: {
                     type: 'array',
@@ -359,8 +526,7 @@ const CLAUDE_TOOLS = [
                     type: 'string',
                     description: 'Optional category name or path'
                 }
-            },
-            required: ['product_name']
+            }
         }
     },
     {
@@ -445,6 +611,126 @@ const CLAUDE_TOOLS = [
                 }
             },
             required: ['query']
+        }
+    },
+    {
+        name: 'calculate_daraz_profit',
+        description: 'Calculate exact Daraz Nepal commission (+13% VAT), payment handling fee (+13% VAT), order processing/handling fee bracket (+13% VAT), total deductions, net payout, net profit, breakeven minimum safe price, and recommended selling price for a product or draft.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                draft_id: {
+                    type: 'string',
+                    description: 'Optional Draft UUID to calculate fees/profit for'
+                },
+                raw_name: {
+                    type: 'string',
+                    description: 'Optional product name'
+                },
+                category_id: {
+                    type: 'number',
+                    description: 'Optional Daraz category ID'
+                },
+                category_path: {
+                    type: 'string',
+                    description: 'Optional Daraz category path'
+                },
+                selling_price: {
+                    type: 'number',
+                    description: 'Selling / Special Price on Daraz in NPR'
+                },
+                wholesale_price: {
+                    type: 'number',
+                    description: 'Purchase / Wholesale cost price in NPR'
+                },
+                packaging_cost: {
+                    type: 'number',
+                    description: 'Optional packaging cost per order in NPR (default: 0)'
+                },
+                target_profit: {
+                    type: 'number',
+                    description: 'Optional desired net profit in NPR to reverse-calculate recommended selling price'
+                },
+                target_margin_percent: {
+                    type: 'number',
+                    description: 'Optional desired net profit margin percentage (e.g. 20 for 20%) to reverse-calculate recommended selling price'
+                }
+            }
+        }
+    },
+    {
+        name: 'generate_studio_images',
+        description: 'Upload or generate professional e-commerce studio product image(s), save them permanently to the webapp database (Supabase storage), attach them to a draft, optionally embed an image in the HTML description, and delete old/raw images from the draft. If you have image URLs or base64 images created/found in chat, pass them in "images" or "images_base64" and they will be downloaded, converted to clean studio JPEGs, and uploaded to the draft!',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                draft_id: {
+                    type: 'string',
+                    description: 'Draft UUID to attach uploaded/generated images to'
+                },
+                raw_name: {
+                    type: 'string',
+                    description: 'Product name to find the draft or describe the product'
+                },
+                images: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional array of image URLs (or data:image/...;base64 strings) to download and upload directly into the webapp draft'
+                },
+                image_urls: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Alias for images: array of image URLs to upload into the draft'
+                },
+                images_base64: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional array of base64-encoded image strings (or data URLs) to upload directly into the webapp draft'
+                },
+                source_image_url: {
+                    type: 'string',
+                    description: 'Optional single image URL to upload or transform into studio product photos'
+                },
+                image_prompt: {
+                    type: 'string',
+                    description: 'Visual prompt describing the product to generate a clean studio photo'
+                },
+                replace_existing_images: {
+                    type: 'boolean',
+                    description: 'Set to true to delete all old images on the draft and replace with the newly uploaded/generated studio image(s)'
+                },
+                delete_old_images: {
+                    type: 'boolean',
+                    description: 'Set to true to delete old images from the draft'
+                },
+                delete_image_indices: {
+                    type: 'array',
+                    items: { type: 'number' },
+                    description: 'Optional 0-based indices of old images to delete from the draft'
+                },
+                delete_image_urls: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional specific image URLs to delete from the draft'
+                },
+                include_image_in_description: {
+                    type: 'boolean',
+                    description: 'Set to true to also embed the studio image inside the draft HTML description'
+                }
+            }
+        }
+    },
+    {
+        name: 'search_suppliers',
+        description: 'Search suppliers in the inventory database by name (e.g. "Ram") to check exact or fuzzy matches (e.g. "Ramu").',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    description: 'Supplier name to search for'
+                }
+            }
         }
     }
 ]
@@ -630,7 +916,7 @@ export async function POST(req: NextRequest) {
             }, { status: 404 }))
         }
 
-        // 2. Handle REST / Custom Action requests
+        // 2. Handle REST / Custom Action requests (ChatGPT Actions, Gemini, REST clients)
         const action = body.action || body.tool || body.name
         const args = body.arguments || body.params || body.parameters || body
 
@@ -641,10 +927,26 @@ export async function POST(req: NextRequest) {
         }
 
         const result = await executeTool(action, args)
+
+        // Strip raw base64 _images and data_url bloat for REST/OpenAPI clients (ChatGPT Actions limit responses to ~100KB)
+        const sanitizedData = typeof result === 'object' && result !== null ? { ...(result as any) } : result
+        if (typeof sanitizedData === 'object' && sanitizedData !== null) {
+            delete sanitizedData._images
+            if (Array.isArray(sanitizedData.images)) {
+                sanitizedData.images = sanitizedData.images.map((img: any) => {
+                    if (typeof img === 'object' && img !== null && 'data_url' in img) {
+                        const { data_url, ...rest } = img
+                        return rest
+                    }
+                    return img
+                })
+            }
+        }
+
         return withCors(NextResponse.json({
-            success: true,
+            success: sanitizedData?.success !== undefined ? sanitizedData.success : true,
             action,
-            data: result
+            data: sanitizedData
         }))
 
     } catch (err: any) {
@@ -663,6 +965,7 @@ function paramsName(body: any): string {
 // ── Tool Dispatcher ─────────────────────────────────────────────────────────
 
 async function executeTool(name: string, args: any) {
+    const resolvedId = args.id || args.draft_id || args.draftId
     switch (name) {
         case 'list_daraz_stores':
             return await listDarazStores()
@@ -676,13 +979,22 @@ async function executeTool(name: string, args: any) {
                 highlights: args.highlights || args.bullet_points || args.bullets || args.key_features || args.features || args.highlight_points || args.specs || args.specifications,
                 price: args.price,
                 special_price: args.special_price,
+                wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
+                campaign_price: args.campaign_price,
+                mrp_price: args.mrp_price,
+                supplier_id: args.supplier_id,
+                supplier_name: args.supplier_name || args.supplier,
+                confirm_supplier: args.confirm_supplier,
                 variants: args.variants || args.variations || args.colors || args.skus,
                 attributes: args.attributes || args.specs || args.specifications,
                 store_account_name: args.store_account_name || args.store,
                 store_accounts: args.store_accounts || args.stores || args.target_stores,
                 images: args.images,
-                wholesale_price: args.wholesale_price,
-                supplier_id: args.supplier_id,
+                include_image_in_description: args.include_image_in_description,
+                description_image_url: args.description_image_url,
+                generate_studio_images: args.generate_studio_images,
+                image_prompt: args.image_prompt,
+                replace_existing_images: args.replace_existing_images,
                 category_id: args.category_id,
                 category_path: args.category_path,
                 product_link: args.product_link || args.link || args.url
@@ -690,14 +1002,23 @@ async function executeTool(name: string, args: any) {
 
         case 'update_product_draft':
             return await updateProductDraft({
-                id: args.id,
+                id: resolvedId,
+                draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
                 titles_per_store: args.titles_per_store,
                 description: args.description || args.product_description || args.desc,
+                include_image_in_description: args.include_image_in_description,
+                description_image_url: args.description_image_url,
                 highlights: args.highlights || args.bullet_points || args.bullets,
                 price: args.price,
                 special_price: args.special_price,
+                wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
+                campaign_price: args.campaign_price,
+                mrp_price: args.mrp_price,
+                supplier_id: args.supplier_id,
+                supplier_name: args.supplier_name || args.supplier,
+                confirm_supplier: args.confirm_supplier,
                 variants: args.variants || args.variations || args.colors || args.skus,
                 attributes: args.attributes || args.specs || args.specifications,
                 store_account_name: args.store_account_name || args.store,
@@ -705,21 +1026,27 @@ async function executeTool(name: string, args: any) {
                 category_id: args.category_id,
                 category_path: args.category_path,
                 images: args.images,
-                wholesale_price: args.wholesale_price,
-                supplier_id: args.supplier_id,
+                generate_studio_images: args.generate_studio_images,
+                image_prompt: args.image_prompt,
+                replace_existing_images: args.replace_existing_images,
+                delete_old_images: args.delete_old_images,
+                delete_image_indices: args.delete_image_indices,
+                delete_image_urls: args.delete_image_urls,
                 product_link: args.product_link || args.link || args.url,
                 status: args.status
             })
 
         case 'delete_product_draft':
             return await deleteProductDraft({
-                id: args.id,
+                id: resolvedId,
+                draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name
             })
 
         case 'get_draft_details':
             return await getDraftDetails({
-                id: args.id,
+                id: resolvedId,
+                draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name
             })
 
@@ -732,39 +1059,53 @@ async function executeTool(name: string, args: any) {
 
         case 'push_product_to_daraz':
             return await pushProductToDaraz({
+                id: resolvedId,
+                draft_id: resolvedId,
                 product_name: args.product_name || args.raw_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
+                titles_per_store: args.titles_per_store,
                 price: args.price,
                 special_price: args.special_price,
+                wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
+                campaign_price: args.campaign_price,
+                mrp_price: args.mrp_price,
+                supplier_id: args.supplier_id,
+                supplier_name: args.supplier_name || args.supplier,
+                confirm_supplier: args.confirm_supplier,
                 variants: args.variants || args.variations || args.colors || args.skus,
                 attributes: args.attributes || args.specs || args.specifications,
                 store_account_name: args.store_account_name || args.store,
                 store_accounts: args.store_accounts || args.stores || args.target_stores,
                 images: args.images || [],
                 description: args.description,
+                include_image_in_description: args.include_image_in_description,
+                description_image_url: args.description_image_url,
                 highlights: args.highlights,
                 category_id: args.category_id,
-                category_path: args.category_path
+                category_path: args.category_path,
+                category_name: args.category_name,
+                category: args.category
             })
 
         case 'get_draft_listings':
             return await getDraftListings({
                 status: args.status,
                 type: args.type,
-                search: args.search,
+                search: args.search || args.query,
                 limit: args.limit
             })
 
         case 'view_draft_images':
             return await viewDraftImages({
-                id: args.id,
+                id: resolvedId,
+                draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name,
                 image_url: args.image_url || args.url,
                 max_images: args.max_images
             })
 
         case 'extract_product_link':
-            return await extractProductLinkAction(args.url || args.link)
+            return await extractProductLinkAction(args.url || args.link || args.product_link)
 
         case 'search_daraz_categories':
             return await searchDarazCategoriesAction(
@@ -772,7 +1113,41 @@ async function executeTool(name: string, args: any) {
                 args.limit ? Number(args.limit) : 5
             )
 
+        case 'calculate_daraz_profit':
+            return await calculateDarazProfitAction({
+                draft_id: resolvedId,
+                raw_name: args.raw_name || args.product_name || args.name,
+                category_id: args.category_id,
+                category_path: args.category_path,
+                selling_price: args.selling_price ?? args.special_price ?? args.price,
+                wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
+                packaging_cost: args.packaging_cost,
+                target_profit: args.target_profit,
+                target_margin_percent: args.target_margin_percent
+            })
+
+        case 'generate_studio_images':
+        case 'upload_product_images':
+            return await generateStudioImagesAction({
+                draft_id: resolvedId,
+                raw_name: args.raw_name || args.product_name || args.name,
+                images: args.images,
+                image_urls: args.image_urls,
+                images_base64: args.images_base64,
+                base64_image: args.base64_image,
+                source_image_url: args.source_image_url || args.image_url || args.url,
+                image_prompt: args.image_prompt || args.prompt,
+                replace_existing_images: args.replace_existing_images,
+                delete_old_images: args.delete_old_images,
+                delete_image_indices: args.delete_image_indices,
+                delete_image_urls: args.delete_image_urls,
+                include_image_in_description: args.include_image_in_description
+            })
+
+        case 'search_suppliers':
+            return await searchSuppliersAction(args.query || args.supplier_name || args.supplier || args.search || '')
+
         default:
-            throw new Error(`Unknown tool "${name}". Call list_daraz_stores, search_daraz_categories, view_draft_images, extract_product_link, save_product_draft, update_product_draft, delete_product_draft, get_draft_details, bulk_add_products, push_product_to_daraz, or get_draft_listings.`)
+            throw new Error(`Unknown tool "${name}". Call list_daraz_stores, search_daraz_categories, calculate_daraz_profit, generate_studio_images, search_suppliers, view_draft_images, extract_product_link, save_product_draft, update_product_draft, delete_product_draft, get_draft_details, bulk_add_products, push_product_to_daraz, or get_draft_listings.`)
     }
 }

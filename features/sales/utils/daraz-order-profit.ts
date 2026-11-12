@@ -4,6 +4,7 @@ import {
     type OtherFeeItem
 } from '@/features/sales/utils/daraz-fee-calculator'
 import { getDarazOtherFees } from '@/features/sales/actions/daraz-commission-actions'
+import { withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 export interface ItemProfitDetail {
     itemId?: string
@@ -158,6 +159,7 @@ export function clearOrderProfitCalculatorCache() {
     cachedFullPriceViewTime = 0
     cachedPurchasesMap.clear()
     cachedViewPurchasesMap.clear()
+    invalidateMemoryCachePrefix('profit_calc:')
 }
 
 /**
@@ -237,47 +239,144 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
     const skuList = Array.from(rawSkus)
     const productIdList = Array.from(rawProductIds)
 
-    // 2. Fetch category commissions and other fees concurrently
-    const [commissionMap, otherFees] = await Promise.all([
-        getCategoryCommissionMap(supabase),
-        getCachedOtherFees()
-    ])
+    // 2. Fetch category commissions, other fees, products catalog, combos/wholesale, and price view concurrently
+    // Using globalThis-backed withMemoryCache so caches survive HMR and coalesce concurrent requests
+    const [
+        commissionMap,
+        otherFees,
+        catalogMaps,
+        combosAndWholesale,
+        viewPurchasesMap
+    ] = await Promise.all([
+        withMemoryCache('profit_calc:commissions_map_v2', COMMISSIONS_CACHE_TTL, () => getCategoryCommissionMap(supabase)),
+        withMemoryCache('profit_calc:other_fees_v2', OTHER_FEES_CACHE_TTL, () => getCachedOtherFees()),
+        withMemoryCache('profit_calc:catalog_maps_v2', CATALOG_CACHE_TTL, async () => {
+            const allProducts: any[] = []
+            const BATCH_SIZE = 1000
+            let page = 0
 
-    // 3. Fetch matching products from inventory (using 5-minute full-catalog in-memory cache)
-    const nowTime = Date.now()
-    let skuToProductMap: Map<string, any>
-    let idToProductMap: Map<string, any>
+            while (page < 50) {
+                const { data: batch, error: prodErr } = await supabase
+                    .from('products')
+                    .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
+                    .eq('is_deleted', false)
+                    .order('id')
+                    .range(page * BATCH_SIZE, (page + 1) * BATCH_SIZE - 1)
 
-    if (
-        cachedCatalogIdMap &&
-        cachedCatalogSkuMap &&
-        (nowTime - cachedCatalogTime) < CATALOG_CACHE_TTL
-    ) {
-        idToProductMap = cachedCatalogIdMap
-        skuToProductMap = cachedCatalogSkuMap
-    } else {
-        const { data: allProducts } = await supabase
-            .from('products')
-            .select('id, product_name, category_name, category_path, marketplace_category, seller_sku1, seller_sku2, seller_sku3, seller_sku4, commission_percent, est_price')
-            .eq('is_deleted', false)
-            .limit(10000)
+                if (prodErr) {
+                    console.error('[OrderProfit] Error fetching products page:', prodErr)
+                    break
+                }
+                if (!batch || batch.length === 0) break
+                allProducts.push(...batch)
+                if (batch.length < BATCH_SIZE) break
+                page++
+            }
 
-        skuToProductMap = new Map<string, any>()
-        idToProductMap = new Map<string, any>()
+            const skuMap = new Map<string, any>()
+            const idMap = new Map<string, any>()
+            const nameMap = new Map<string, any>()
 
-        ;(allProducts || []).forEach((p: any) => {
-            idToProductMap.set(p.id, p)
-            ;[p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
-                if (sku) {
-                    skuToProductMap.set(String(sku).trim().toLowerCase(), p)
+            allProducts.forEach((p: any) => {
+                idMap.set(p.id, p)
+                if (p.product_name) {
+                    const normName = String(p.product_name).trim().toLowerCase()
+                    if (normName && !nameMap.has(normName)) {
+                        nameMap.set(normName, p)
+                    }
+                }
+                ;[p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                    if (sku) {
+                        const raw = String(sku).trim().toLowerCase()
+                        if (raw) {
+                            skuMap.set(raw, p)
+                            if (raw.includes(',')) {
+                                raw.split(',').map(s => s.trim()).filter(Boolean).forEach(part => {
+                                    if (!skuMap.has(part)) skuMap.set(part, p)
+                                })
+                            }
+                        }
+                    }
+                })
+            })
+            return { idToProductMap: idMap, skuToProductMap: skuMap, nameToProductMap: nameMap }
+        }),
+        withMemoryCache('profit_calc:combos_wholesale', COMBOS_WHOLESALE_CACHE_TTL, async () => {
+            const [combosRes, wholesaleRes] = await Promise.all([
+                supabase
+                    .from('product_combos')
+                    .select('parent_product_id, child_product_id, quantity')
+                    .limit(10000),
+                supabase
+                    .from('product_wholesale_prices')
+                    .select('product_id, wholesale_price')
+                    .limit(10000)
+            ])
+
+            const comboMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
+            combosRes.data?.forEach((c: any) => {
+                if (!comboMap.has(c.parent_product_id)) {
+                    comboMap.set(c.parent_product_id, [])
+                }
+                comboMap.get(c.parent_product_id)!.push({
+                    child_product_id: c.child_product_id,
+                    quantity: Number(c.quantity) || 1
+                })
+            })
+
+            const wholesaleMap = new Map<string, number>()
+            wholesaleRes.data?.forEach((wp: any) => {
+                const current = wholesaleMap.get(wp.product_id) || Infinity
+                const val = Number(wp.wholesale_price)
+                if (!isNaN(val) && val < current) {
+                    wholesaleMap.set(wp.product_id, val)
                 }
             })
-        })
 
-        cachedCatalogIdMap = idToProductMap
-        cachedCatalogSkuMap = skuToProductMap
-        cachedCatalogTime = nowTime
-    }
+            return { comboComponentsMap: comboMap, bestWholesaleMap: wholesaleMap }
+        }),
+        withMemoryCache('profit_calc:price_reports_view_v2', PURCHASES_CACHE_TTL, async () => {
+            // Query indexed `purchases` table directly in paginated batches instead of `inventory_price_reports_view`
+            // (which times out after >8s once products exceed 1,000 rows)
+            const vMap = new Map<string, number>()
+            const BATCH_SIZE = 1000
+            let page = 0
+
+            while (page < 50) {
+                const { data: puRows, error: puErr } = await supabase
+                    .from('purchases')
+                    .select('product_id, unit_amount, purchase_date, created_at')
+                    .gt('unit_amount', 0)
+                    .order('purchase_date', { ascending: false })
+                    .order('created_at', { ascending: false })
+                    .range(page * BATCH_SIZE, (page + 1) * BATCH_SIZE - 1)
+
+                if (puErr) {
+                    console.error('[OrderProfit] Error fetching purchases batch:', puErr)
+                    break
+                }
+                if (!puRows || puRows.length === 0) break
+
+                for (const pu of puRows) {
+                    if (pu.product_id && !vMap.has(pu.product_id)) {
+                        const price = Number(pu.unit_amount || 0)
+                        if (price > 0) {
+                            vMap.set(pu.product_id, price)
+                        }
+                    }
+                }
+
+                if (puRows.length < BATCH_SIZE) break
+                page++
+            }
+
+            return vMap
+        })
+    ])
+
+    const nowTime = Date.now()
+    const { idToProductMap, skuToProductMap, nameToProductMap } = catalogMaps as any
+    const { comboComponentsMap, bestWholesaleMap } = combosAndWholesale
 
     const matchedIdsSet = new Set<string>()
     productIdList.forEach(pid => {
@@ -288,53 +387,6 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
         if (prod) matchedIdsSet.add(prod.id)
     })
     const allMatchedIds = Array.from(matchedIdsSet)
-
-    // 4. Fetch purchasing prices, combos, and variations
-    // A. Fetch combos and wholesale prices (using in-memory cache)
-    let comboComponentsMap: Map<string, Array<{ child_product_id: string, quantity: number }>>
-    let bestWholesaleMap: Map<string, number>
-
-    if (
-        cachedCombosMap &&
-        cachedWholesaleMap &&
-        (nowTime - cachedCombosAndWholesaleTime) < COMBOS_WHOLESALE_CACHE_TTL
-    ) {
-        comboComponentsMap = cachedCombosMap
-        bestWholesaleMap = cachedWholesaleMap
-    } else {
-        const [combosRes, wholesaleRes] = await Promise.all([
-            supabase
-                .from('product_combos')
-                .select('parent_product_id, child_product_id, quantity'),
-            supabase
-                .from('product_wholesale_prices')
-                .select('product_id, wholesale_price')
-        ])
-
-        comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
-        combosRes.data?.forEach((c: any) => {
-            if (!comboComponentsMap.has(c.parent_product_id)) {
-                comboComponentsMap.set(c.parent_product_id, [])
-            }
-            comboComponentsMap.get(c.parent_product_id)!.push({
-                child_product_id: c.child_product_id,
-                quantity: Number(c.quantity) || 1
-            })
-        })
-
-        bestWholesaleMap = new Map<string, number>()
-        wholesaleRes.data?.forEach((wp: any) => {
-            const current = bestWholesaleMap.get(wp.product_id) || Infinity
-            const val = Number(wp.wholesale_price)
-            if (!isNaN(val) && val < current) {
-                bestWholesaleMap.set(wp.product_id, val)
-            }
-        })
-
-        cachedCombosMap = comboComponentsMap
-        cachedWholesaleMap = bestWholesaleMap
-        cachedCombosAndWholesaleTime = nowTime
-    }
 
     // B. Recursively collect all descendant child product IDs for combos/variations
     const allPriceQueryIds = new Set<string>(allMatchedIds)
@@ -354,26 +406,6 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
 
     const queryIdList = Array.from(allPriceQueryIds)
     const latestPurchasesMap = new Map<string, number>()
-    let viewPurchasesMap: Map<string, number>
-
-    if (cachedFullPriceViewMap && (nowTime - cachedFullPriceViewTime) < PURCHASES_CACHE_TTL) {
-        viewPurchasesMap = cachedFullPriceViewMap
-    } else {
-        const { data: viewRows } = await supabase
-            .from('inventory_price_reports_view')
-            .select('product_id, last_price, est_price')
-            .limit(10000)
-
-        viewPurchasesMap = new Map<string, number>()
-        ;(viewRows || []).forEach((vp: any) => {
-            const price = Number(vp.last_price || vp.est_price || 0)
-            if (price > 0) {
-                viewPurchasesMap.set(vp.product_id, price)
-            }
-        })
-        cachedFullPriceViewMap = viewPurchasesMap
-        cachedFullPriceViewTime = nowTime
-    }
 
     // Check which IDs still need fallback purchase lookup
     const missingIds: string[] = []
@@ -495,9 +527,13 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
 
         for (const item of orderItems) {
             const sku = (item.seller_sku || '').trim().toLowerCase()
-            const matchedProduct = skuToProductMap.get(sku) || (item.product_id ? idToProductMap.get(item.product_id) : null)
+            const itemNameKey = (item.product_name || '').trim().toLowerCase()
+            const matchedProduct =
+                skuToProductMap.get(sku) ||
+                (item.product_id ? idToProductMap.get(item.product_id) : null) ||
+                (itemNameKey ? nameToProductMap?.get(itemNameKey) : null)
 
-            const rawName = (item.product_name || matchedProduct?.product_name || '').trim().toLowerCase()
+            const rawName = (matchedProduct?.product_name || item.product_name || '').trim().toLowerCase()
             const isNameNotFound = !rawName || rawName === 'product not found' || rawName.startsWith('unknown product') || rawName.includes('product not found')
 
             // Condition 4: Product name is product not found or no product
@@ -524,7 +560,7 @@ export async function calculateOrderProfitsForOrders(orders: any[], allItems: an
                 continue
             }
 
-            const purchPrice = getPurchasingPrice(matchedProduct.id, matchedProduct)
+            const purchPrice = getPurchasingPrice(matchedProduct.id, matchedProduct) || Number(item.purchase_cost || 0)
             const commRate = resolveCategoryCommission(matchedProduct, commissionMap)
 
             // Condition 3: No purchasing amount AND no commission

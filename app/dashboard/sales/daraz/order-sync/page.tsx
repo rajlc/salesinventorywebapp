@@ -96,26 +96,36 @@ export function OrderSyncPageContent({ isEmbedded = false }: { isEmbedded?: bool
 
         const orderSyncStores = stores.filter((s: any) => s.order_sync_enabled !== false)
 
-        for (const store of orderSyncStores) {
-            try {
+        // Fetch all enabled stores concurrently while preserving store_id isolation
+        const storeResults = await Promise.allSettled(
+            orderSyncStores.map(async (store: any) => {
                 const url = `/api/daraz/orders?storeId=${store.id}${source === 'db' ? '&source=db' : ''}`
                 const response = await fetch(url)
-                if (response.ok) {
-                    const data = await response.json()
+                if (!response.ok) return []
+                const data = await response.json()
 
-                    if (data.dbSave && !data.dbSave.success && data.dbSave.error) {
-                        toast.error('Failed to save orders to database', {
-                            description: `Error: ${data.dbSave.error.message || JSON.stringify(data.dbSave.error)}`
-                        })
-                    }
-
-                    const orders = data.orders || []
-                    mergeOrders(orders)
-                    totalNewOrders += orders.length
+                if (data.dbSave && !data.dbSave.success && data.dbSave.error) {
+                    toast.error('Failed to save orders to database', {
+                        description: `Error: ${data.dbSave.error.message || JSON.stringify(data.dbSave.error)}`
+                    })
                 }
-            } catch (error) {
-                console.error(`Failed to sync store ${store.seller_account}:`, error)
+
+                return data.orders || []
+            })
+        )
+
+        const batchFetchedOrders: any[] = []
+        storeResults.forEach((res, idx) => {
+            if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+                batchFetchedOrders.push(...res.value)
+                totalNewOrders += res.value.length
+            } else if (res.status === 'rejected') {
+                console.error(`Failed to sync store ${orderSyncStores[idx]?.seller_account}:`, res.reason)
             }
+        })
+
+        if (batchFetchedOrders.length > 0) {
+            mergeOrders(batchFetchedOrders)
         }
 
         // Only update lastUpdated and localStorage for actual API syncs, not DB loads

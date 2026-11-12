@@ -233,20 +233,31 @@ export async function syncSingleDarazOrderAction(orderId: string, storeId: strin
 
         // 5. Sync items for reports
         if (items.length > 0 && savedOrder) {
-            const { data: products } = await supabase
-                .from('products')
-                .select('id, seller_sku1, seller_sku2, seller_sku3, seller_sku4, product_name, seller_account')
-                .limit(10000)
+            const products: any[] = []
+            const BATCH_SIZE = 1000
+            let prodPage = 0
+            while (prodPage < 50) {
+                const { data: batch } = await supabase
+                    .from('products')
+                    .select('id, seller_sku1, seller_account1, seller_sku2, seller_account2, seller_sku3, seller_account3, seller_sku4, seller_account4, product_name')
+                    .eq('is_deleted', false)
+                    .order('id')
+                    .range(prodPage * BATCH_SIZE, (prodPage + 1) * BATCH_SIZE - 1)
+                if (!batch || batch.length === 0) break
+                products.push(...batch)
+                if (batch.length < BATCH_SIZE) break
+                prodPage++
+            }
 
             const skuMap = new Map<string, any>()
             const nameMap = new Map<string, any>()
 
-            products?.forEach(p => {
-                if (p.seller_sku1) skuMap.set(p.seller_sku1.toLowerCase(), p)
-                if (p.seller_sku2) skuMap.set(p.seller_sku2.toLowerCase(), p)
-                if (p.seller_sku3) skuMap.set(p.seller_sku3.toLowerCase(), p)
-                if (p.seller_sku4) skuMap.set(p.seller_sku4.toLowerCase(), p)
-                if (p.product_name) nameMap.set(p.product_name.toLowerCase().trim(), p)
+            products.forEach(p => {
+                if (p.seller_sku1) skuMap.set(p.seller_sku1.trim().toLowerCase(), { ...p, seller_account: p.seller_account1 })
+                if (p.seller_sku2) skuMap.set(p.seller_sku2.trim().toLowerCase(), { ...p, seller_account: p.seller_account2 })
+                if (p.seller_sku3) skuMap.set(p.seller_sku3.trim().toLowerCase(), { ...p, seller_account: p.seller_account3 })
+                if (p.seller_sku4) skuMap.set(p.seller_sku4.trim().toLowerCase(), { ...p, seller_account: p.seller_account4 })
+                if (p.product_name) nameMap.set(p.product_name.toLowerCase().trim(), { ...p, seller_account: p.seller_account1 })
             })
 
             const itemsToSync = items.filter((item: any) => {

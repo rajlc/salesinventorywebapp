@@ -2,7 +2,7 @@
 
 import { createClient, createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server'
 import { getPendingSupplierDue } from '@/features/suppliers/actions/supplier-ledger-actions'
-import { unstable_cache } from 'next/cache'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface DashboardMetrics {
     userName: string
@@ -94,9 +94,19 @@ const getDarazCount = async (supabase: any, status: string, todayOnlyDateField?:
     return count || 0
 }
 
-// 30-second cached aggregate metrics for instant dashboard rendering
-const getCachedAggregateMetrics = unstable_cache(
-    async (todayStr: string, todayStartIso: string, todayEndIso: string, fiveDaysAgo: string, fyId?: string, fyStart?: string, fyEnd?: string) => {
+// GlobalThis-backed cached aggregate metrics for instant dashboard rendering (survives HMR & coalesces concurrent requests)
+const fetchDashboardAggregateMetrics = async (
+    todayStr: string,
+    todayStartIso: string,
+    todayEndIso: string,
+    fiveDaysAgo: string,
+    fyId?: string,
+    fyStart?: string,
+    fyEnd?: string
+) => {
+    const cacheKey = `dashboard_metrics:aggregates:${todayStr}:${fyId || 'none'}`
+
+    return withMemoryCache(cacheKey, 120_000, async () => {
         const supabase = await createAdminClient()
 
         const [
@@ -221,8 +231,8 @@ const getCachedAggregateMetrics = unstable_cache(
                 .order('date', { ascending: true })
                 .limit(20),
 
-            // Fast aggregate Pending Due Balance (10ms vs 4500ms on full ledger loop)
-            getPendingSupplierDue({ fiscalYearId: fyId }).catch(() => 0)
+            // Fast aggregate Pending Due Balance (passes pre-resolved fyEnd to skip duplicate fiscal_years query)
+            getPendingSupplierDue({ fiscalYearId: fyId, endDate: fyEnd }).catch(() => 0)
         ])
 
         const darazTotal = darazPending + darazPacked + darazReadyToShip + darazShipped + darazReturnedDelivered + darazCustomerReturnDelivered
@@ -346,17 +356,12 @@ const getCachedAggregateMetrics = unstable_cache(
                 openReminders
             }
         }
-    },
-    ['dashboard-aggregate-metrics-cache'],
-    { revalidate: 180, tags: ['dashboard-metrics'] }
-)
-
-// In-memory fast cache for Free Tier so repeated refreshes/navigations hit 0 DB queries
-let memoryDashboardCache: { key: string; expiresAt: number; data: any } | null = null
-let memoryFiscalYearCache: { expiresAt: number; fy: any } | null = null
+    })
+}
 
 export async function getDashboardMetrics(): Promise<DashboardMetrics> {
-    const supabase = await createClient()
+    const reqStart = performance.now()
+    const reqId = Math.random().toString(36).slice(2, 8)
 
     // 1. Get Nepal Today Date & Time
     const now = new Date()
@@ -376,7 +381,9 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
 
     // Fetch Current User for Greeting in 0ms via cached auth helper
     let userName = 'Admin User'
+    const authStart = performance.now()
     const user = await getAuthenticatedUser()
+    const authMs = Math.round(performance.now() - authStart)
     if (user) {
         if (user.user_metadata?.full_name) {
             userName = user.user_metadata.full_name
@@ -388,59 +395,53 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     const headerTitle = `Good ${timeGreeting}, ${userName}.`
     const headerSubtitle = `Welcome to your dashboard. Below is a summary of today's Orders, Inventory, and Purchasing activities.`
 
-    // 5 Days Ago ISO string — rounded to start of day so unstable_cache key stays stable all day!
+    // 5 Days Ago ISO string — rounded to start of day so cache key stays stable all day!
     const fiveDaysAgoDate = new Date(nepalTime.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
     const fiveDaysAgo = `${fiveDaysAgoDate}T00:00:00.000Z`
 
-    // 2. Fetch Active Fiscal Year (cached in memory for 5 minutes)
-    let activeFiscalYear = null
-    if (memoryFiscalYearCache && memoryFiscalYearCache.expiresAt > Date.now()) {
-        activeFiscalYear = memoryFiscalYearCache.fy
-    } else {
+    // 2. Fetch Active Fiscal Year (cached in globalThis memory for 5 minutes)
+    const fyStartTimer = performance.now()
+    const activeFiscalYear = await withMemoryCache('dashboard_metrics:active_fy', 5 * 60_000, async () => {
+        const supabase = await createAdminClient()
         const { data: fyData } = await supabase
             .from('fiscal_years')
             .select('id, name, start_date, end_date, is_active')
             .eq('is_active', true)
             .maybeSingle()
 
-        if (fyData) {
-            activeFiscalYear = fyData
-        } else {
-            const { data: latestFy } = await supabase
-                .from('fiscal_years')
-                .select('id, name, start_date, end_date, is_active')
-                .order('start_date', { ascending: false })
-                .limit(1)
-                .maybeSingle()
-            activeFiscalYear = latestFy || null
-        }
-        memoryFiscalYearCache = { expiresAt: Date.now() + 5 * 60 * 1000, fy: activeFiscalYear }
-    }
+        if (fyData) return fyData
+
+        const { data: latestFy } = await supabase
+            .from('fiscal_years')
+            .select('id, name, start_date, end_date, is_active')
+            .order('start_date', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+
+        return latestFy || null
+    })
+    const fyMs = Math.round(performance.now() - fyStartTimer)
 
     const fyId = activeFiscalYear?.id
     const fyStart = activeFiscalYear?.start_date
     const fyEnd = activeFiscalYear?.end_date
 
-    // 3. Fetch cached aggregate metrics (in-memory + Next.js cache)
-    const cacheKey = `${todayStr}:${fyId || 'none'}`
-    let aggregates: any = null
-    if (memoryDashboardCache && memoryDashboardCache.key === cacheKey && memoryDashboardCache.expiresAt > Date.now()) {
-        aggregates = memoryDashboardCache.data
-    } else {
-        aggregates = await getCachedAggregateMetrics(
-            todayStr,
-            todayStartIso,
-            todayEndIso,
-            fiveDaysAgo,
-            fyId,
-            fyStart,
-            fyEnd
-        )
-        memoryDashboardCache = {
-            key: cacheKey,
-            expiresAt: Date.now() + 180 * 1000,
-            data: aggregates,
-        }
+    // 3. Fetch cached aggregate metrics (globalThis-backed with in-flight deduplication)
+    const aggStartTimer = performance.now()
+    const aggregates = await fetchDashboardAggregateMetrics(
+        todayStr,
+        todayStartIso,
+        todayEndIso,
+        fiveDaysAgo,
+        fyId,
+        fyStart,
+        fyEnd
+    )
+    const aggMs = Math.round(performance.now() - aggStartTimer)
+    const totalMs = Math.round(performance.now() - reqStart)
+
+    if (process.env.NODE_ENV !== 'production' || totalMs > 500) {
+        console.info(`[Perf][dashboard][${reqId}] total=${totalMs}ms (auth=${authMs}ms, fy=${fyMs}ms, aggregates=${aggMs}ms)`)
     }
 
     return {

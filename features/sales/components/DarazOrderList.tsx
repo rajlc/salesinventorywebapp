@@ -14,6 +14,7 @@ import { AuditTrailHover } from '@/features/sales/components/AuditTrailHover'
 import { toast } from 'sonner'
 import { BarcodeScannerModal } from '@/components/BarcodeScannerModal'
 import { useDashboard } from '@/app/dashboard/context'
+import { usePermissions } from '@/lib/permissions/PermissionContext'
 
 import { PartialReturnModal } from '@/features/sales/components/PartialReturnModal'
 
@@ -83,6 +84,7 @@ export function DarazOrderList({ isEmbedded = false }: DarazOrderListProps) {
 
     // Global Header Integration
     const { setHeaderTitle } = useDashboard()
+    const { userRole: contextUserRole } = usePermissions()
 
     useEffect(() => {
         if (isEmbedded) return
@@ -109,10 +111,14 @@ export function DarazOrderList({ isEmbedded = false }: DarazOrderListProps) {
         }
     }, [searchParams])
 
-    // Fetch user role on mount
+    // Sync user role from PermissionContext (avoids redundant getUserRole() RPC on mount)
     useEffect(() => {
-        getUserRole().then(role => setUserRole(role))
-    }, [])
+        if (contextUserRole) {
+            setUserRole(contextUserRole === 'admin' ? 'admin' : 'user')
+        } else {
+            getUserRole().then(role => setUserRole(role))
+        }
+    }, [contextUserRole])
 
     // Delete handlers
     const handleDeleteClick = async (order: any) => {

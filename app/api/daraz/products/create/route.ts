@@ -103,10 +103,42 @@ export async function POST(request: NextRequest) {
             .in('id', storeIds)
 
         const storeMap = new Map(stores?.map(s => [s.id, s.seller_account]) || [])
+        const titlesPerStore: Record<string, string> = body.titlesPerStore || body.titles_per_store || {}
+
+        // Helper to generate a clean store code (e.g. "Bagmati Traders" -> "BT", "Balaju Shop" -> "BS")
+        const usedStoreCodes = new Set<string>()
+        const getStoreCode = (accountName: string, idx: number): string => {
+            const words = String(accountName || '')
+                .replace(/[^a-zA-Z0-9\s]/g, ' ')
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+            let code = ''
+            if (words.length >= 2) {
+                code = words.map(w => w[0]).join('').toUpperCase().slice(0, 4)
+            } else if (words.length === 1) {
+                code = words[0].toUpperCase().slice(0, 3)
+            } else {
+                code = `ST${idx + 1}`
+            }
+            if (usedStoreCodes.has(code)) {
+                code = `${code}${idx + 1}`
+            }
+            usedStoreCodes.add(code)
+            return code
+        }
 
         // Loop through each selected store to push
-        for (const storeId of storeIds) {
+        for (let storeIdx = 0; storeIdx < storeIds.length; storeIdx++) {
+            const storeId = storeIds[storeIdx]
             const sellerAccount = storeMap.get(storeId) || storeId
+            const storeCode = getStoreCode(sellerAccount, storeIdx)
+            const storeSpecificTitle = (
+                titlesPerStore[storeId] ||
+                titlesPerStore[sellerAccount] ||
+                Object.entries(titlesPerStore).find(([k]) => k.toLowerCase() === sellerAccount.toLowerCase())?.[1] ||
+                name
+            )
             try {
                 // 1. Get valid access token
                 const accessToken = await getValidAccessToken(storeId, 'order')
@@ -126,9 +158,16 @@ export async function POST(request: NextRequest) {
                     })
                 }
 
-                // 3. Migrate variant-specific images
+                // 3. Migrate variant-specific images & build store-unique Seller SKUs
                 const enrichedSkus: DarazSkuVariant[] = []
-                for (const sku of skus) {
+                const baseSlug = String(rawName || name || 'PROD')
+                    .replace(/[^a-zA-Z0-9]+/g, '-')
+                    .replace(/(^-|-$)/g, '')
+                    .toUpperCase()
+                    .slice(0, 12) || 'PROD'
+
+                for (let skuIdx = 0; skuIdx < skus.length; skuIdx++) {
+                    const sku = skus[skuIdx]
                     let darazSkuImages: string[] = []
                     if (sku.images && sku.images.length > 0) {
                         console.log(`[DarazCreate] Migrating variant images for ${sellerAccount}...`)
@@ -147,7 +186,7 @@ export async function POST(request: NextRequest) {
                         if (attributes.size) variantAttributes.size = attributes.size
                     }
                     // If user sent specific variant properties, add them
-                    if (sku.color_family) variantAttributes.color_family = sku.color_family
+                    if (sku.color_family || sku.colorFamily) variantAttributes.color_family = sku.color_family || sku.colorFamily
                     if (sku.size) variantAttributes.size = sku.size
 
                     const today = new Date().toISOString().split('T')[0]
@@ -162,8 +201,24 @@ export async function POST(request: NextRequest) {
                         skuPrice = skuSpecialPrice + 200
                     }
 
+                    // Ensure each store gets a distinct Seller SKU (especially when pushing to multiple stores)
+                    const rawSku = String(sku.sellerSku || '').trim()
+                    const varTag = [
+                        variantAttributes.color_family !== 'Not Specified' ? variantAttributes.color_family : '',
+                        variantAttributes.size || ''
+                    ].filter(Boolean).join('-').replace(/[^a-zA-Z0-9]+/g, '').toUpperCase().slice(0, 8)
+                    const storeRand = Math.floor(100 + Math.random() * 900)
+
+                    let storeUniqueSellerSku = rawSku
+                    if (!rawSku) {
+                        storeUniqueSellerSku = `${storeCode}-${baseSlug}${varTag ? `-${varTag}` : ''}-${storeRand}`
+                    } else if (!rawSku.toUpperCase().startsWith(`${storeCode}-`)) {
+                        // Prefix with storeCode so Bagmati Traders (BT-...) and Balaju Shop (BS-...) never share the same Seller SKU
+                        storeUniqueSellerSku = `${storeCode}-${rawSku}`
+                    }
+
                     enrichedSkus.push({
-                        sellerSku: sku.sellerSku,
+                        sellerSku: storeUniqueSellerSku,
                         price: skuPrice,
                         specialPrice: skuSpecialPrice,
                         specialPriceFrom: sku.specialPriceFrom || (skuSpecialPrice ? today : undefined),
@@ -263,7 +318,7 @@ export async function POST(request: NextRequest) {
                 const productPayload: DarazProductPayload = {
                     primaryCategory,
                     images: darazMainImages,
-                    name,
+                    name: storeSpecificTitle,
                     shortDescription: formattedShortDesc,
                     description: formattedDescription,
                     brand: brand || 'Remark', // Default Brand if empty
@@ -309,7 +364,8 @@ export async function POST(request: NextRequest) {
                     sellerAccount,
                     success: true,
                     itemId: data.data?.item_id,
-                    skus: data.data?.sku_list || []
+                    skus: data.data?.sku_list || [],
+                    pushedSellerSkus: enrichedSkus.map(s => s.sellerSku).filter(Boolean)
                 })
 
             } catch (err: any) {
@@ -341,10 +397,10 @@ export async function POST(request: NextRequest) {
 
                     // Build mapping for successful pushes (up to 4 seller accounts & SKUs)
                     const payload: Record<string, any> = {}
-                    successfulPushes.slice(0, 4).forEach((push, idx) => {
+                    successfulPushes.slice(0, 4).forEach((push: any, idx: number) => {
                         const num = idx + 1
                         const skuObj = push.skus?.[0]
-                        const skuStr = skuObj?.seller_sku || skuObj?.sellerSku || skus[0]?.sellerSku || ''
+                        const skuStr = skuObj?.seller_sku || skuObj?.sellerSku || push.pushedSellerSkus?.[0] || skus[0]?.sellerSku || ''
                         payload[`seller_account${num}`] = push.sellerAccount
                         payload[`seller_sku${num}`] = skuStr
                     })

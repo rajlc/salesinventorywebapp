@@ -27,7 +27,7 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
     }
 
     const sortedKey = [...orderIds].sort().join(',')
-    return withMemoryCache(`order_stock_info:${sortedKey}`, 30_000, async () => {
+    return withMemoryCache(`order_stock_info_v2:${sortedKey}`, 30_000, async () => {
         const supabase = await createClient()
 
         // 1. Fetch all order items for the given orders (chunked to prevent URL length overflow)
@@ -122,21 +122,43 @@ export async function getProductsStock(productIds: string[]): Promise<Record<str
 }
 
 async function getAllStockTotalsMap(): Promise<Map<string, number>> {
-    return withMemoryCache('stock_ledger:all_totals_map', 60_000, async () => {
+    return withMemoryCache('stock_ledger:all_totals_map_v2', 60_000, async () => {
         const supabase = await createClient()
-        const { data, error } = await supabase
-            .from('stock_ledger_view')
-            .select('id, total_stock')
-            .limit(10000)
-
-        if (error) {
-            console.error('Error fetching stock_ledger_view totals:', error)
-        }
-
         const map = new Map<string, number>()
-        data?.forEach((item: any) => {
+        const BATCH_SIZE = 1000
+
+        // Fetch first 2 pages (up to 2,000 products) in parallel for speed, then continue if needed
+        const [page0, page1] = await Promise.all([
+            supabase.from('stock_ledger_view').select('id, total_stock').range(0, BATCH_SIZE - 1),
+            supabase.from('stock_ledger_view').select('id, total_stock').range(BATCH_SIZE, BATCH_SIZE * 2 - 1)
+        ])
+
+        if (page0.error) console.error('Error fetching stock_ledger_view page 0:', page0.error)
+        if (page1.error) console.error('Error fetching stock_ledger_view page 1:', page1.error)
+
+        page0.data?.forEach((item: any) => {
             map.set(item.id, Number(item.total_stock) || 0)
         })
+        page1.data?.forEach((item: any) => {
+            map.set(item.id, Number(item.total_stock) || 0)
+        })
+
+        let page = 2
+        let lastLen = page1.data?.length || 0
+        while (lastLen === BATCH_SIZE && page < 20) {
+            const { data, error } = await supabase
+                .from('stock_ledger_view')
+                .select('id, total_stock')
+                .range(page * BATCH_SIZE, (page + 1) * BATCH_SIZE - 1)
+
+            if (error || !data || data.length === 0) break
+            data.forEach((item: any) => {
+                map.set(item.id, Number(item.total_stock) || 0)
+            })
+            lastLen = data.length
+            page++
+        }
+
         return map
     })
 }

@@ -164,33 +164,43 @@ export async function createDarazOrder(data: CreateDarazOrderData) {
 
 // Get Daraz orders with filters (for Sales Entry page)
 export async function getDarazOrders(params: GetDarazOrdersParams) {
-    const cacheKey = `daraz_orders:entry:${JSON.stringify(params || {})}`
+    const cacheKey = `daraz_orders:entry_v2:${JSON.stringify(params || {})}`
     return withMemoryCache(cacheKey, 30_000, async () => {
+        const t0 = Date.now()
         const supabase = await createClient()
         const { page = 1, limit = 50, status, todayOnly = false, fiscalYearId, sellerAccount, unprintedOnly } = params
 
-        // Strategy: Use the VIEW which already has totals and user joins
+        const hasSpecificSeller = Boolean(sellerAccount && sellerAccount !== 'all')
+        const itemJoinSelect = hasSpecificSeller
+            ? 'daraz_order_items!inner(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost)'
+            : 'daraz_order_items(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost)'
+
+        // Query indexed daraz_orders table directly with embedded items & store (eliminates 6 correlated subqueries/row in daraz_orders_with_totals view)
         let query = supabase
-            .from('daraz_orders_with_totals')
-            .select('*', { count: 'exact' })
+            .from('daraz_orders')
+            .select(`*, online_stores(seller_account), ${itemJoinSelect}`, { count: 'exact' })
             .or('deleted.is.null,deleted.eq.false')
 
-        const { disabledAccounts } = await getDisabledOrderSyncStores(supabase)
-        if (disabledAccounts.length > 0) {
-            for (const acc of disabledAccounts) {
-                query = query.neq('seller_account', acc)
-            }
-        }
+        const [{ disabledAccounts }, fyRes] = await Promise.all([
+            getDisabledOrderSyncStores(supabase),
+            fiscalYearId
+                ? withMemoryCache(`fiscal_year:dates:${fiscalYearId}`, 300_000, async () => {
+                    const { data: fy } = await supabase.from('fiscal_years').select('start_date, end_date').eq('id', fiscalYearId).single()
+                    return fy
+                })
+                : Promise.resolve(null)
+        ])
 
-        // Seller Account Filter
-        if (sellerAccount && sellerAccount !== 'all') {
-            query = query.eq('seller_account', sellerAccount)
+        const disabledSet = new Set(disabledAccounts)
+
+        // Seller Account Filter pushed down via !inner join on daraz_order_items
+        if (hasSpecificSeller && sellerAccount) {
+            query = query.eq('daraz_order_items.seller_account', sellerAccount)
         }
 
         // Fiscal Year Filter
-        if (fiscalYearId) {
-            const { data: fy } = await supabase.from('fiscal_years').select('start_date, end_date').eq('id', fiscalYearId).single()
-            if (fy) query = query.gte('order_date', fy.start_date).lte('order_date', fy.end_date)
+        if (fyRes) {
+            query = query.gte('order_date', fyRes.start_date).lte('order_date', fyRes.end_date)
         }
 
         // Date/Status Logic
@@ -217,44 +227,34 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
 
         if (error) throw error
 
-        // Transform and Aggregate
-        const orderIds = data?.map((o: any) => o.id) || []
         const allItems: any[] = []
-        if (orderIds.length > 0) {
-            const CHUNK_SIZE = 150
-            const chunks: string[][] = []
-            for (let i = 0; i < orderIds.length; i += CHUNK_SIZE) {
-                chunks.push(orderIds.slice(i, i + CHUNK_SIZE))
-            }
+        const rawOrders: any[] = []
 
-            const chunkResults = await Promise.all(
-                chunks.map(chunk =>
-                    supabase
-                        .from('daraz_order_items')
-                        .select('id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount')
-                        .in('order_id', chunk)
-                )
-            )
+        for (const order of data || []) {
+            const rawJoinedItems = Array.isArray((order as any).daraz_order_items)
+                ? [...(order as any).daraz_order_items].sort((a: any, b: any) => (Number(a.item_sequence) || 0) - (Number(b.item_sequence) || 0))
+                : []
 
-            chunkResults.forEach(res => {
-                if (res.data) allItems.push(...res.data)
-            })
-        }
+            const storeSellerAccount = (order as any).online_stores?.seller_account || null
 
-        const itemsByOrderId = new Map<string, any[]>()
-        for (const item of allItems) {
-            if (!itemsByOrderId.has(item.order_id)) {
-                itemsByOrderId.set(item.order_id, [])
-            }
-            itemsByOrderId.get(item.order_id)!.push(item)
-        }
-
-        const rawOrders = data?.map((order: any) => {
-            let orderItems = itemsByOrderId.get(order.id) || []
+            let orderItems = rawJoinedItems.map((i: any) => ({
+                id: i.id,
+                order_id: i.order_id || order.id,
+                item_status: i.item_status,
+                quantity: Number(i.quantity) || 1,
+                product_id: i.product_id,
+                product_name: i.product_name,
+                seller_sku: i.seller_sku,
+                amount: Number(i.amount) || 0,
+                total_amount: Number(i.total_amount) || ((Number(i.quantity) || 1) * (Number(i.amount) || 0)),
+                seller_account: i.seller_account || storeSellerAccount,
+                item_sequence: i.item_sequence,
+                purchase_cost: i.purchase_cost
+            }))
 
             // Fallback: If no rows in daraz_order_items table yet, normalize order.items_detail from Daraz sync
             if (orderItems.length === 0 && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
-                orderItems = order.items_detail.map((i: any) => ({
+                orderItems = order.items_detail.map((i: any, idx: number) => ({
                     id: String(i.order_item_id || i.id || ''),
                     order_id: order.id,
                     item_status: i.status || order.order_status,
@@ -263,29 +263,60 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
                     product_name: i.name,
                     seller_sku: i.sku || i.shop_sku,
                     amount: Number(i.paid_price || i.item_price || 0),
-                    total_amount: Number(i.paid_price || i.item_price || 0)
+                    total_amount: Number(i.paid_price || i.item_price || 0),
+                    seller_account: i.seller_account || storeSellerAccount,
+                    item_sequence: idx + 1,
+                    purchase_cost: null
                 }))
-                allItems.push(...orderItems)
             }
 
+            const resolvedSellerAccount = orderItems[0]?.seller_account || storeSellerAccount || null
+            if (disabledSet.size > 0 && resolvedSellerAccount && disabledSet.has(resolvedSellerAccount)) {
+                continue
+            }
+
+            allItems.push(...orderItems)
+
+            let totalQuantity = 0
+            let grandTotal = 0
+            let totalRevenue = 0
             const itemStatuses: string[] = []
-            orderItems.forEach((i: any) => {
+
+            for (const i of orderItems) {
+                const qty = Number(i.quantity) || 1
+                const amt = Number(i.amount) || 0
+                const totAmt = Number(i.total_amount) || (qty * amt)
+                totalQuantity += qty
+                grandTotal += qty * amt
+                totalRevenue += totAmt
+
                 const st = i.item_status || order.order_status
-                const qty = i.quantity || 1
                 for (let k = 0; k < qty; k++) {
                     itemStatuses.push(st)
                 }
-            })
+            }
 
-            return {
-                ...order,
+            const { daraz_order_items: _omitItems, online_stores: _omitStores, ...cleanOrder } = order as any
+
+            rawOrders.push({
+                ...cleanOrder,
+                total_quantity: totalQuantity,
+                grand_total: grandTotal || Number(order.price) || 0,
+                item_count: orderItems.length,
+                first_product_name: orderItems[0]?.product_name || null,
+                seller_account: resolvedSellerAccount,
+                total_revenue: totalRevenue || grandTotal || Number(order.price) || 0,
                 items: orderItems,
                 item_statuses: itemStatuses
-            }
-        }) || []
+            })
+        }
 
         // Calculate exact dynamic profit, receivable or invalid status based on Daraz fees and purchasing prices
         const orders = await calculateOrderProfitsForOrders(rawOrders, allItems)
+
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`[Perf][getDarazOrders] Fetched ${orders.length} orders in ${Date.now() - t0}ms`)
+        }
 
         return {
             orders,
@@ -1286,100 +1317,116 @@ export async function getSalesBySellerAccount(fiscalYearId: string) {
 
 // Get stats for status summary
 export async function getDarazOrderStats(sellerAccount?: string, restrictShippedToToday?: boolean) {
-    const supabase = await createClient()
+    const cacheKey = `daraz_orders:stats:${sellerAccount || 'all'}:${Boolean(restrictShippedToToday)}`
+    return withMemoryCache(cacheKey, 30_000, async () => {
+        const supabase = await createClient()
 
-    try {
-        const today = new Date().toISOString().split('T')[0]
-        const todayStart = `${today}T00:00:00.000Z`
+        try {
+            const today = new Date().toISOString().split('T')[0]
+            const todayStart = `${today}T00:00:00.000Z`
+            const hasSpecificSeller = Boolean(sellerAccount && sellerAccount !== 'all')
+            const selectCols = hasSpecificSeller
+                ? 'order_status, price, online_stores(seller_account), daraz_order_items!inner(quantity, amount, seller_account)'
+                : 'order_status, price, online_stores(seller_account), daraz_order_items(quantity, amount, seller_account)'
 
-        // 1. Query active orders: Pending, Packed, Ready to Ship
-        let activeQuery = supabase
-            .from('daraz_orders_with_totals')
-            .select('order_status, grand_total, seller_account')
-            .or('deleted.is.null,deleted.eq.false')
-            .in('order_status', ['Pending', 'Packed', 'Ready to Ship'])
+            // 1. Query active orders: Pending, Packed, Ready to Ship directly on indexed daraz_orders
+            let activeQuery = supabase
+                .from('daraz_orders')
+                .select(selectCols)
+                .or('deleted.is.null,deleted.eq.false')
+                .in('order_status', ['Pending', 'Packed', 'Ready to Ship'])
 
-        if (sellerAccount && sellerAccount !== 'all') {
-            activeQuery = activeQuery.eq('seller_account', sellerAccount)
-        }
-
-        // 2. Query shipped orders (restricted to today if flag set)
-        let shippedQuery = supabase
-            .from('daraz_orders_with_totals')
-            .select('order_status, grand_total, seller_account')
-            .or('deleted.is.null,deleted.eq.false')
-            .eq('order_status', 'Shipped')
-
-        if (sellerAccount && sellerAccount !== 'all') {
-            shippedQuery = shippedQuery.eq('seller_account', sellerAccount)
-        }
-
-        if (restrictShippedToToday) {
-            shippedQuery = shippedQuery.gte('shipped_at', todayStart)
-        }
-
-        const [activeRes, shippedRes, { disabledAccounts }] = await Promise.all([
-            activeQuery,
-            shippedQuery,
-            getDisabledOrderSyncStores(supabase)
-        ])
-        const disabledSet = new Set(disabledAccounts)
-
-        const activeRows = (activeRes.data || []).filter((r: any) => !disabledSet.has(r.seller_account))
-        const shippedRows = (shippedRes.data || []).filter((r: any) => !disabledSet.has(r.seller_account))
-
-        let pendingCount = 0
-        let pendingAmount = 0
-        let packedCount = 0
-        let packedAmount = 0
-        let readyCount = 0
-        let readyAmount = 0
-
-        activeRows.forEach((r: any) => {
-            const st = r.order_status?.toLowerCase().trim()
-            const amt = Number(r.grand_total) || 0
-            if (st === 'pending') {
-                pendingCount++
-                pendingAmount += amt
-            } else if (st === 'packed') {
-                packedCount++
-                packedAmount += amt
-            } else if (st === 'ready to ship') {
-                readyCount++
-                readyAmount += amt
+            if (hasSpecificSeller && sellerAccount) {
+                activeQuery = activeQuery.eq('daraz_order_items.seller_account', sellerAccount)
             }
-        })
 
-        let shippedCount = 0
-        let shippedAmount = 0
-        shippedRows.forEach((r: any) => {
-            shippedCount++
-            shippedAmount += Number(r.grand_total) || 0
-        })
+            // 2. Query shipped orders (restricted to today if flag set)
+            let shippedQuery = supabase
+                .from('daraz_orders')
+                .select(selectCols)
+                .or('deleted.is.null,deleted.eq.false')
+                .eq('order_status', 'Shipped')
 
-        return {
-            pending: pendingCount,
-            pendingAmount: Math.round(pendingAmount),
-            packed: packedCount,
-            packedAmount: Math.round(packedAmount),
-            readyToShip: readyCount,
-            readyToShipAmount: Math.round(readyAmount),
-            shipped: shippedCount,
-            shippedAmount: Math.round(shippedAmount)
+            if (hasSpecificSeller && sellerAccount) {
+                shippedQuery = shippedQuery.eq('daraz_order_items.seller_account', sellerAccount)
+            }
+
+            if (restrictShippedToToday) {
+                shippedQuery = shippedQuery.gte('shipped_at', todayStart)
+            }
+
+            const [activeRes, shippedRes, { disabledAccounts }] = await Promise.all([
+                activeQuery,
+                shippedQuery,
+                getDisabledOrderSyncStores(supabase)
+            ])
+            const disabledSet = new Set(disabledAccounts)
+
+            const computeRowMeta = (r: any) => {
+                const items = Array.isArray(r.daraz_order_items) ? r.daraz_order_items : []
+                const seller = items[0]?.seller_account || r.online_stores?.seller_account || null
+                const grandTotal = items.length > 0
+                    ? items.reduce((sum: number, i: any) => sum + ((Number(i.quantity) || 1) * (Number(i.amount) || 0)), 0)
+                    : (Number(r.price) || 0)
+                return { seller, grandTotal }
+            }
+
+            let pendingCount = 0
+            let pendingAmount = 0
+            let packedCount = 0
+            let packedAmount = 0
+            let readyCount = 0
+            let readyAmount = 0
+
+            ;(activeRes.data || []).forEach((r: any) => {
+                const { seller, grandTotal } = computeRowMeta(r)
+                if (seller && disabledSet.has(seller)) return
+                const st = r.order_status?.toLowerCase().trim()
+                if (st === 'pending') {
+                    pendingCount++
+                    pendingAmount += grandTotal
+                } else if (st === 'packed') {
+                    packedCount++
+                    packedAmount += grandTotal
+                } else if (st === 'ready to ship') {
+                    readyCount++
+                    readyAmount += grandTotal
+                }
+            })
+
+            let shippedCount = 0
+            let shippedAmount = 0
+            ;(shippedRes.data || []).forEach((r: any) => {
+                const { seller, grandTotal } = computeRowMeta(r)
+                if (seller && disabledSet.has(seller)) return
+                shippedCount++
+                shippedAmount += grandTotal
+            })
+
+            return {
+                pending: pendingCount,
+                pendingAmount: Math.round(pendingAmount),
+                packed: packedCount,
+                packedAmount: Math.round(packedAmount),
+                readyToShip: readyCount,
+                readyToShipAmount: Math.round(readyAmount),
+                shipped: shippedCount,
+                shippedAmount: Math.round(shippedAmount)
+            }
+        } catch (error) {
+            console.error('Error fetching stats:', error)
+            return {
+                pending: 0,
+                pendingAmount: 0,
+                packed: 0,
+                packedAmount: 0,
+                readyToShip: 0,
+                readyToShipAmount: 0,
+                shipped: 0,
+                shippedAmount: 0
+            }
         }
-    } catch (error) {
-        console.error('Error fetching stats:', error)
-        return {
-            pending: 0,
-            pendingAmount: 0,
-            packed: 0,
-            packedAmount: 0,
-            readyToShip: 0,
-            readyToShipAmount: 0,
-            shipped: 0,
-            shippedAmount: 0
-        }
-    }
+    })
 }
 
 export interface DailySalesRow {
@@ -2069,18 +2116,28 @@ export async function syncDarazOrderProducts(orderId: string) {
 }
 
 export async function getUniqueSellerAccounts() {
-    const supabase = await createClient()
-    const [{ data }, { disabledAccounts }] = await Promise.all([
-        supabase
-            .from('daraz_order_items')
-            .select('seller_account')
-            .not('seller_account', 'is', null),
-        getDisabledOrderSyncStores(supabase)
-    ])
-    const disabledSet = new Set(disabledAccounts)
-    // Deduplicate in JS — cheaper than a view scan
-    const accounts = [...new Set((data || []).map(d => d.seller_account).filter(a => a && !disabledSet.has(a)))] as string[]
-    return accounts.sort()
+    return withMemoryCache('daraz_orders:unique_seller_accounts', 120_000, async () => {
+        const supabase = await createClient()
+        const [storesRes, itemsRes, { disabledAccounts }] = await Promise.all([
+            supabase
+                .from('online_stores')
+                .select('seller_account')
+                .not('seller_account', 'is', null),
+            supabase
+                .from('daraz_order_items')
+                .select('seller_account')
+                .not('seller_account', 'is', null)
+                .limit(2000),
+            getDisabledOrderSyncStores(supabase)
+        ])
+        const disabledSet = new Set(disabledAccounts)
+        const combined = [
+            ...(storesRes.data || []).map((s: any) => s.seller_account),
+            ...(itemsRes.data || []).map((d: any) => d.seller_account),
+        ]
+        const accounts = [...new Set(combined.filter(a => a && !disabledSet.has(a)))] as string[]
+        return accounts.sort()
+    })
 }
 
 export async function getOrderStatusSummary() {

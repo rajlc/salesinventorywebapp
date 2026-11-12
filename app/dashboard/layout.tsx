@@ -137,8 +137,16 @@ function DashboardLayout({
         }
     }, [pathname, isMounted, isPermissionsLoading, userRole, hasPermission, router])
 
+    const dashboardContextValue = React.useMemo(() => ({
+        isMobileMenuOpen,
+        setIsMobileMenuOpen,
+        isCollapsed,
+        setHeaderTitle,
+        setHeaderAction
+    }), [isMobileMenuOpen, isCollapsed])
+
     return (
-        <DashboardContext.Provider value={{ isMobileMenuOpen, setIsMobileMenuOpen, isCollapsed, setHeaderTitle, setHeaderAction }}>
+        <DashboardContext.Provider value={dashboardContextValue}>
             <div className="flex h-screen bg-slate-50 dark:bg-zinc-950 relative">
                 {/* Mobile Header */}
                 {pathname !== '/dashboard/suppliers/dashboard' &&

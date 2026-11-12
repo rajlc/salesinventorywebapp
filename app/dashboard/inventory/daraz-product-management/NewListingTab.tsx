@@ -5,7 +5,7 @@ import {
     Sparkles, Copy, Check, Pencil, X, Trash2, Plus, Upload, Loader2, Info, CheckCircle2,
     RefreshCw, ChevronDown, ArrowLeft, Edit3, Send, Calendar, MoreVertical, Store,
     AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Image as ImageIcon, Maximize2,
-    Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock, Download
+    Search, Zap, Camera, Link as LinkIcon, ExternalLink, FileText, Clock, Download, Eye, ShieldCheck
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import { calculateDarazFeeBreakdown, DEFAULT_OTHER_FEES, type OtherFeeItem } from '@/features/sales/utils/daraz-fee-calculator'
@@ -149,6 +149,104 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [isAiStudioOpen, setIsAiStudioOpen] = useState(false)
     const [aiStudioContext, setAiStudioContext] = useState<'draft-row' | 'gallery-modal' | 'edit-form'>('draft-row')
 
+    // ── View Details Modal & QC Pass Verification State ────────────────────
+    const [viewModalDraft, setViewModalDraft] = useState<DraftListing | null>(null)
+    const [viewActiveImageIdx, setViewActiveImageIdx] = useState<number>(0)
+    const [qcPassSavingId, setQcPassSavingId] = useState<string | null>(null)
+
+    const isQcPassed = useCallback((draft?: DraftListing | null): boolean => {
+        return Boolean(draft?.attributes?.qc_passed)
+    }, [])
+
+    const canViewListing = useCallback((draft?: DraftListing | null): boolean => {
+        if (!draft) return false
+        if (draft.status === 'pushed' || draft.status === 'pushing' || draft.draft_type === 'pushed') return false
+        const hasDesc = Boolean(draft.description && draft.description.replace(/<[^>]+>/g, '').trim().length > 0)
+        const hasHighlights = Boolean(Array.isArray(draft.highlights) && draft.highlights.some(h => h && h.trim().length > 0))
+        const hasCategory = Boolean(draft.category_id || (draft.category_path && draft.category_path.trim().length > 0))
+        return hasDesc && hasHighlights && hasCategory
+    }, [])
+
+    const formatPlainTextFromHtml = useCallback((html?: string | null): string => {
+        if (!html) return ''
+        return html
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/p>/gi, '\n\n')
+            .replace(/<\/div>/gi, '\n')
+            .replace(/<\/h[1-6]>/gi, '\n\n')
+            .replace(/<li[^>]*>/gi, '• ')
+            .replace(/<\/li>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;/gi, "'")
+            .replace(/\n{3,}/g, '\n\n')
+            .trim()
+    }, [])
+
+    const extractEmbeddedImagesFromHtml = useCallback((html?: string | null): string[] => {
+        if (!html) return []
+        const urls: string[] = []
+        const regex = /<img[^>]+src=["']([^"']+)["']/gi
+        let match: RegExpExecArray | null
+        while ((match = regex.exec(html)) !== null) {
+            if (match[1] && !urls.includes(match[1])) {
+                urls.push(match[1])
+            }
+        }
+        return urls
+    }, [])
+
+    const handleToggleQcPass = async (draft: DraftListing, passState: boolean = true) => {
+        setQcPassSavingId(draft.id)
+        try {
+            const nextAttributes = {
+                ...(draft.attributes || {}),
+                qc_passed: passState,
+                qc_passed_at: passState ? new Date().toISOString() : null
+            }
+            const nextStatus = passState && (draft.status === 'draft' || draft.status === 'failed')
+                ? 'generated'
+                : draft.status
+
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: draft.id,
+                    status: nextStatus,
+                    attributes: nextAttributes
+                })
+            })
+
+            const json = await res.json().catch(() => null)
+            if (!res.ok || !json?.success) {
+                throw new Error(json?.error || 'Failed to update QC Pass status')
+            }
+
+            setDrafts(prev => prev.map(d => d.id === draft.id ? {
+                ...d,
+                status: nextStatus,
+                attributes: nextAttributes
+            } : d))
+
+            if (viewModalDraft?.id === draft.id) {
+                if (passState) {
+                    setViewModalDraft(null)
+                } else {
+                    setViewModalDraft(prev => prev ? { ...prev, status: nextStatus, attributes: nextAttributes } : null)
+                }
+            }
+        } catch (err: any) {
+            alert('Failed to update QC Pass: ' + (err.message || 'Unknown error'))
+        } finally {
+            setQcPassSavingId(null)
+        }
+    }
+
     // ── Helper: Draft Classification ───────────────────────────────────────
     const getDraftClassification = useCallback((draft: DraftListing): 'image_only' | 'link_only' | 'name_only' | 'pending' | 'ready' | 'pushed' => {
         if (draft.status === 'pushed') return 'pushed'
@@ -202,15 +300,17 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             link_only: 0,
             pending: 0,
             ready: 0,
+            qc_pass: 0,
             pushed: 0
         }
 
         storeFiltered.forEach(d => {
             const type = getDraftClassification(d)
-            if (type === 'image_only') counts.image_only++
+            if (type === 'pushed' || d.status === 'pushed') counts.pushed++
+            else if (Boolean(d.attributes?.qc_passed)) counts.qc_pass++
+            else if (type === 'image_only') counts.image_only++
             else if (type === 'link_only') counts.link_only++
             else if (type === 'ready' || d.status === 'generated') counts.ready++
-            else if (type === 'pushed' || d.status === 'pushed') counts.pushed++
             else counts.pending++
         })
 
@@ -223,6 +323,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         { label: 'Link Only', value: 'link_only', count: tabCounts.link_only },
         { label: 'Pending', value: 'pending', count: tabCounts.pending },
         { label: 'Ready', value: 'ready', count: tabCounts.ready },
+        { label: 'QC Pass', value: 'qc_pass', count: tabCounts.qc_pass },
         { label: 'Pushed', value: 'pushed', count: tabCounts.pushed },
     ]
 
@@ -416,6 +517,73 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             .catch(() => {})
     }, [])
 
+    // Batch load commissions for drafts to calculate profit in real time
+    const loadCommissionsForDrafts = useCallback((items: DraftListing[]) => {
+        const paths = Array.from(new Set(items.map(d => d.category_path).filter(Boolean) as string[]))
+        if (paths.length > 0) {
+            fetch('/api/daraz/profit/category-commission', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths })
+            })
+            .then(r => r.json())
+            .then(json => {
+                if (json.success) {
+                    if (json.commissions) setCategoryCommissions(prev => ({ ...prev, ...json.commissions }))
+                    if (json.otherFees) setActiveOtherFees(json.otherFees)
+                }
+            })
+            .catch(() => {})
+        }
+    }, [])
+
+    // ── Real-time Auto-Refresh when AI Connector (Claude / ChatGPT / Gemini) updates drafts ──
+    useEffect(() => {
+        const channel = supabase
+            .channel('daraz-drafts-live-sync')
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'daraz_draft_listings' },
+                (payload) => {
+                    if (payload.eventType === 'DELETE' && payload.old?.id) {
+                        setDrafts(prev => prev.filter(d => d.id !== payload.old.id))
+                        return
+                    }
+                    // For INSERT or UPDATE from external AI connector, refresh draft list silently
+                    fetch('/api/daraz/drafts', { cache: 'no-store' })
+                        .then(r => r.ok ? r.json() : null)
+                        .then(json => {
+                            if (json?.success && Array.isArray(json.data)) {
+                                setDrafts(json.data)
+                                loadCommissionsForDrafts(json.data)
+                            }
+                        })
+                        .catch(() => {})
+                }
+            )
+            .subscribe()
+
+        const handleWindowFocus = () => {
+            if (viewMode === 'list') {
+                fetch('/api/daraz/drafts', { cache: 'no-store' })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(json => {
+                        if (json?.success && Array.isArray(json.data)) {
+                            setDrafts(json.data)
+                            loadCommissionsForDrafts(json.data)
+                        }
+                    })
+                    .catch(() => {})
+            }
+        }
+        window.addEventListener('focus', handleWindowFocus)
+
+        return () => {
+            supabase.removeChannel(channel)
+            window.removeEventListener('focus', handleWindowFocus)
+        }
+    }, [viewMode, loadCommissionsForDrafts])
+
     const fetchSuppliers = async () => {
         try {
             const { data, error } = await supabase
@@ -442,26 +610,6 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             console.error('Failed to load stores:', err)
         }
     }
-
-    // Batch load commissions for drafts to calculate profit in real time
-    const loadCommissionsForDrafts = useCallback((items: DraftListing[]) => {
-        const paths = Array.from(new Set(items.map(d => d.category_path).filter(Boolean) as string[]))
-        if (paths.length > 0) {
-            fetch('/api/daraz/profit/category-commission', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paths })
-            })
-            .then(r => r.json())
-            .then(json => {
-                if (json.success) {
-                    if (json.commissions) setCategoryCommissions(prev => ({ ...prev, ...json.commissions }))
-                    if (json.otherFees) setActiveOtherFees(json.otherFees)
-                }
-            })
-            .catch(() => {})
-        }
-    }, [])
 
     const fetchDrafts = async (retryArg?: any) => {
         const retryCount = typeof retryArg === 'number' ? retryArg : 0
@@ -1146,6 +1294,151 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
     }
 
+    // ── Clipboard Copy & Paste Image Support (Ctrl+V & 1-Click Paste Buttons) ──
+    const [pastingDraftId, setPastingDraftId] = useState<string | null>(null)
+    const [pastedSuccessId, setPastedSuccessId] = useState<string | null>(null)
+    const [hoveredDraftId, setHoveredDraftId] = useState<string | null>(null)
+
+    const extractImageFilesFromClipboardApi = async (): Promise<File[]> => {
+        if (!navigator.clipboard || !navigator.clipboard.read) {
+            throw new Error('Clipboard read API not available. Press Ctrl+V directly instead.')
+        }
+        const clipboardItems = await navigator.clipboard.read()
+        const files: File[] = []
+        for (const item of clipboardItems) {
+            const imgType = item.types.find(t => t.startsWith('image/'))
+            if (imgType) {
+                const blob = await item.getType(imgType)
+                const ext = imgType.split('/')[1] || 'png'
+                files.push(new File([blob], `pasted-image-${Date.now()}.${ext}`, { type: imgType }))
+            }
+        }
+        return files
+    }
+
+    const handlePasteToDraftRow = async (draft: DraftListing, replaceOld: boolean = false, explicitFiles?: File[]) => {
+        setPastingDraftId(draft.id)
+        try {
+            const files = explicitFiles && explicitFiles.length > 0
+                ? explicitFiles
+                : await extractImageFilesFromClipboardApi()
+
+            if (files.length === 0) {
+                alert('No image found in clipboard! Right-click an image in Gemini or ChatGPT and click "Copy image" first.')
+                return
+            }
+
+            const urls = await Promise.all(files.slice(0, 8).map(f => uploadImageToSupabase(f)))
+            const existing = Array.isArray(draft.images) ? draft.images : []
+            // If replaceOld is true, or if the draft only has 1 raw mobile_capture image, replace it or put new image first as Primary Cover
+            const updatedImages = replaceOld
+                ? urls.slice(0, 8)
+                : [...urls, ...existing].slice(0, 8)
+
+            const res = await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: draft.id, images: updatedImages })
+            })
+            if (!res.ok) throw new Error('Failed to save pasted image to draft')
+
+            setDrafts(prev => prev.map(d => d.id === draft.id ? { ...d, images: updatedImages } : d))
+            setPastedSuccessId(draft.id)
+            setTimeout(() => setPastedSuccessId(null), 2200)
+        } catch (err: any) {
+            alert('Paste image failed: ' + (err.message || 'Copy an image to your clipboard first.'))
+        } finally {
+            setPastingDraftId(null)
+        }
+    }
+
+    const handlePasteToImageModal = async (replaceOld: boolean = false, explicitFiles?: File[]) => {
+        if (!imageModalDraft) return
+        setImageModalUploading(true)
+        try {
+            const files = explicitFiles && explicitFiles.length > 0
+                ? explicitFiles
+                : await extractImageFilesFromClipboardApi()
+
+            if (files.length === 0) {
+                alert('No image found in clipboard! Right-click an image in Gemini or ChatGPT and click "Copy image" first.')
+                return
+            }
+
+            const urls = await Promise.all(files.slice(0, 8).map(f => uploadImageToSupabase(f)))
+            setModalImages(prev => replaceOld ? urls.slice(0, 8) : [...urls, ...prev].slice(0, 8))
+        } catch (err: any) {
+            alert('Paste image failed: ' + (err.message || 'Copy an image to your clipboard first.'))
+        } finally {
+            setImageModalUploading(false)
+        }
+    }
+
+    const handlePasteToEditForm = async (replaceOld: boolean = false, explicitFiles?: File[]) => {
+        setUploadingImage(true)
+        try {
+            const files = explicitFiles && explicitFiles.length > 0
+                ? explicitFiles
+                : await extractImageFilesFromClipboardApi()
+
+            if (files.length === 0) {
+                alert('No image found in clipboard! Right-click an image in Gemini or ChatGPT and click "Copy image" first.')
+                return
+            }
+
+            const urls = await Promise.all(files.slice(0, 8).map(f => uploadImageToSupabase(f)))
+            const updated = replaceOld ? urls.slice(0, 8) : [...urls, ...images].slice(0, 8)
+            setImages(updated)
+            if (editingDraftId) {
+                await fetch('/api/daraz/drafts', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: editingDraftId, images: updated })
+                })
+                setDrafts(prev => prev.map(d => d.id === editingDraftId ? { ...d, images: updated } : d))
+            }
+        } catch (err: any) {
+            alert('Paste image failed: ' + (err.message || 'Copy an image to your clipboard first.'))
+        } finally {
+            setUploadingImage(false)
+        }
+    }
+
+    // Global Ctrl+V listener for pasting copied images anywhere in NewListingTab
+    useEffect(() => {
+        const handleGlobalPaste = (e: ClipboardEvent) => {
+            const items = e.clipboardData?.items
+            if (!items) return
+
+            const imageFiles: File[] = []
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i]
+                if (item.type.startsWith('image/')) {
+                    const file = item.getAsFile()
+                    if (file) imageFiles.push(file)
+                }
+            }
+
+            if (imageFiles.length === 0) return // Normal text paste — let browser handle it
+
+            e.preventDefault()
+
+            if (imageModalDraft) {
+                handlePasteToImageModal(false, imageFiles)
+            } else if (viewMode === 'add-single' || viewMode === 'edit-single') {
+                handlePasteToEditForm(false, imageFiles)
+            } else if (viewMode === 'list' && hoveredDraftId) {
+                const targetDraft = drafts.find(d => d.id === hoveredDraftId)
+                if (targetDraft) {
+                    handlePasteToDraftRow(targetDraft, false, imageFiles)
+                }
+            }
+        }
+
+        window.addEventListener('paste', handleGlobalPaste)
+        return () => window.removeEventListener('paste', handleGlobalPaste)
+    }, [imageModalDraft, viewMode, hoveredDraftId, drafts, images, editingDraftId])
+
     // ── Auto-save draft on raw name blur ─────────────────────────────────────
     const handleRawNameBlur = async () => {
         if (!rawName.trim() || editingDraftId) return
@@ -1303,6 +1596,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 .map(h => h.replace(/^[•\-\*\s]+/, '').trim())
                 .filter(Boolean)
 
+            const existingDraftObj = editingDraftId ? drafts.find(d => d.id === editingDraftId) : null
+            const isReadyNow = Boolean(categoryId && description?.trim() && cleanHighlights.length > 0 && (images?.length || 0) > 0)
+            const nextStatus = existingDraftObj?.status === 'pushed'
+                ? 'pushed'
+                : (isReadyNow ? 'generated' : (existingDraftObj?.status || 'draft'))
+
             const draftPayload: any = {
                 raw_name: effectiveRawName,
                 product_link: singleProductLink.trim() || undefined,
@@ -1314,6 +1613,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 category_path: categoryPath || '',
                 images: images || [],
                 attributes: {
+                    ...(existingDraftObj?.attributes || {}),
                     ...(dynamicAttributes || {}),
                     ...(hasVariants ? {
                         has_variants: true,
@@ -1343,7 +1643,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 wholesale_price: wholesalePrice || null,
                 campaign_price: campaignPrice || null,
                 mrp_price: mrpPrice || null,
-                status: 'draft'
+                status: nextStatus
             }
 
             if (editingDraftId) {
@@ -1368,8 +1668,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             }
 
             setDraftSavedSuccess(true)
-            setTimeout(() => setDraftSavedSuccess(false), 3000)
-            fetchDrafts()
+            await fetchDrafts()
+            setTimeout(() => {
+                handleBackToList()
+            }, 600)
+            setTimeout(() => setDraftSavedSuccess(false), 3200)
         } catch (err: any) {
             console.error('Save as draft failed:', err)
             alert('Failed to save draft: ' + err.message)
@@ -2143,19 +2446,36 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     campaign_price: draft.campaign_price || (draft as any).attributes?.campaign_price || undefined,
                     mrp_price: draft.mrp_price || (draft as any).attributes?.mrp_price || mrpPrice || undefined,
                     mrpPrice: draft.mrp_price || (draft as any).attributes?.mrp_price || mrpPrice || undefined,
-                    skus: [{
-                        price: draft.price || 100,
-                        specialPrice: draft.special_price || undefined,
-                        specialPriceFrom: draft.special_price_from,
-                        specialPriceTo: draft.special_price_to,
-                        quantity: 100,
-                        packageWeight: draft.weight || 0.1,
-                        packageLength: draft.pkg_length || 1,
-                        packageWidth: draft.pkg_width || 1,
-                        packageHeight: draft.pkg_height || 1,
-                        images: draft.images.slice(0, 1),
-                        color_family: 'Not Specified'
-                    }],
+                    skus: (draft.attributes?.has_variants && Array.isArray(draft.attributes?.sku_rows) && draft.attributes.sku_rows.length > 0)
+                        ? draft.attributes.sku_rows.filter((r: any) => r.available !== false).map((row: any, i: number) => ({
+                            sellerSku: row.sellerSku || `${(draft.raw_name || 'PROD').replace(/[^a-zA-Z0-9]/g, '-').substring(0, 10).toUpperCase()}-${row.colorFamily || row.variant1 || 'VAR'}-${row.size || i + 1}`,
+                            price: Number(row.price || draft.price || 100),
+                            specialPrice: (row.specialPrice || draft.special_price) ? Number(row.specialPrice || draft.special_price) : undefined,
+                            specialPriceFrom: row.specialPriceFrom || draft.special_price_from,
+                            specialPriceTo: row.specialPriceTo || draft.special_price_to,
+                            quantity: Number(row.quantity ?? 100),
+                            packageWeight: draft.weight || 0.1,
+                            packageLength: draft.pkg_length || 1,
+                            packageWidth: draft.pkg_width || 1,
+                            packageHeight: draft.pkg_height || 1,
+                            images: (Array.isArray(row.images) && row.images.length > 0) ? row.images : draft.images.slice(0, 1),
+                            color_family: row.colorFamily || row.variant1 || 'Not Specified',
+                            size: row.size || undefined
+                        }))
+                        : [{
+                            price: draft.price || 100,
+                            specialPrice: draft.special_price || undefined,
+                            specialPriceFrom: draft.special_price_from,
+                            specialPriceTo: draft.special_price_to,
+                            quantity: 100,
+                            packageWeight: draft.weight || 0.1,
+                            packageLength: draft.pkg_length || 1,
+                            packageWidth: draft.pkg_width || 1,
+                            packageHeight: draft.pkg_height || 1,
+                            images: draft.images.slice(0, 1),
+                            color_family: draft.attributes?.color_family || 'Not Specified',
+                            size: draft.attributes?.size || undefined
+                        }],
                     images: draft.images
                 })
             })
@@ -2432,6 +2752,15 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
         const classification = draft ? getDraftClassification(draft) : (status === 'generated' ? 'ready' : 'pending')
 
+        if (draft && isQcPassed(draft)) {
+            return (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 text-teal-700 dark:bg-teal-950/30 dark:text-teal-300 border border-teal-200 dark:border-teal-800/50">
+                    <ShieldCheck size={11} className="shrink-0 text-teal-600 dark:text-teal-400" />
+                    QC Pass
+                </span>
+            )
+        }
+
         if (status === 'generated' || classification === 'ready') {
             return (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-900/30">
@@ -2479,6 +2808,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     if (viewMode === 'list') {
         return (
             <div className="space-y-4 font-sans font-[family-name:var(--font-inter)]">
+                {draftSavedSuccess && (
+                    <div className="fixed top-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl bg-emerald-600 text-white text-xs sm:text-sm font-semibold shadow-xl animate-in fade-in slide-in-from-top-2 duration-200">
+                        <CheckCircle2 size={18} className="shrink-0" />
+                        <span>Draft Saved Successfully</span>
+                    </div>
+                )}
                 {/* Status Tabs Bar */}
                 <div className="flex border-b border-gray-200 dark:border-zinc-800 overflow-x-auto gap-4 scrollbar-none bg-white dark:bg-zinc-900 p-2 rounded-t-lg shadow-xs">
                     {statusTabs.map(tab => (
@@ -2661,8 +2996,10 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 const classification = getDraftClassification(draft)
                                 if (statusFilter === 'pushed') {
                                     if (draft.status !== 'pushed' && classification !== 'pushed') return false
+                                } else if (statusFilter === 'qc_pass') {
+                                    if (!isQcPassed(draft) || draft.status === 'pushed') return false
                                 } else if (statusFilter === 'ready') {
-                                    if (draft.status !== 'generated' && classification !== 'ready') return false
+                                    if ((draft.status !== 'generated' && classification !== 'ready') || isQcPassed(draft)) return false
                                 } else if (statusFilter === 'image_only') {
                                     if (classification !== 'image_only') return false
                                 } else if (statusFilter === 'link_only') {
@@ -2713,25 +3050,27 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             )
                         }
 
-                        const getStatusGroupPriority = (status: string) => {
-                            switch (status) {
-                                case 'draft':
-                                case 'generating':
-                                    return 1;
-                                case 'generated':
-                                case 'failed':
-                                    return 2;
-                                case 'pushed':
-                                case 'pushing':
-                                    return 3;
-                                default:
-                                    return 4;
+                        // Sort order:
+                        // 1. Pending / Draft / Generating
+                        // 2. Ready Draft (generated / failed without QC Pass)
+                        // 3. QC Pass (human verified — below Ready Draft, above Pushed)
+                        // 4. Pushed
+                        const getStatusGroupPriority = (draftItem: DraftListing) => {
+                            if (draftItem.status === 'pushed' || draftItem.status === 'pushing') {
+                                return 4;
                             }
+                            if (isQcPassed(draftItem)) {
+                                return 3;
+                            }
+                            if (draftItem.status === 'generated' || draftItem.status === 'failed' || getDraftClassification(draftItem) === 'ready') {
+                                return 2;
+                            }
+                            return 1;
                         }
 
                         const sortedDrafts = [...filteredDrafts].sort((a, b) => {
-                            const priorityA = getStatusGroupPriority(a.status);
-                            const priorityB = getStatusGroupPriority(b.status);
+                            const priorityA = getStatusGroupPriority(a);
+                            const priorityB = getStatusGroupPriority(b);
                             if (priorityA !== priorityB) {
                                 return priorityA - priorityB;
                             }
@@ -2747,6 +3086,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 {paginatedDrafts.map((draft) => (
                                     <div
                                         key={draft.id}
+                                        onMouseEnter={() => setHoveredDraftId(draft.id)}
+                                        onMouseLeave={() => setHoveredDraftId(prev => prev === draft.id ? null : prev)}
                                         className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-4 shadow-xs hover:border-gray-300 dark:hover:border-zinc-700 transition-all flex flex-col md:flex-row gap-4 items-start md:items-center justify-between"
                                     >
                                         <div className="flex items-start md:items-center gap-3.5 flex-1 min-w-0">
@@ -2845,7 +3186,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             <span className="italic text-gray-400 text-xs">AI Content Not Generated</span>
                                                         )}
                                                     </div>
-                                                    <div className="mt-1.5 flex items-center gap-2">
+                                                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                                                         <button
                                                             type="button"
                                                             onClick={(e) => {
@@ -2857,6 +3198,39 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         >
                                                             <Sparkles size={11} className="text-orange-500 group-hover/btn:text-white transition-colors" />
                                                             AI Image Studio
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            disabled={pastingDraftId === draft.id}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handlePasteToDraftRow(draft, false)
+                                                            }}
+                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/50 hover:bg-emerald-600 hover:text-white transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                                                            title="Paste copied image from Gemini/ChatGPT as Primary Cover (or hover row & press Ctrl+V)"
+                                                        >
+                                                            {pastingDraftId === draft.id ? (
+                                                                <Loader2 size={11} className="animate-spin" />
+                                                            ) : pastedSuccessId === draft.id ? (
+                                                                <Check size={11} />
+                                                            ) : (
+                                                                <Copy size={11} />
+                                                            )}
+                                                            {pastedSuccessId === draft.id ? 'Pasted!' : 'Paste Image'}
+                                                        </button>
+
+                                                        <button
+                                                            type="button"
+                                                            disabled={pastingDraftId === draft.id}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                handlePasteToDraftRow(draft, true)
+                                                            }}
+                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/50 hover:bg-blue-600 hover:text-white transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                                                            title="Paste copied image from Gemini/ChatGPT and REPLACE old raw images"
+                                                        >
+                                                            Paste & Replace
                                                         </button>
                                                     </div>
                                                 </div>
@@ -3024,12 +3398,31 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     )}
                                                 </div>
                                             </div>
+
+                                            {/* Dedicated "View" Button between Price and Publish / Generate AI */}
+                                            {canViewListing(draft) && (
+                                                <div className="flex-none flex items-center justify-center sm:px-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation()
+                                                            setViewActiveImageIdx(0)
+                                                            setViewModalDraft(draft)
+                                                        }}
+                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white border border-indigo-200 dark:border-indigo-800/60 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                                                        title="View complete product details without HTML & verify QC Pass"
+                                                    >
+                                                        <Eye size={13} />
+                                                        View
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
 
                                         {/* Action Buttons Column */}
                                             <div className="flex-none flex sm:flex-col items-stretch justify-center gap-1.5 border-t sm:border-t-0 sm:border-l border-gray-100 dark:border-zinc-800 pt-3 sm:pt-0 sm:pl-4 min-w-[110px]">
-                                                {/* 1. Draft/Failed/Generating Status Action Group */}
-                                                {(draft.status === 'draft' || draft.status === 'failed' || draft.status === 'generating') && (
+                                                {/* 1. Draft/Failed/Generating Status Action Group (when not QC Passed) */}
+                                                {(draft.status === 'draft' || draft.status === 'failed' || draft.status === 'generating') && !isQcPassed(draft) && (
                                                     <>
                                                         <button
                                                             type="button"
@@ -3105,8 +3498,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     </>
                                                 )}
 
-                                                {/* 2. Ready (Generated) Status Action Group */}
-                                                {draft.status === 'generated' && (
+                                                {/* 2. Ready (Generated) or QC Pass Status Action Group */}
+                                                {(draft.status === 'generated' || (isQcPassed(draft) && draft.status !== 'pushed' && draft.status !== 'pushing')) && (
                                                     <>
                                                         <div className="relative" data-dropdown-container>
                                                             <button
@@ -3116,11 +3509,24 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                     setPublishDropdownId(publishDropdownId === draft.id ? null : draft.id)
                                                                     setActiveDropdownId(null)
                                                                 }}
-                                                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-xs"
-                                                                title="Publish Options"
+                                                                className={`w-full px-2.5 py-1.5 text-white rounded-md transition-all flex items-center gap-1.5 text-xs font-semibold justify-center shadow-xs cursor-pointer ${
+                                                                    isQcPassed(draft)
+                                                                        ? 'bg-emerald-600 hover:bg-emerald-700 ring-1 ring-emerald-500/30'
+                                                                        : 'bg-sky-500 hover:bg-sky-600'
+                                                                }`}
+                                                                title={isQcPassed(draft) ? 'QC Pass Verified — Click to Push to Daraz or Mark Already Pushed' : 'Publish Options'}
                                                             >
-                                                                <Send size={12} />
-                                                                Publish
+                                                                {isQcPassed(draft) ? (
+                                                                    <>
+                                                                        <ShieldCheck size={13} />
+                                                                        QC Pass
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <Send size={12} />
+                                                                        Publish
+                                                                    </>
+                                                                )}
                                                                 <ChevronDown size={11} className={`transition-transform duration-150 ${publishDropdownId === draft.id ? 'rotate-180' : ''}`} />
                                                             </button>
 
@@ -3176,7 +3582,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             </button>
                                                             
                                                             {activeDropdownId === draft.id && (
-                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-32 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in duration-100">
+                                                                <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-1 mb-1 sm:mb-0 w-36 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-xl z-50 py-1 text-xs text-left animate-in fade-in duration-100">
                                                                     <button
                                                                         type="button"
                                                                         onClick={(e) => {
@@ -3201,6 +3607,20 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                                         <Sparkles size={13} className="text-amber-500" />
                                                                         AI Studio
                                                                     </button>
+                                                                    {isQcPassed(draft) && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation()
+                                                                                setActiveDropdownId(null)
+                                                                                handleToggleQcPass(draft, false)
+                                                                            }}
+                                                                            className="w-full text-left px-3 py-2 hover:bg-teal-50 dark:hover:bg-teal-950/30 text-teal-700 dark:text-teal-300 flex items-center gap-2 font-medium transition-colors"
+                                                                        >
+                                                                            <ShieldCheck size={13} />
+                                                                            Undo QC Pass
+                                                                        </button>
+                                                                    )}
                                                                     <div className="border-t border-gray-100 dark:border-zinc-700 my-0.5" />
                                                                     <button
                                                                         type="button"
@@ -3438,29 +3858,49 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                                     {/* Upload from Desktop Tile */}
                                     {modalImages.length < 8 && (
-                                        <label className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-orange-300 dark:border-orange-900/40 bg-orange-50/50 dark:bg-orange-950/10 hover:bg-orange-50 dark:hover:bg-orange-950/20 cursor-pointer aspect-square p-3 transition-colors ${
-                                            imageModalUploading ? 'opacity-60 pointer-events-none' : ''
-                                        }`}>
-                                            {imageModalUploading ? (
-                                                <Loader2 size={24} className="animate-spin text-orange-600 mb-1" />
-                                            ) : (
-                                                <Upload size={22} className="text-orange-600 dark:text-orange-400 mb-1" />
-                                            )}
-                                            <span className="text-[11px] font-bold text-orange-700 dark:text-orange-300 text-center">
-                                                {imageModalUploading ? 'Uploading...' : 'Add Photos'}
-                                            </span>
-                                            <span className="text-[9px] text-orange-600/70 dark:text-orange-400/70 text-center">
-                                                from Desktop
-                                            </span>
-                                            <input
-                                                type="file"
-                                                accept="image/*"
-                                                multiple
+                                        <>
+                                            <label className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-orange-300 dark:border-orange-900/40 bg-orange-50/50 dark:bg-orange-950/10 hover:bg-orange-50 dark:hover:bg-orange-950/20 cursor-pointer aspect-square p-3 transition-colors ${
+                                                imageModalUploading ? 'opacity-60 pointer-events-none' : ''
+                                            }`}>
+                                                {imageModalUploading ? (
+                                                    <Loader2 size={24} className="animate-spin text-orange-600 mb-1" />
+                                                ) : (
+                                                    <Upload size={22} className="text-orange-600 dark:text-orange-400 mb-1" />
+                                                )}
+                                                <span className="text-[11px] font-bold text-orange-700 dark:text-orange-300 text-center">
+                                                    {imageModalUploading ? 'Uploading...' : 'Add Photos'}
+                                                </span>
+                                                <span className="text-[9px] text-orange-600/70 dark:text-orange-400/70 text-center">
+                                                    from Desktop
+                                                </span>
+                                                <input
+                                                    type="file"
+                                                    accept="image/*"
+                                                    multiple
+                                                    disabled={imageModalUploading}
+                                                    onChange={handleModalDesktopUpload}
+                                                    className="hidden"
+                                                />
+                                            </label>
+
+                                            <button
+                                                type="button"
                                                 disabled={imageModalUploading}
-                                                onChange={handleModalDesktopUpload}
-                                                className="hidden"
-                                            />
-                                        </label>
+                                                onClick={() => handlePasteToImageModal(false)}
+                                                className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-emerald-300 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/10 hover:bg-emerald-50 dark:hover:bg-emerald-950/20 cursor-pointer aspect-square p-3 transition-colors ${
+                                                    imageModalUploading ? 'opacity-60 pointer-events-none' : ''
+                                                }`}
+                                                title="Paste copied image from Gemini or ChatGPT (or press Ctrl+V)"
+                                            >
+                                                <Copy size={20} className="text-emerald-600 dark:text-emerald-400 mb-1" />
+                                                <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 text-center">
+                                                    Paste Image
+                                                </span>
+                                                <span className="text-[9px] text-emerald-600/70 dark:text-emerald-400/70 text-center">
+                                                    Ctrl + V
+                                                </span>
+                                            </button>
+                                        </>
                                     )}
                                 </div>
 
@@ -4137,6 +4577,452 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         </div>
                     </div>
                 )}
+
+                {/* ── Product View Mode & Human QC Verification Modal ───────── */}
+                {viewModalDraft && (() => {
+                    const galleryImages = Array.isArray(viewModalDraft.images) ? viewModalDraft.images : []
+                    const safeActiveIdx = viewActiveImageIdx < galleryImages.length ? viewActiveImageIdx : 0
+                    const activeImageUrl = galleryImages[safeActiveIdx] || '/placeholder.png'
+                    const cleanHighlights = (viewModalDraft.highlights || [])
+                        .map(h => formatPlainTextFromHtml(h).replace(/^[•*+\-–—]\s*/, '').trim())
+                        .filter(Boolean)
+                    const cleanDescription = formatPlainTextFromHtml(viewModalDraft.description)
+                    const embeddedDescImages = extractEmbeddedImagesFromHtml(viewModalDraft.description)
+                    const effectiveSelling = viewModalDraft.special_price || viewModalDraft.price
+                    const profitInfo = computeProfitInfo(viewModalDraft.category_path, effectiveSelling, viewModalDraft.wholesale_price)
+                    const supplierObj = suppliers.find(s => s.id === viewModalDraft.supplier_id)
+                    const qcVerified = isQcPassed(viewModalDraft)
+
+                    // Filter out internal metadata keys from attributes display
+                    const INTERNAL_ATTR_KEYS = new Set([
+                        'product_link', 'draft_type', 'campaign_price', 'mrp_price',
+                        'qc_passed', 'qc_passed_at', 'skus', 'variant_images',
+                        'has_variants', 'variant1_name', 'variant2_name', 'variant1_values', 'variant2_values'
+                    ])
+                    const specEntries = Object.entries(viewModalDraft.attributes || {}).filter(
+                        ([k, v]) => !INTERNAL_ATTR_KEYS.has(k) && v !== null && v !== undefined && String(v).trim() !== ''
+                    )
+
+                    return (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-3 sm:p-5 animate-in fade-in duration-150">
+                            <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden">
+                                {/* Modal Header */}
+                                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-900">
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className="w-9 h-9 rounded-xl bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                                            <Eye size={18} />
+                                        </div>
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100">
+                                                    Listing Preview & QC Verification
+                                                </h3>
+                                                {qcVerified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-teal-100 text-teal-800 dark:bg-teal-950/60 dark:text-teal-300 border border-teal-300 dark:border-teal-800">
+                                                        <ShieldCheck size={12} />
+                                                        QC Pass Verified
+                                                    </span>
+                                                ) : (
+                                                    statusBadge(viewModalDraft.status, viewModalDraft)
+                                                )}
+                                            </div>
+                                            <p className="text-xs text-gray-500 dark:text-zinc-400 truncate mt-0.5">
+                                                Raw Name: <span className="font-semibold text-gray-700 dark:text-zinc-300">{viewModalDraft.raw_name}</span>
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setViewModalDraft(null)}
+                                        className="p-1.5 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                    >
+                                        <X size={18} />
+                                    </button>
+                                </div>
+
+                                {/* Modal Scrollable Content */}
+                                <div className="p-6 overflow-y-auto flex-1 space-y-6">
+                                    {/* Top Section: All Images Gallery + Core Listing Metadata */}
+                                    <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+                                        {/* Left: Product Images Gallery (5 cols) */}
+                                        <div className="md:col-span-5 space-y-3">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                                                    Product Images ({galleryImages.length})
+                                                </span>
+                                                {safeActiveIdx === 0 && galleryImages.length > 0 && (
+                                                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-orange-500 text-white">
+                                                        Primary Cover
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {/* Main Active Image */}
+                                            <div className="relative aspect-square w-full rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 overflow-hidden flex items-center justify-center">
+                                                {galleryImages.length > 0 ? (
+                                                    <img
+                                                        src={activeImageUrl}
+                                                        alt={`Product image ${safeActiveIdx + 1}`}
+                                                        className="w-full h-full object-contain"
+                                                    />
+                                                ) : (
+                                                    <div className="text-center text-gray-400 text-xs">
+                                                        <ImageIcon size={32} className="mx-auto mb-1 opacity-50" />
+                                                        No images uploaded
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* All Thumbnails Grid */}
+                                            {galleryImages.length > 0 && (
+                                                <div className="grid grid-cols-4 gap-2">
+                                                    {galleryImages.map((imgUrl, idx) => (
+                                                        <button
+                                                            key={idx}
+                                                            type="button"
+                                                            onClick={() => setViewActiveImageIdx(idx)}
+                                                            className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
+                                                                safeActiveIdx === idx
+                                                                    ? 'border-indigo-600 ring-2 ring-indigo-500/20 scale-[1.02]'
+                                                                    : 'border-gray-200 dark:border-zinc-700 opacity-80 hover:opacity-100'
+                                                            }`}
+                                                        >
+                                                            <img
+                                                                src={imgUrl}
+                                                                alt={`Thumb ${idx + 1}`}
+                                                                className="w-full h-full object-cover"
+                                                            />
+                                                            <span className="absolute top-0.5 left-0.5 bg-black/70 text-white text-[9px] font-bold px-1 rounded">
+                                                                {idx === 0 ? 'Cover' : `#${idx + 1}`}
+                                                            </span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Right: Title, Category, Seller Accounts, Price & Specs (7 cols) */}
+                                        <div className="md:col-span-7 space-y-4">
+                                            {/* Daraz SEO Title */}
+                                            <div className="p-3.5 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/40 space-y-1.5">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                                                        <Sparkles size={12} className="text-amber-500" />
+                                                        Daraz Product Title
+                                                    </span>
+                                                    {viewModalDraft.title && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText(viewModalDraft.title || '')
+                                                                setCopiedTitleId('view-title-' + viewModalDraft.id)
+                                                                setTimeout(() => setCopiedTitleId(null), 2000)
+                                                            }}
+                                                            className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:underline flex items-center gap-1 cursor-pointer"
+                                                        >
+                                                            {copiedTitleId === 'view-title-' + viewModalDraft.id ? (
+                                                                <>
+                                                                    <Check size={11} className="text-emerald-600" />
+                                                                    Copied
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <Copy size={11} />
+                                                                    Copy Title
+                                                                </>
+                                                            )}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <p className="text-sm font-bold text-gray-900 dark:text-zinc-100 leading-snug">
+                                                    {viewModalDraft.title || viewModalDraft.raw_name || 'No Title Generated'}
+                                                </p>
+                                            </div>
+
+                                            {/* Category */}
+                                            <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70 space-y-1">
+                                                <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 block">
+                                                    Daraz Category
+                                                </span>
+                                                <p className="text-xs sm:text-sm font-semibold text-gray-900 dark:text-zinc-100">
+                                                    {viewModalDraft.category_path || 'No Category Selected'}
+                                                </p>
+                                                {viewModalDraft.category_id && (
+                                                    <span className="text-[11px] text-gray-400 block">
+                                                        Category ID: {viewModalDraft.category_id}
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {/* Seller Accounts & Supplier */}
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70 space-y-1.5">
+                                                    <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 block">
+                                                        Seller Accounts
+                                                    </span>
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {viewModalDraft.target_stores && viewModalDraft.target_stores.length > 0 ? (
+                                                            viewModalDraft.target_stores.map(storeId => {
+                                                                const sName = stores.find(s => s.id === storeId)?.seller_account || storeId
+                                                                return (
+                                                                    <span
+                                                                        key={storeId}
+                                                                        className="inline-flex items-center gap-1 text-xs px-2.5 py-0.5 bg-amber-100/70 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-800/50 rounded-md font-semibold"
+                                                                    >
+                                                                        <Store size={11} className="text-amber-600" />
+                                                                        {sName}
+                                                                    </span>
+                                                                )
+                                                            })
+                                                        ) : (
+                                                            <span className="text-xs text-gray-400 italic">Not assigned</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70 space-y-1">
+                                                    <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 block">
+                                                        Supplier & Package
+                                                    </span>
+                                                    <p className="text-xs font-semibold text-gray-800 dark:text-zinc-200">
+                                                        Supplier: {supplierObj ? supplierObj.supplier_name : 'Not linked'}
+                                                    </p>
+                                                    <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                                                        Weight: {viewModalDraft.weight ?? 0.1} kg • Dim: {viewModalDraft.pkg_length ?? 1}×{viewModalDraft.pkg_width ?? 1}×{viewModalDraft.pkg_height ?? 1} cm
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            {/* Pricing & Profit Cards */}
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                                                <div className="p-3 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/70 dark:border-emerald-900/40">
+                                                    <span className="text-[10px] font-bold uppercase text-emerald-700 dark:text-emerald-400 block">
+                                                        Sales Price
+                                                    </span>
+                                                    <span className="text-sm font-bold text-gray-900 dark:text-zinc-100 mt-0.5 block">
+                                                        NPR {viewModalDraft.special_price || viewModalDraft.price || 0}
+                                                    </span>
+                                                </div>
+                                                <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70">
+                                                    <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 block">
+                                                        Regular (MRP)
+                                                    </span>
+                                                    <span className="text-sm font-bold text-gray-800 dark:text-zinc-200 mt-0.5 block">
+                                                        NPR {viewModalDraft.price || viewModalDraft.mrp_price || 0}
+                                                    </span>
+                                                </div>
+                                                <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70">
+                                                    <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 block">
+                                                        Purchase Cost
+                                                    </span>
+                                                    <span className="text-sm font-bold text-gray-800 dark:text-zinc-200 mt-0.5 block">
+                                                        {viewModalDraft.wholesale_price ? `NPR ${viewModalDraft.wholesale_price}` : 'N/A'}
+                                                    </span>
+                                                </div>
+                                                <div className="p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/20 border border-indigo-200/70 dark:border-indigo-900/40">
+                                                    <span className="text-[10px] font-bold uppercase text-indigo-700 dark:text-indigo-400 block">
+                                                        {profitInfo?.hasWholesale ? 'Est. Net Profit' : 'Net Payout'}
+                                                    </span>
+                                                    <span className={`text-sm font-bold mt-0.5 block ${
+                                                        profitInfo?.hasWholesale
+                                                            ? (profitInfo.isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')
+                                                            : 'text-indigo-900 dark:text-indigo-200'
+                                                    }`}>
+                                                        {profitInfo
+                                                            ? (profitInfo.hasWholesale ? `NPR ${profitInfo.profit}` : `NPR ${profitInfo.receivableAmount}`)
+                                                            : 'N/A'}
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            {/* Specifications / Attributes */}
+                                            {specEntries.length > 0 && (
+                                                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700/70 space-y-2">
+                                                    <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 block">
+                                                        Specifications & Attributes
+                                                    </span>
+                                                    <div className="flex flex-wrap gap-2">
+                                                        {specEntries.map(([key, val]) => (
+                                                            <span
+                                                                key={key}
+                                                                className="text-xs px-2.5 py-1 rounded-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-300"
+                                                            >
+                                                                <strong className="font-semibold capitalize">{key.replace(/_/g, ' ')}:</strong>{' '}
+                                                                {Array.isArray(val) ? val.join(', ') : String(val)}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Key Highlights (Plain Text — No HTML) */}
+                                    <div className="p-4 rounded-xl bg-gray-50/80 dark:bg-zinc-800/50 border border-gray-200 dark:border-zinc-800 space-y-2.5">
+                                        <div className="flex items-center justify-between">
+                                            <h4 className="text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                                <List size={14} className="text-orange-500" />
+                                                Highlights / Short Description ({cleanHighlights.length} Bullet Points)
+                                            </h4>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    navigator.clipboard.writeText(cleanHighlights.map(h => `• ${h}`).join('\n'))
+                                                    setCopiedTitleId('view-highlights-' + viewModalDraft.id)
+                                                    setTimeout(() => setCopiedTitleId(null), 2000)
+                                                }}
+                                                className="text-[11px] font-semibold text-gray-500 hover:text-orange-600 dark:text-zinc-400 flex items-center gap-1 cursor-pointer"
+                                            >
+                                                {copiedTitleId === 'view-highlights-' + viewModalDraft.id ? (
+                                                    <>
+                                                        <Check size={11} className="text-emerald-500" />
+                                                        Copied
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Copy size={11} />
+                                                        Copy Highlights
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+
+                                        {cleanHighlights.length > 0 ? (
+                                            <ul className="space-y-1.5 pl-1">
+                                                {cleanHighlights.map((point, idx) => (
+                                                    <li key={idx} className="text-xs sm:text-sm text-gray-800 dark:text-zinc-200 flex items-start gap-2 leading-relaxed">
+                                                        <span className="text-orange-500 font-bold mt-0.5">•</span>
+                                                        <span>{point}</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        ) : (
+                                            <p className="text-xs text-gray-400 italic">No highlights available.</p>
+                                        )}
+                                    </div>
+
+                                    {/* Product Description (Plain Text — No HTML Format) */}
+                                    <div className="p-4 rounded-xl bg-gray-50/80 dark:bg-zinc-800/50 border border-gray-200 dark:border-zinc-800 space-y-2.5">
+                                        <div className="flex items-center justify-between">
+                                            <h4 className="text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                                                <FileText size={14} className="text-indigo-500" />
+                                                Product Description (Clean View — Without HTML Format)
+                                            </h4>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    navigator.clipboard.writeText(cleanDescription)
+                                                    setCopiedTitleId('view-desc-' + viewModalDraft.id)
+                                                    setTimeout(() => setCopiedTitleId(null), 2000)
+                                                }}
+                                                className="text-[11px] font-semibold text-gray-500 hover:text-indigo-600 dark:text-zinc-400 flex items-center gap-1 cursor-pointer"
+                                            >
+                                                {copiedTitleId === 'view-desc-' + viewModalDraft.id ? (
+                                                    <>
+                                                        <Check size={11} className="text-emerald-500" />
+                                                        Copied
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Copy size={11} />
+                                                        Copy Clean Text
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+
+                                        {cleanDescription ? (
+                                            <div className="text-xs sm:text-sm text-gray-800 dark:text-zinc-200 whitespace-pre-line leading-relaxed bg-white dark:bg-zinc-900 p-4 rounded-lg border border-gray-200/70 dark:border-zinc-800">
+                                                {cleanDescription}
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs text-gray-400 italic">No description available.</p>
+                                        )}
+
+                                        {/* If description has embedded <img> tags, show them visually without HTML */}
+                                        {embeddedDescImages.length > 0 && (
+                                            <div className="pt-2 space-y-2">
+                                                <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 block">
+                                                    Images Embedded Inside Description ({embeddedDescImages.length})
+                                                </span>
+                                                <div className="flex flex-wrap gap-3">
+                                                    {embeddedDescImages.map((url, i) => (
+                                                        <img
+                                                            key={i}
+                                                            src={url}
+                                                            alt={`Description visual ${i + 1}`}
+                                                            className="w-28 h-28 object-cover rounded-lg border border-gray-200 dark:border-zinc-700 bg-white"
+                                                        />
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Modal Footer: Edit & QC Pass Action Buttons */}
+                                <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-t border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900/90">
+                                    <button
+                                        type="button"
+                                        onClick={() => setViewModalDraft(null)}
+                                        className="px-4 py-2 text-xs font-semibold border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                    >
+                                        Close
+                                    </button>
+
+                                    <div className="flex items-center gap-2.5">
+                                        {/* Edit Button */}
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const target = viewModalDraft
+                                                setViewModalDraft(null)
+                                                handleEditDraft(target)
+                                            }}
+                                            className="px-4 py-2 text-xs sm:text-sm font-semibold bg-amber-50 hover:bg-amber-600 text-amber-800 hover:text-white dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-600 dark:hover:text-white border border-amber-300 dark:border-amber-800 rounded-lg flex items-center gap-1.5 transition-all shadow-2xs cursor-pointer"
+                                        >
+                                            <Edit3 size={14} />
+                                            Edit
+                                        </button>
+
+                                        {/* QC Pass Button */}
+                                        {qcVerified ? (
+                                            <button
+                                                type="button"
+                                                disabled={qcPassSavingId === viewModalDraft.id}
+                                                onClick={() => handleToggleQcPass(viewModalDraft, false)}
+                                                className="px-4 py-2 text-xs sm:text-sm font-semibold bg-teal-50 hover:bg-rose-50 text-teal-700 hover:text-rose-600 border border-teal-300 hover:border-rose-300 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                                                title="Click to remove QC Pass verification"
+                                            >
+                                                {qcPassSavingId === viewModalDraft.id ? (
+                                                    <Loader2 size={14} className="animate-spin" />
+                                                ) : (
+                                                    <ShieldCheck size={15} />
+                                                )}
+                                                ✓ QC Passed (Click to Undo)
+                                            </button>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                disabled={qcPassSavingId === viewModalDraft.id}
+                                                onClick={() => handleToggleQcPass(viewModalDraft, true)}
+                                                className="px-5 py-2 text-xs sm:text-sm font-semibold bg-teal-600 hover:bg-teal-700 text-white rounded-lg flex items-center gap-1.5 shadow-md shadow-teal-600/20 transition-all cursor-pointer disabled:opacity-50"
+                                                title="Verify that this product listing has been checked by a human"
+                                            >
+                                                {qcPassSavingId === viewModalDraft.id ? (
+                                                    <Loader2 size={14} className="animate-spin" />
+                                                ) : (
+                                                    <ShieldCheck size={15} />
+                                                )}
+                                                QC Pass
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )
+                })()}
 
                 {/* ── AI Product Image Studio Modal ─────────────────────────── */}
                 <DarazAiStudioModal
@@ -5143,30 +6029,62 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                     </div>
                                 ))}
                                 {images.length < 8 && (
-                                    <label className="w-28 h-28 rounded-lg border-2 border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-500 dark:hover:border-orange-400 bg-gray-50/50 dark:bg-zinc-800/40 hover:bg-orange-50/30 dark:hover:bg-orange-950/20 flex flex-col items-center justify-center cursor-pointer transition-all shadow-2xs group">
-                                        {uploadingImage ? (
-                                            <div className="flex flex-col items-center gap-1">
-                                                <Loader2 className="animate-spin text-orange-500" size={22} />
-                                                <span className="text-[10px] text-orange-600 font-semibold">Uploading...</span>
-                                            </div>
-                                        ) : (
-                                            <>
-                                                <div className="w-8 h-8 rounded-full bg-orange-100 dark:bg-orange-950/40 text-orange-600 dark:text-orange-400 flex items-center justify-center mb-1 group-hover:scale-110 transition-transform">
-                                                    <Upload size={16} />
+                                    <>
+                                        <label className="w-28 h-28 rounded-lg border-2 border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-500 dark:hover:border-orange-400 bg-gray-50/50 dark:bg-zinc-800/40 hover:bg-orange-50/30 dark:hover:bg-orange-950/20 flex flex-col items-center justify-center cursor-pointer transition-all shadow-2xs group">
+                                            {uploadingImage ? (
+                                                <div className="flex flex-col items-center gap-1">
+                                                    <Loader2 className="animate-spin text-orange-500" size={22} />
+                                                    <span className="text-[10px] text-orange-600 font-semibold">Uploading...</span>
                                                 </div>
-                                                <span className="text-xs text-gray-700 dark:text-zinc-200 font-bold">Add Photos</span>
-                                                <span className="text-[10px] text-gray-400">Select Multiple</span>
-                                            </>
-                                        )}
-                                        <input
-                                            type="file"
-                                            accept="image/*"
-                                            multiple
-                                            onChange={handleImageUpload}
-                                            className="hidden"
+                                            ) : (
+                                                <>
+                                                    <div className="w-8 h-8 rounded-full bg-orange-100 dark:bg-orange-950/40 text-orange-600 dark:text-orange-400 flex items-center justify-center mb-1 group-hover:scale-110 transition-transform">
+                                                        <Upload size={16} />
+                                                    </div>
+                                                    <span className="text-xs text-gray-700 dark:text-zinc-200 font-bold">Add Photos</span>
+                                                    <span className="text-[10px] text-gray-400">Select Multiple</span>
+                                                </>
+                                            )}
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                multiple
+                                                onChange={handleImageUpload}
+                                                className="hidden"
+                                                disabled={uploadingImage}
+                                            />
+                                        </label>
+
+                                        <button
+                                            type="button"
                                             disabled={uploadingImage}
-                                        />
-                                    </label>
+                                            onClick={() => handlePasteToEditForm(false)}
+                                            className="w-28 h-28 rounded-lg border-2 border-dashed border-emerald-300 dark:border-emerald-800 hover:border-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/20 hover:bg-emerald-50/80 dark:hover:bg-emerald-950/40 flex flex-col items-center justify-center cursor-pointer transition-all shadow-2xs group disabled:opacity-50"
+                                            title="Paste copied image from Gemini or ChatGPT (or press Ctrl+V)"
+                                        >
+                                            <div className="w-8 h-8 rounded-full bg-emerald-100 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mb-1 group-hover:scale-110 transition-transform">
+                                                <Copy size={15} />
+                                            </div>
+                                            <span className="text-xs text-emerald-800 dark:text-emerald-200 font-bold">Paste Image</span>
+                                            <span className="text-[10px] text-emerald-600/80 dark:text-emerald-400/80">Ctrl + V (Add)</span>
+                                        </button>
+
+                                        {images.length > 0 && (
+                                            <button
+                                                type="button"
+                                                disabled={uploadingImage}
+                                                onClick={() => handlePasteToEditForm(true)}
+                                                className="w-28 h-28 rounded-lg border-2 border-dashed border-blue-300 dark:border-blue-800 hover:border-blue-500 bg-blue-50/40 dark:bg-blue-950/20 hover:bg-blue-50/80 dark:hover:bg-blue-950/40 flex flex-col items-center justify-center cursor-pointer transition-all shadow-2xs group disabled:opacity-50"
+                                                title="Paste copied image from Gemini/ChatGPT and REPLACE old images"
+                                            >
+                                                <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-1 group-hover:scale-110 transition-transform">
+                                                    <Copy size={15} />
+                                                </div>
+                                                <span className="text-xs text-blue-800 dark:text-blue-200 font-bold">Paste & Replace</span>
+                                                <span className="text-[10px] text-blue-600/80 dark:text-blue-400/80">Replace Old</span>
+                                            </button>
+                                        )}
+                                    </>
                                 )}
                             </div>
 
@@ -6163,7 +7081,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 {savingDraft ? (
                                     <><Loader2 className="animate-spin" size={15} /> Saving...</>
                                 ) : draftSavedSuccess ? (
-                                    <><CheckCircle2 size={15} className="text-green-600" /> Saved as Draft</>
+                                    <><CheckCircle2 size={15} className="text-green-600" /> Draft Saved Successfully</>
                                 ) : (
                                     'Save Draft'
                                 )}

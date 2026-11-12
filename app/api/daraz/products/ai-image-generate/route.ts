@@ -234,35 +234,41 @@ async function generateLifestyleImage(subjectBuffer: Buffer, isCutout: boolean):
         .toBuffer()
 }
 
-// ── Call Google Imagen 3 API ─────────────────────────────────────────────────
+// ── Call Google Gemini Image Generation API ──────────────────────────────────
 async function callGoogleImagen(promptText: string, apiKey: string): Promise<Buffer | null> {
-    try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict`
-        const res = await axios.post(
-            url,
-            {
-                instances: [{ prompt: promptText }],
-                parameters: {
-                    sampleCount: 1,
-                    aspectRatio: '1:1',
-                    outputOptions: { mimeType: 'image/jpeg' }
-                }
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': apiKey
+    const modelsToTry = ['gemini-2.5-flash-image', 'gemini-3.1-flash-image']
+    for (const modelName of modelsToTry) {
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`
+            const res = await axios.post(
+                url,
+                {
+                    contents: [{ parts: [{ text: promptText }] }],
+                    generationConfig: {
+                        responseModalities: ['TEXT', 'IMAGE']
+                    }
                 },
-                timeout: 30000
-            }
-        )
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': apiKey
+                    },
+                    timeout: 30000
+                }
+            )
 
-        const base64Bytes = res.data?.predictions?.[0]?.bytesBase64Encoded
-        if (base64Bytes) {
-            return Buffer.from(base64Bytes, 'base64')
+            const parts = res.data?.candidates?.[0]?.content?.parts || []
+            const imgPart = parts.find((p: any) => p.inlineData?.data)
+            if (imgPart?.inlineData?.data) {
+                return Buffer.from(imgPart.inlineData.data, 'base64')
+            }
+        } catch (err: any) {
+            const status = err.response?.status
+            const msg = err.response?.data?.error?.message || err.message
+            console.warn(`[AIStudio-Imagen] ${modelName} notice (${status || 'err'}):`, msg?.slice(0, 140))
+            // If 429 quota exceeded on free tier, break early instead of retrying second model
+            if (status === 429) break
         }
-    } catch (err: any) {
-        console.warn('[AIStudio-Imagen] Google Imagen 3 notice:', err.response?.data?.error?.message || err.message)
     }
     return null
 }

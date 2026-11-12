@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useMemo, useCallback, ReactNode } from 'react'
 import { supabase } from '@/lib/supabase/client'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getMyRoleAndPermissions } from '@/features/profile/actions/profile-actions'
 
 export type UserRole = 'admin' | 'editor' | 'user' | 'new_user' | null
@@ -38,6 +38,7 @@ const CACHE_PERMS_KEY = 'bagmati_user_perms_cache'
 const CACHE_USER_KEY = 'bagmati_user_id_cache'
 
 export function PermissionProvider({ children }: { children: ReactNode }) {
+    const queryClient = useQueryClient()
     const [isMounted, setIsMounted] = useState(false)
     const [userId, setUserId] = useState<string | null>(null)
     const [cachedRole, setCachedRole] = useState<UserRole>(null)
@@ -67,7 +68,12 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
         const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
             const uid = session?.user?.id || null
             if (uid) {
-                setUserId(uid)
+                setUserId((prevUid) => {
+                    if (prevUid && prevUid !== uid) {
+                        queryClient.invalidateQueries({ queryKey: ['user-role-and-permissions'] })
+                    }
+                    return uid
+                })
                 if (typeof window !== 'undefined') {
                     try { localStorage.setItem(CACHE_USER_KEY, uid) } catch {}
                 }
@@ -82,17 +88,23 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
                 }
                 setCachedRole(null)
                 setCachedPermissions([])
+                queryClient.setQueryData(['user-role-and-permissions'], {
+                    userId: null,
+                    role: null,
+                    permissions: []
+                })
             }
         })
 
         return () => {
             subscription.unsubscribe()
         }
-    }, [])
+    }, [queryClient])
 
     // 2. Single unified Server Action query for Role + Permissions (0ms cookie JWT decode on server)
+    // Stable queryKey prevents double-fetching when userId hydrates from null -> uuid on mount
     const { data: authContextData, isLoading: isQueryLoading } = useQuery({
-        queryKey: ['user-role-and-permissions', userId || 'current'],
+        queryKey: ['user-role-and-permissions'],
         queryFn: async () => {
             const res = await getMyRoleAndPermissions()
             return res

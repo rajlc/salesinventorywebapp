@@ -1,7 +1,8 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 // =====================================================
 // ORDER DELETION APPROVAL SYSTEM - Server Actions
@@ -38,39 +39,34 @@ interface DeletedOrder {
     restored: boolean
 }
 
-// In-memory cache for user roles (5-minute TTL)
-const userRoleCache = new Map<string, { role: 'admin' | 'user' | null; time: number }>()
 const ROLE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
-// Helper: Get user role from user_profiles
+// Helper: Get user role from user_profiles (uses 0ms cookie JWT decode + per-user globalThis cache)
 export async function getUserRole(userId?: string): Promise<'admin' | 'user' | null> {
-    const supabase = await createClient()
-    const uid = userId || (await supabase.auth.getUser()).data.user?.id
+    const authUser = userId ? null : await getAuthenticatedUser()
+    const uid = userId || authUser?.id
 
     if (!uid) return null
 
-    const now = Date.now()
-    const cached = userRoleCache.get(uid)
-    if (cached && (now - cached.time) < ROLE_CACHE_TTL) {
-        return cached.role
-    }
+    return withMemoryCache(`user_role:${uid}`, ROLE_CACHE_TTL, async () => {
+        const admin = await createAdminClient()
+        const { data, error } = await admin
+            .from('user_profiles')
+            .select('role')
+            .eq('id', uid)
+            .maybeSingle()
 
-    const { data, error } = await supabase
-        .from('user_profiles')
-        .select('role')
-        .eq('id', uid)
-        .single()
-
-    if (error || !data) return null
-    const role = data.role as 'admin' | 'user'
-    userRoleCache.set(uid, { role, time: now })
-    return role
+        if (error || !data) {
+            const fallbackRole = (authUser?.user_metadata?.role as 'admin' | 'user') || null
+            return fallbackRole
+        }
+        return (data.role as 'admin' | 'user') || null
+    })
 }
 
 // Helper: Get current user ID
 async function getCurrentUserId(): Promise<string | null> {
-    const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
+    const user = await getAuthenticatedUser()
     return user?.id || null
 }
 

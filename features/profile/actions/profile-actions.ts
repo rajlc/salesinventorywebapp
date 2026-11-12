@@ -2,6 +2,7 @@
 
 import { createClient, createAdminClient, getAuthenticatedUser } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { withMemoryCache } from '@/lib/cache/memory-cache'
 
 export interface UserPermissionItem {
     id: string
@@ -124,28 +125,31 @@ export async function getMyRoleAndPermissions(): Promise<{
         return { userId: null, role: null, permissions: [] }
     }
 
-    try {
-        const admin = await createAdminClient()
-        const [profileRes, permsRes] = await Promise.all([
-            admin.from('user_profiles').select('role').eq('id', user.id).maybeSingle(),
-            admin
-                .from('user_permissions')
-                .select('id, user_id, main_page_role, sub_page_role, permission_type')
-                .eq('user_id', user.id),
-        ])
+    // Per-user isolated memory cache (30s TTL) coalesces duplicate concurrent calls for the same userId
+    return withMemoryCache(`user_role_perms:${user.id}`, 30_000, async () => {
+        try {
+            const admin = await createAdminClient()
+            const [profileRes, permsRes] = await Promise.all([
+                admin.from('user_profiles').select('role').eq('id', user.id).maybeSingle(),
+                admin
+                    .from('user_permissions')
+                    .select('id, user_id, main_page_role, sub_page_role, permission_type')
+                    .eq('user_id', user.id),
+            ])
 
-        const role = profileRes.data?.role || (user.user_metadata?.role as string) || null
-        const permissions = (permsRes.data || []) as UserPermissionItem[]
+            const role = profileRes.data?.role || (user.user_metadata?.role as string) || null
+            const permissions = (permsRes.data || []) as UserPermissionItem[]
 
-        return { userId: user.id, role, permissions }
-    } catch (err) {
-        console.error('Error in getMyRoleAndPermissions:', err)
-        return {
-            userId: user.id,
-            role: (user.user_metadata?.role as string) || null,
-            permissions: [],
+            return { userId: user.id, role, permissions }
+        } catch (err) {
+            console.error('Error in getMyRoleAndPermissions:', err)
+            return {
+                userId: user.id,
+                role: (user.user_metadata?.role as string) || null,
+                permissions: [],
+            }
         }
-    }
+    })
 }
 
 // Update user profile
