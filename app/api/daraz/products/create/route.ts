@@ -4,6 +4,7 @@ import { getValidAccessToken, buildSignedParams, API_URL } from '@/lib/daraz/cli
 import { migrateImagesToDaraz } from '@/lib/daraz/image-migrate'
 import { buildProductCreateXml, DarazProductPayload, DarazSkuVariant } from '@/lib/daraz/xml-builder'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getRequestListingScope, storesAllowed } from '@/lib/daraz/listing-access'
 
 // POST /api/daraz/products/create
 // Body: {
@@ -66,6 +67,17 @@ export async function POST(request: NextRequest) {
 
         if (!storeIds || !Array.isArray(storeIds) || storeIds.length === 0) {
             return NextResponse.json({ error: 'At least one storeId is required' }, { status: 400 })
+        }
+
+        const scope = await getRequestListingScope()
+        if (!scope.userId) {
+            return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+        }
+        if (!scope.canEdit) {
+            return NextResponse.json({ error: 'You have view-only access to Daraz Listing' }, { status: 403 })
+        }
+        if (!storesAllowed(scope, storeIds)) {
+            return NextResponse.json({ error: 'You do not have permission to push to one of the selected seller accounts' }, { status: 403 })
         }
 
         const effectiveCategory = primaryCategory || primaryCategoryId

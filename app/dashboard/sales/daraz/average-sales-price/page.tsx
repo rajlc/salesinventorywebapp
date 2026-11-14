@@ -83,6 +83,8 @@ export default function DarazAverageSalesPricePage() {
     const [livePriceFilter, setLivePriceFilter] = useState<'' | 'daraz' | 'website' | 'mrp'>('')
     const [stockModalProduct, setStockModalProduct] = useState<DarazAvgPriceItem | null>(null)
     const [stockEdits, setStockEdits] = useState<Record<string, number>>({}) // key: store_id:sku
+    const [isZeroingAll, setIsZeroingAll] = useState(false)
+    const [updatingSingleSku, setUpdatingSingleSku] = useState<string | null>(null)
     const [showLivePriceColumns, setShowLivePriceColumns] = useState(true)
 
     // Bulk Actions
@@ -1046,6 +1048,83 @@ export default function DarazAverageSalesPricePage() {
     const openStockModal = (item: DarazAvgPriceItem) => {
         setStockModalProduct(item)
         setStockEdits({})
+    }
+
+    const handleZeroAllPreview = async () => {
+        if (!stockModalProduct) return
+        setIsZeroingAll(true)
+        try {
+            const { getProductActiveOrderQtyByStore } = await import('@/features/sales/actions/avg-price-actions')
+            const skus = Object.keys(stockModalProduct.live_prices || {}).filter(key => !key.includes('_slot_'))
+            const { bySku, byStoreId, byAccount } = await getProductActiveOrderQtyByStore(stockModalProduct.product_id, skus)
+
+            const nextEdits: Record<string, number> = {}
+            skus.forEach(sku => {
+                    const lp = stockModalProduct.live_prices?.[sku]
+                    if (!lp) return
+                    let qty = 0
+                    const skuKey = sku.trim()
+                    const sid = lp.store_id ? String(lp.store_id) : ''
+                    if (skuKey && bySku[skuKey] !== undefined) {
+                        qty = bySku[skuKey]
+                    } else if (sid && byStoreId[sid] !== undefined) {
+                        qty = byStoreId[sid]
+                    } else if (lp.store_name) {
+                        const storeKey = String(lp.store_name).trim().toLowerCase()
+                        const firstWord = storeKey.split(/\s+/)[0]
+                        for (const [accKey, accQty] of Object.entries(byAccount)) {
+                            if (
+                                accKey === storeKey ||
+                                accKey.includes(storeKey) ||
+                                storeKey.includes(accKey) ||
+                                (firstWord && accKey.includes(firstWord))
+                            ) {
+                                qty += accQty
+                            }
+                        }
+                    }
+                    nextEdits[sku] = qty
+                })
+            setStockEdits(nextEdits)
+        } catch (err: any) {
+            alert(`Failed to calculate active order stock: ${err.message}`)
+        } finally {
+            setIsZeroingAll(false)
+        }
+    }
+
+    const handleApplySingleStock = async (sku: string, lp: any) => {
+        if (!stockModalProduct) return
+        const quantity = stockEdits[sku] ?? lp.quantity ?? 0
+        setUpdatingSingleSku(sku)
+        try {
+            const { pushStockToDaraz } = await import('@/features/sales/actions/avg-price-actions')
+            const res = await pushStockToDaraz(stockModalProduct.product_id, [{
+                sku,
+                quantity,
+                store_id: lp.store_id || ''
+            }])
+            if (res.success) {
+                setStockModalProduct(prev => {
+                    if (!prev || !prev.live_prices?.[sku]) return prev
+                    return {
+                        ...prev,
+                        live_prices: {
+                            ...prev.live_prices,
+                            [sku]: { ...prev.live_prices[sku], quantity }
+                        }
+                    }
+                })
+                loadData()
+                alert(`✓ Stock updated to ${quantity} for ${lp.store_name || sku}!`)
+            } else {
+                alert(`✗ Update failed:\n${res.message}`)
+            }
+        } catch (err: any) {
+            alert(`Stock update failed: ${err.message}`)
+        } finally {
+            setUpdatingSingleSku(null)
+        }
     }
 
     const handleUpdateStock = async (isOutOfStock: boolean) => {
@@ -2985,6 +3064,15 @@ export default function DarazAverageSalesPricePage() {
                                                         className="w-20 px-3 py-2 text-right bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-shadow"
                                                         min="0"
                                                     />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleApplySingleStock(sku, lp)}
+                                                        disabled={isUpdatingStock || updatingSingleSku !== null || isZeroingAll}
+                                                        title={`Apply stock for ${lp.store_name || sku}`}
+                                                        className="p-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors"
+                                                    >
+                                                        {updatingSingleSku === sku ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                                                    </button>
                                                 </div>
                                             </div>
                                         );
@@ -2995,15 +3083,15 @@ export default function DarazAverageSalesPricePage() {
                             <div className="mt-8 flex flex-col gap-3">
                                 <div className="flex gap-3">
                                     <Button
-                                        onClick={() => handleUpdateStock(true)}
-                                        disabled={isUpdatingStock || Object.keys(stockModalProduct.live_prices || {}).length === 0}
+                                        onClick={handleZeroAllPreview}
+                                        disabled={isUpdatingStock || isZeroingAll || updatingSingleSku !== null || Object.keys(stockModalProduct.live_prices || {}).length === 0}
                                         className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold h-11"
                                     >
-                                        {isUpdatingStock ? <Loader2 size={18} className="animate-spin" /> : "Out of Stock (Zero All)"}
+                                        {isZeroingAll ? <Loader2 size={18} className="animate-spin" /> : "Out of Stock (Zero All)"}
                                     </Button>
                                     <Button
                                         onClick={() => handleUpdateStock(false)}
-                                        disabled={isUpdatingStock || Object.keys(stockModalProduct.live_prices || {}).length === 0}
+                                        disabled={isUpdatingStock || isZeroingAll || updatingSingleSku !== null || Object.keys(stockModalProduct.live_prices || {}).length === 0}
                                         className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold h-11"
                                     >
                                         {isUpdatingStock ? <Loader2 size={18} className="animate-spin" /> : "Apply Stock"}

@@ -62,6 +62,22 @@ export function resolvePermittedPage(
     const main = normalizeKey(mainRole)
     const sub = normalizeKey(subRole)
 
+    // 0. Daraz Listing -> /dashboard/inventory/daraz-product-management
+    if (main === 'daraz listing') {
+        return {
+            id: `daraz-listing`,
+            mainRole,
+            subRole: subRole || 'All',
+            title: 'Daraz Listing',
+            href: '/dashboard/inventory/daraz-product-management',
+            category: 'Daraz Listing',
+            icon: <Package size={18} />,
+            color: 'text-orange-600 dark:text-orange-400',
+            bgLight: 'bg-orange-50 dark:bg-orange-950/40 border-orange-200 dark:border-orange-800',
+            permissionType
+        }
+    }
+
     // 1. Daraz
     if (main.includes('daraz')) {
         if (sub.includes('order entry') || sub.includes('entry')) {

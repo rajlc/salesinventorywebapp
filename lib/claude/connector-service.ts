@@ -10,7 +10,25 @@ import {
     DEFAULT_OTHER_FEES,
     type OtherFeeItem
 } from '@/features/sales/utils/daraz-fee-calculator'
+import { getConnectorScope } from './connector-scope'
+import {
+    filterStoresForScope,
+    filterVisibleDrafts,
+    isDraftVisible,
+    mergeTargetStoresForScope,
+    signInternalUser
+} from '@/lib/daraz/listing-access'
 import axios from 'axios'
+
+function assertConnectorCanEdit() {
+    const scope = getConnectorScope()
+    if (scope && scope.restricted && !scope.canEdit) {
+        throw new Error('Permission denied: your staff account has view-only access to Daraz Listing.')
+    }
+    if (scope && scope.restricted && scope.allowedStoreIds.length === 0) {
+        throw new Error('Permission denied: your staff account has no active Daraz seller accounts assigned.')
+    }
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -268,7 +286,8 @@ export async function listDarazStores(): Promise<StoreAccountInfo[]> {
         console.error('[ClaudeConnector] Error fetching stores:', error.message)
         return []
     }
-    return stores || []
+    const scope = getConnectorScope()
+    return scope ? filterStoresForScope(scope, stores || []) : (stores || [])
 }
 
 export async function findStoreByAccount(accountNameOrId?: string): Promise<StoreAccountInfo | null> {
@@ -292,6 +311,11 @@ export async function findStoreByAccount(accountNameOrId?: string): Promise<Stor
     )
     if (byName) return byName
 
+    const scope = getConnectorScope()
+    if (scope?.restricted) {
+        throw new Error(`Permission denied: seller account "${accountNameOrId}" is not in your permitted stores [${stores.map(s => s.seller_account).join(', ')}].`)
+    }
+
     return stores[0]
 }
 
@@ -309,10 +333,17 @@ export async function resolveTargetStores(input: { store_account_name?: string, 
     }
 
     if (queryList.length === 0) {
-        return allStores.slice(0, 1) // default to first
+        return allStores.slice(0, 1) // default to first allowed store
     }
 
+    if (queryList.some(q => q.toLowerCase() === 'all' || q.toLowerCase() === 'all stores')) {
+        return allStores
+    }
+
+    const scope = getConnectorScope()
     const matched: StoreAccountInfo[] = []
+    const unmatched: string[] = []
+
     for (const q of queryList) {
         const term = q.toLowerCase()
         const found = allStores.find(s => 
@@ -320,9 +351,19 @@ export async function resolveTargetStores(input: { store_account_name?: string, 
             term.includes(s.seller_account.toLowerCase()) ||
             s.id.toLowerCase() === term
         )
-        if (found && !matched.some(m => m.id === found.id)) {
-            matched.push(found)
+        if (found) {
+            if (!matched.some(m => m.id === found.id)) {
+                matched.push(found)
+            }
+        } else {
+            unmatched.push(q)
         }
+    }
+
+    if (scope?.restricted && unmatched.length > 0) {
+        throw new Error(
+            `Permission denied: you do not have access to seller account(s) "${unmatched.join(', ')}". Your permitted seller account(s): [${allStores.map(s => s.seller_account).join(', ')}].`
+        )
     }
 
     return matched.length > 0 ? matched : allStores.slice(0, 1)
@@ -761,10 +802,11 @@ export async function calculateDarazProfitAction(input: CalculateDarazProfitInpu
     if (input.draft_id) {
         const { data: draftRow } = await supabase
             .from('daraz_draft_listings')
-            .select('raw_name, title, category_path, price, special_price, wholesale_price')
+            .select('raw_name, title, category_path, price, special_price, wholesale_price, target_stores, attributes')
             .eq('id', input.draft_id)
             .maybeSingle()
-        if (draftRow) {
+        const scope = getConnectorScope()
+        if (draftRow && (!scope || isDraftVisible(scope, draftRow))) {
             if (!categoryPath && draftRow.category_path) categoryPath = draftRow.category_path
             if (!wholesale && draftRow.wholesale_price) wholesale = Number(draftRow.wholesale_price)
             if (!sellingPrice && (draftRow.special_price || draftRow.price)) sellingPrice = Number(draftRow.special_price || draftRow.price)
@@ -972,6 +1014,8 @@ async function downloadAndUploadImagesToSupabase(
  * attaching them to the draft and optionally deleting old raw images.
  */
 export async function generateStudioImagesAction(input: GenerateStudioImagesInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
 
@@ -980,6 +1024,9 @@ export async function generateStudioImagesAction(input: GenerateStudioImagesInpu
 
     if (draftId) {
         const { data } = await supabase.from('daraz_draft_listings').select('*').eq('id', draftId).maybeSingle()
+        if (data && scope && !isDraftVisible(scope, data)) {
+            throw new Error('Permission denied: this draft belongs to a seller account outside your permission scope.')
+        }
         draft = data
     } else if (input.raw_name) {
         const { data } = await supabase
@@ -987,8 +1034,9 @@ export async function generateStudioImagesAction(input: GenerateStudioImagesInpu
             .select('*')
             .ilike('raw_name', `%${input.raw_name.trim()}%`)
             .order('created_at', { ascending: false })
-            .limit(1)
-        draft = data?.[0] || null
+            .limit(10)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        draft = visible[0] || null
     }
 
     const existingImages: string[] = Array.isArray(draft?.images) ? [...draft.images] : []
@@ -1224,6 +1272,8 @@ export async function generateStudioImagesAction(input: GenerateStudioImagesInpu
 // ── Save Product Draft ──────────────────────────────────────────────────────
 
 export async function saveProductDraft(input: SaveDraftInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     if (!input.raw_name || !input.raw_name.trim()) {
         throw new Error('Product name (raw_name) is required')
     }
@@ -1360,7 +1410,8 @@ export async function saveProductDraft(input: SaveDraftInput) {
 
     // 7. Merge Specifications, Pricing & Variants into Attributes
     const attributesPayload: Record<string, any> = {
-        ...(input.attributes || {})
+        ...(input.attributes || {}),
+        ...(scope?.userId ? { created_by: scope.userId } : {})
     }
     if (input.product_link) {
         attributesPayload.product_link = input.product_link
@@ -1412,13 +1463,15 @@ export async function saveProductDraft(input: SaveDraftInput) {
     const supabase = await createAdminClient()
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
 
-    const { data: recentDrafts } = await supabase
+    const { data: recentDraftsRaw } = await supabase
         .from('daraz_draft_listings')
         .select('*')
         .ilike('raw_name', rawName)
         .gte('created_at', fiveMinutesAgo)
         .order('created_at', { ascending: false })
-        .limit(1)
+        .limit(5)
+
+    const recentDrafts = scope ? filterVisibleDrafts(scope, recentDraftsRaw || []) : (recentDraftsRaw || [])
 
     if (recentDrafts && recentDrafts.length > 0) {
         const existing = recentDrafts[0]
@@ -1575,6 +1628,8 @@ export async function saveProductDraft(input: SaveDraftInput) {
 // ── Update Product Draft ────────────────────────────────────────────────────
 
 export async function updateProductDraft(input: UpdateDraftInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
 
     let draftId = input.id || input.draft_id
@@ -1586,6 +1641,9 @@ export async function updateProductDraft(input: UpdateDraftInput) {
             .select('*')
             .eq('id', draftId)
             .single()
+        if (data && scope && !isDraftVisible(scope, data)) {
+            throw new Error('Permission denied: this draft belongs to a seller account outside your permission scope.')
+        }
         existingDraft = data
     } else if (input.raw_name) {
         const { data } = await supabase
@@ -1593,9 +1651,10 @@ export async function updateProductDraft(input: UpdateDraftInput) {
             .select('*')
             .ilike('raw_name', `%${input.raw_name.trim()}%`)
             .order('created_at', { ascending: false })
-            .limit(1)
-        if (data && data.length > 0) {
-            existingDraft = data[0]
+            .limit(10)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        if (visible.length > 0) {
+            existingDraft = visible[0]
             draftId = existingDraft.id
         }
     }
@@ -1703,7 +1762,9 @@ export async function updateProductDraft(input: UpdateDraftInput) {
             store_account_name: input.store_account_name,
             store_accounts: input.store_accounts
         })
-        updates.target_stores = stores.map(s => s.id)
+        updates.target_stores = scope
+            ? mergeTargetStoresForScope(scope, existingDraft.target_stores, stores.map(s => s.id))
+            : stores.map(s => s.id)
     }
 
     let existingAttributes = { ...(existingDraft.attributes || {}) }
@@ -1815,21 +1876,34 @@ export async function updateProductDraft(input: UpdateDraftInput) {
 // ── Delete Product Draft ────────────────────────────────────────────────────
 
 export async function deleteProductDraft(input: DeleteDraftInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
 
     let draftId = input.id || input.draft_id
     let draftName = input.raw_name
 
-    if (!draftId && input.raw_name) {
+    if (draftId) {
+        const { data: existing } = await supabase
+            .from('daraz_draft_listings')
+            .select('*')
+            .eq('id', draftId)
+            .maybeSingle()
+        if (!existing || (scope && !isDraftVisible(scope, existing))) {
+            throw new Error(`Permission denied or draft not found: ${draftId}`)
+        }
+        draftName = existing.raw_name || draftName
+    } else if (input.raw_name) {
         const { data } = await supabase
             .from('daraz_draft_listings')
-            .select('id, raw_name')
+            .select('*')
             .ilike('raw_name', `%${input.raw_name.trim()}%`)
             .order('created_at', { ascending: false })
-            .limit(1)
-        if (data && data.length > 0) {
-            draftId = data[0].id
-            draftName = data[0].raw_name
+            .limit(10)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        if (visible.length > 0) {
+            draftId = visible[0].id
+            draftName = visible[0].raw_name
         }
     }
 
@@ -1995,6 +2069,7 @@ async function inspectDraftImageWithVision(
 // ── Get Draft Details ───────────────────────────────────────────────────────
 
 export async function getDraftDetails(input: GetDraftDetailsInput) {
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
 
     const draftId = input.id || input.draft_id
@@ -2003,15 +2078,17 @@ export async function getDraftDetails(input: GetDraftDetailsInput) {
     if (draftId) {
         query = query.eq('id', draftId)
     } else if (input.raw_name) {
-        query = query.ilike('raw_name', `%${input.raw_name.trim()}%`).order('created_at', { ascending: false }).limit(1)
+        query = query.ilike('raw_name', `%${input.raw_name.trim()}%`).order('created_at', { ascending: false }).limit(10)
     } else {
         throw new Error('Please provide draft "id" or "raw_name"')
     }
 
     const { data, error } = await query
     if (error) throw new Error(error.message)
-    const draft = Array.isArray(data) ? data[0] : data
-    if (!draft) throw new Error(`No draft found matching ${draftId || input.raw_name}`)
+    const rows = Array.isArray(data) ? data : (data ? [data] : [])
+    const visibleRows = scope ? filterVisibleDrafts(scope, rows) : rows
+    const draft = visibleRows[0]
+    if (!draft) throw new Error(`No draft found matching ${draftId || input.raw_name} in your permitted seller account(s).`)
 
     const allStores = await listDarazStores()
     const storeNames = (draft.target_stores || []).map((id: string) => allStores.find(s => s.id === id)?.seller_account || id).join(', ')
@@ -2086,6 +2163,7 @@ export async function getDraftDetails(input: GetDraftDetailsInput) {
 // ── View Draft Images (Dedicated Vision Tool for Claude MCP + ChatGPT Actions) ─
 
 export async function viewDraftImages(input: ViewDraftImagesInput) {
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
     let draft: any = null
     let targetImages: string[] = []
@@ -2099,6 +2177,9 @@ export async function viewDraftImages(input: ViewDraftImagesInput) {
             .select('*')
             .eq('id', lookupId)
             .single()
+        if (data && scope && !isDraftVisible(scope, data)) {
+            throw new Error('Permission denied: this draft belongs to a seller account outside your permission scope.')
+        }
         draft = data
     } else if (input.raw_name) {
         const { data } = await supabase
@@ -2106,16 +2187,18 @@ export async function viewDraftImages(input: ViewDraftImagesInput) {
             .select('*')
             .ilike('raw_name', `%${input.raw_name.trim()}%`)
             .order('created_at', { ascending: false })
-            .limit(1)
-        draft = data?.[0]
+            .limit(10)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        draft = visible[0]
     } else {
         // Fallback: pick most recent image_only draft if user says "check my image-only draft" without passing ID
         const { data } = await supabase
             .from('daraz_draft_listings')
             .select('*')
             .order('created_at', { ascending: false })
-            .limit(15)
-        draft = (data || []).find(d => Array.isArray(d.images) && d.images.length > 0 && (d.raw_name?.startsWith('[Image Only]') || d.attributes?.draft_type === 'image_only')) || data?.[0]
+            .limit(25)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        draft = visible.find(d => Array.isArray(d.images) && d.images.length > 0 && (d.raw_name?.startsWith('[Image Only]') || d.attributes?.draft_type === 'image_only')) || visible[0]
     }
 
     if (draft && Array.isArray(draft.images)) {
@@ -2167,6 +2250,8 @@ export async function viewDraftImages(input: ViewDraftImagesInput) {
 // ── Bulk Add Products ───────────────────────────────────────────────────────
 
 export async function bulkAddProducts(input: BulkAddInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     if (!input.products || input.products.length === 0) {
         throw new Error('Please provide a non-empty list of products')
     }
@@ -2187,7 +2272,9 @@ export async function bulkAddProducts(input: BulkAddInput) {
             targetStoreIds.forEach(id => { titlesPerStore[id] = title })
 
             const variantInfo = buildVariantSkuRows(raw, p.variants, pricing.price, pricing.specialPrice)
-            const attributesPayload: Record<string, any> = {}
+            const attributesPayload: Record<string, any> = {
+                ...(scope?.userId ? { created_by: scope.userId } : {})
+            }
             if (variantInfo.hasVariants) {
                 attributesPayload.has_variants = true
                 attributesPayload.variant1_name = variantInfo.variant1Name
@@ -2236,6 +2323,7 @@ export async function bulkAddProducts(input: BulkAddInput) {
 // ── Get Draft Listings ──────────────────────────────────────────────────────
 
 export async function getDraftListings(input: GetDraftsInput = {}) {
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
     let query = supabase
         .from('daraz_draft_listings')
@@ -2254,10 +2342,12 @@ export async function getDraftListings(input: GetDraftsInput = {}) {
     const { data, error } = await query
     if (error) throw new Error(error.message)
 
+    const visibleRows = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+
     // Auto-analyze up to 2 image_only drafts that do not yet have cached visual_analysis
     // so ChatGPT/Claude/Gemini immediately know what product is in the image even from get_draft_listings!
     let autoInspectedCount = 0
-    for (const d of (data || [])) {
+    for (const d of visibleRows) {
         const isImgOnly = (d.raw_name?.startsWith('[Image Only]') || d.attributes?.draft_type === 'image_only') && Array.isArray(d.images) && d.images.length > 0
         if (isImgOnly && !d.attributes?.visual_analysis && autoInspectedCount < 2) {
             autoInspectedCount++
@@ -2271,7 +2361,7 @@ export async function getDraftListings(input: GetDraftsInput = {}) {
         }
     }
 
-    const mapped = (data || []).map(d => {
+    const mapped = visibleRows.map(d => {
         const prodLink = d.attributes?.product_link || null
         const draftType = d.attributes?.draft_type || computeDraftType({
             raw_name: d.raw_name,
@@ -2339,6 +2429,8 @@ export async function extractProductLinkAction(url: string) {
 // ── Push Product to Daraz ───────────────────────────────────────────────────
 
 export async function pushProductToDaraz(input: PushProductInput) {
+    assertConnectorCanEdit()
+    const scope = getConnectorScope()
     const supabase = await createAdminClient()
 
     // 0. Load existing draft if id/draft_id or product_name matches
@@ -2351,6 +2443,9 @@ export async function pushProductToDaraz(input: PushProductInput) {
             .select('*')
             .eq('id', lookupId)
             .maybeSingle()
+        if (data && scope && !isDraftVisible(scope, data)) {
+            throw new Error('Permission denied: this draft belongs to a seller account outside your permission scope.')
+        }
         existingDraft = data
     } else if (input.product_name) {
         const { data } = await supabase
@@ -2358,9 +2453,9 @@ export async function pushProductToDaraz(input: PushProductInput) {
             .select('*')
             .ilike('raw_name', input.product_name.trim())
             .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-        existingDraft = data
+            .limit(10)
+        const visible = scope ? filterVisibleDrafts(scope, data || []) : (data || [])
+        existingDraft = visible[0] || null
     }
 
     const productName = (input.product_name || existingDraft?.raw_name || '').trim()
@@ -2551,7 +2646,10 @@ export async function pushProductToDaraz(input: PushProductInput) {
     try {
         const createRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/daraz/products/create`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...signInternalUser(scope?.userId || '__master__')
+            },
             body: JSON.stringify({
                 storeIds: targetStoreIds,
                 primaryCategory: categoryId,

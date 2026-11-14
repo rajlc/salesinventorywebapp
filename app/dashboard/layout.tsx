@@ -119,8 +119,12 @@ function DashboardLayout({
     // Non-admin staff cannot view /dashboard. Automatically route them to their permitted workspace page.
     useEffect(() => {
         if (pathname === '/dashboard' && isMounted && !isPermissionsLoading && userRole && userRole !== 'admin') {
-            if (hasPermission('Inventory')) {
+            if (hasPermission('Daraz Listing') && !hasPermission('Inventory')) {
+                router.replace('/dashboard/inventory/daraz-product-management')
+            } else if (hasPermission('Inventory')) {
                 router.replace('/dashboard/inventory')
+            } else if (hasPermission('Daraz Listing')) {
+                router.replace('/dashboard/inventory/daraz-product-management')
             } else if (hasPermission('Daraz')) {
                 router.replace('/dashboard/sales')
             } else if (hasPermission('Purchase')) {

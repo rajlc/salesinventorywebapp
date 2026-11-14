@@ -1474,6 +1474,110 @@ export async function pushPriceToDaraz(productId: string, targetStoreIds?: strin
 }
 
 
+export async function getProductActiveOrderQtyByStore(
+    productId: string,
+    skus: string[] = []
+): Promise<{ bySku: Record<string, number>; byStoreId: Record<string, number>; byAccount: Record<string, number> }> {
+    const bySku: Record<string, number> = {}
+    const byStoreId: Record<string, number> = {}
+    const byAccount: Record<string, number> = {}
+    if (!productId && skus.length === 0) return { bySku, byStoreId, byAccount }
+
+    try {
+        const supabase = await createClient()
+        const activeStatuses = ['Pending', 'Packed', 'pending', 'packed']
+        const seenItemIds = new Set<string>()
+
+        const accumulate = (rows: any[], multiplier = 1) => {
+            for (const row of rows || []) {
+                if (row.id && seenItemIds.has(row.id)) continue
+                if (row.id) seenItemIds.add(row.id)
+
+                const order = Array.isArray(row.daraz_orders) ? row.daraz_orders[0] : row.daraz_orders
+                if (!order || order.deleted === true) continue
+                const qty = (Number(row.quantity) || 0) * multiplier
+                if (qty <= 0) continue
+
+                if (row.seller_sku) {
+                    const s = String(row.seller_sku).trim()
+                    if (s) bySku[s] = (bySku[s] || 0) + qty
+                }
+                if (order.store_id) {
+                    const sid = String(order.store_id)
+                    byStoreId[sid] = (byStoreId[sid] || 0) + qty
+                }
+                const storeObj = Array.isArray(order.online_stores) ? order.online_stores[0] : order.online_stores
+                const accRaw = row.seller_account || storeObj?.seller_account || ''
+                if (accRaw) {
+                    const acc = String(accRaw).trim().toLowerCase()
+                    if (acc) byAccount[acc] = (byAccount[acc] || 0) + qty
+                }
+            }
+        }
+
+        const selectCols = 'id, quantity, seller_sku, seller_account, daraz_orders!inner(order_status, store_id, deleted, online_stores(seller_account))'
+        const cleanSkus = Array.from(new Set(skus.map(s => s?.trim()).filter(Boolean)))
+
+        const queries: PromiseLike<any>[] = []
+        if (productId) {
+            queries.push(
+                supabase
+                    .from('daraz_order_items')
+                    .select(selectCols)
+                    .eq('product_id', productId)
+                    .in('daraz_orders.order_status', activeStatuses)
+            )
+            queries.push(
+                supabase
+                    .from('product_combos')
+                    .select('parent_product_id, quantity')
+                    .eq('child_product_id', productId)
+            )
+        }
+        if (cleanSkus.length > 0) {
+            queries.push(
+                supabase
+                    .from('daraz_order_items')
+                    .select(selectCols)
+                    .in('seller_sku', cleanSkus)
+                    .in('daraz_orders.order_status', activeStatuses)
+            )
+        }
+
+        const results = await Promise.all(queries)
+        let idx = 0
+        if (productId) {
+            const directRes = results[idx++]
+            const comboRes = results[idx++]
+            if (directRes?.error) console.error('getProductActiveOrderQtyByStore directItems error:', directRes.error)
+            accumulate(directRes?.data || [], 1)
+
+            const parentCombos = comboRes?.data || []
+            if (parentCombos.length > 0) {
+                await Promise.all(
+                    parentCombos.map(async (combo: any) => {
+                        const { data: comboItems } = await supabase
+                            .from('daraz_order_items')
+                            .select(selectCols)
+                            .eq('product_id', combo.parent_product_id)
+                            .in('daraz_orders.order_status', activeStatuses)
+                        accumulate(comboItems || [], Number(combo.quantity) || 1)
+                    })
+                )
+            }
+        }
+        if (cleanSkus.length > 0) {
+            const skuRes = results[idx++]
+            if (skuRes?.error) console.error('getProductActiveOrderQtyByStore skuItems error:', skuRes.error)
+            accumulate(skuRes?.data || [], 1)
+        }
+    } catch (err) {
+        console.error('getProductActiveOrderQtyByStore error:', err)
+    }
+
+    return { bySku, byStoreId, byAccount }
+}
+
 /**
  * Push stock quantity for one or more SKUs to Daraz.
  * updates can be an array of { sku: string, quantity: number, store_id: string }

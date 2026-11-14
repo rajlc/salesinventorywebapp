@@ -6,6 +6,7 @@ import { Card } from '@/components/ui-shim'
 import ProductDetailDrawer from './ProductDetailDrawer'
 import EditProductDrawer from './EditProductDrawer'
 import { syncAllDarazProductsAction } from '@/features/inventory/actions/daraz-sync-products'
+import { usePermissions } from '@/lib/permissions/PermissionContext'
 
 // ── Content Score Calculation (User Specification) ───────────────────────────
 // Excellent: 3+ images, highlights with bullet points, and description with at least one image
@@ -76,6 +77,9 @@ interface DarazProductsTabProps {
 }
 
 export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProductsTabProps) {
+    const { userRole, hasPermission } = usePermissions()
+    const isSingleStoreLocked = userRole !== 'admin' && hasPermission('Daraz Listing') && !hasPermission('Daraz Listing', 'All')
+
     const [products, setProducts] = useState<any[]>([])
     const [loading, setLoading] = useState(true)
     const [syncing, setSyncing] = useState(false)
@@ -132,6 +136,9 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                 const json = await res.json()
                 if (json.success && json.data) {
                     setStores(json.data)
+                    if (isSingleStoreLocked && json.data.length === 1) {
+                        setStoreFilter(json.data[0].id)
+                    }
                 }
             } catch (err) {
                 console.error('Failed to fetch stores:', err)
@@ -277,9 +284,14 @@ export default function DarazProductsTab({ onPushToAnotherAccount }: DarazProduc
                     <select
                         value={storeFilter}
                         onChange={(e) => setStoreFilter(e.target.value)}
-                        className="py-2 px-3 border rounded-md text-sm bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                        disabled={isSingleStoreLocked && stores.length === 1}
+                        className="py-2 px-3 border rounded-md text-sm bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500 disabled:opacity-75 disabled:cursor-not-allowed"
                     >
-                        <option value="">All Seller Accounts</option>
+                        {!(isSingleStoreLocked && stores.length === 1) && (
+                            <option value="">
+                                {isSingleStoreLocked ? 'All Permitted Accounts' : 'All Seller Accounts'}
+                            </option>
+                        )}
                         {stores.map(s => (
                             <option key={s.id} value={s.id}>{s.seller_account}</option>
                         ))}

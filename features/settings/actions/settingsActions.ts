@@ -178,6 +178,9 @@ export async function createOnlineStore(store: {
         chat_review_enabled: chat_review_enabled !== undefined ? chat_review_enabled : true,
     })
 
+    invalidateMemoryCachePrefix('online_stores:list')
+    invalidateMemoryCachePrefix('listing_scope:')
+
     return { data: { ...data, ...syncMode } }
 }
 
@@ -185,6 +188,12 @@ export async function updateOnlineStore(id: string, store: any) {
     const supabase = await getSupabaseServer()
 
     const { order_sync_enabled, chat_review_enabled, ...dbFields } = store || {}
+
+    const { data: existingStore } = await supabase
+        .from('online_stores')
+        .select('seller_account')
+        .eq('id', id)
+        .maybeSingle()
 
     let updatedRow: any = { id }
     if (Object.keys(dbFields).length > 0) {
@@ -199,6 +208,15 @@ export async function updateOnlineStore(id: string, store: any) {
             return { error: error.message }
         }
         updatedRow = data
+
+        // Keep Daraz Listing staff permissions in sync if seller_account was renamed
+        if (existingStore?.seller_account && data?.seller_account && existingStore.seller_account !== data.seller_account) {
+            await supabase
+                .from('user_permissions')
+                .update({ sub_page_role: data.seller_account })
+                .eq('main_page_role', 'Daraz Listing')
+                .eq('sub_page_role', existingStore.seller_account)
+        }
     }
 
     if (order_sync_enabled !== undefined || chat_review_enabled !== undefined) {
@@ -208,6 +226,9 @@ export async function updateOnlineStore(id: string, store: any) {
         })
         updatedRow = { ...updatedRow, ...syncMode }
     }
+
+    invalidateMemoryCachePrefix('online_stores:list')
+    invalidateMemoryCachePrefix('listing_scope:')
 
     return { data: updatedRow }
 }
@@ -227,6 +248,12 @@ export async function updateOnlineStoreSyncMode(
 export async function deleteOnlineStore(id: string) {
     const supabase = await getSupabaseServer()
 
+    const { data: existingStore } = await supabase
+        .from('online_stores')
+        .select('seller_account')
+        .eq('id', id)
+        .maybeSingle()
+
     const { error } = await supabase
         .from('online_stores')
         .delete()
@@ -235,6 +262,18 @@ export async function deleteOnlineStore(id: string) {
     if (error) {
         return { error: error.message }
     }
+
+    // Automatically remove deleted store from Daraz Listing staff permissions
+    if (existingStore?.seller_account) {
+        await supabase
+            .from('user_permissions')
+            .delete()
+            .eq('main_page_role', 'Daraz Listing')
+            .eq('sub_page_role', existingStore.seller_account)
+    }
+
+    invalidateMemoryCachePrefix('online_stores:list')
+    invalidateMemoryCachePrefix('listing_scope:')
 
     return { success: true }
 }

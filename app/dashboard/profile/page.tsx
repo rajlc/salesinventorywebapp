@@ -13,6 +13,7 @@ import { getReminders } from '@/features/reminders/actions/reminder-actions'
 
 import { ProfileHeader } from '@/features/profile/components/ProfileHeader'
 import { AssignedWorkspaces } from '@/features/profile/components/AssignedWorkspaces'
+import { ConnectorTokenCard } from '@/features/profile/components/ConnectorTokenCard'
 import { ProfileDetails } from '@/features/profile/components/ProfileDetails'
 import { TaskList } from '@/features/profile/components/TaskList'
 import { ActivityLog } from '@/features/profile/components/ActivityLog'
@@ -74,6 +75,9 @@ export default function ProfilePage() {
 
                 {/* Assigned Workspaces / Quick Launchpad */}
                 <AssignedWorkspaces />
+
+                {/* Scoped AI Connector Token (for Admin / Daraz Listing staff) */}
+                <ConnectorTokenCard />
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
                     {/* Left Column: Personal Info & Security */}

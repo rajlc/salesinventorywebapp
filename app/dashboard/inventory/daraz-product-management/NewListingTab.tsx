@@ -13,6 +13,7 @@ import CategoryPicker from './CategoryPicker'
 import DynamicAttributesForm from './DynamicAttributesForm'
 import SearchableSupplierSelect from './SearchableSupplierSelect'
 import DarazAiStudioModal from './DarazAiStudioModal'
+import { usePermissions } from '@/lib/permissions/PermissionContext'
 
 interface NewListingTabProps {
     prefilledData?: any
@@ -118,6 +119,9 @@ const COMMON_COLORS = [
 ]
 
 export default function NewListingTab({ prefilledData, onClearPrefilled }: NewListingTabProps) {
+    const { userRole, hasPermission } = usePermissions()
+    const isStoreRestricted = userRole !== 'admin' && hasPermission('Daraz Listing') && !hasPermission('Daraz Listing', 'All')
+
     // ── View mode ───────────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<'list' | 'add-single' | 'add-bulk' | 'edit-single'>('list')
     const [isAddMenuOpen, setIsAddMenuOpen] = useState(false)
@@ -605,11 +609,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             if (json?.success && json.data) {
                 setStores(json.data)
                 if (json.data.length > 0) setSelectedStores([json.data[0].id])
+                if (isStoreRestricted && json.data.length === 1) {
+                    setStoreFilter(json.data[0].id)
+                }
             }
         } catch (err) {
             console.error('Failed to load stores:', err)
         }
     }
+
+    useEffect(() => {
+        if (isStoreRestricted && stores.length === 1) {
+            setStoreFilter(stores[0].id)
+            if (selectedStores.length === 0) {
+                setSelectedStores([stores[0].id])
+            }
+        }
+    }, [isStoreRestricted, stores])
 
     const fetchDrafts = async (retryArg?: any) => {
         const retryCount = typeof retryArg === 'number' ? retryArg : 0
@@ -2865,9 +2881,14 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 setStoreFilter(e.target.value)
                                 setCurrentPage(1)
                             }}
-                            className="py-2 px-3 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium"
+                            disabled={isStoreRestricted && stores.length === 1}
+                            className="py-2 px-3 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium disabled:opacity-75 disabled:cursor-not-allowed"
                         >
-                            <option value="">All Seller Accounts</option>
+                            {!(isStoreRestricted && stores.length === 1) && (
+                                <option value="">
+                                    {isStoreRestricted ? 'All Permitted Accounts' : 'All Seller Accounts'}
+                                </option>
+                            )}
                             {stores.map(s => (
                                 <option key={s.id} value={s.id}>{s.seller_account}</option>
                             ))}
@@ -3038,7 +3059,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         type="button"
                                         onClick={() => {
                                             setStatusFilter('all')
-                                            setStoreFilter('')
+                                            if (!(isStoreRestricted && stores.length === 1)) {
+                                                setStoreFilter('')
+                                            }
                                             setSearchQuery('')
                                             setCurrentPage(1)
                                         }}
@@ -5160,6 +5183,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         key={store.id}
                                                         type="button"
                                                         onClick={() => {
+                                                            if (isStoreRestricted && stores.length === 1) return
                                                             const next = [...bulkRows]
                                                             const target = next[idx].targetStores
                                                             next[idx].targetStores = target.includes(store.id)
@@ -5778,6 +5802,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                         key={store.id}
                                         type="button"
                                         onClick={() => {
+                                            if (isStoreRestricted && stores.length === 1) return
                                             setSelectedStores(prev =>
                                                 prev.includes(store.id)
                                                     ? prev.filter(id => id !== store.id)

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
+import { getRequestListingScope, filterStoresForScope } from '@/lib/daraz/listing-access'
 
 // GET /api/daraz/stores
 // Returns the list of all active online stores (seller accounts) enriched with sync mode flags
@@ -23,6 +24,10 @@ export async function GET(request: NextRequest) {
         }
 
         let enriched = await enrichStoresWithSyncModes(stores || [], supabase)
+
+        // Daraz Listing staff only ever see the stores they were given permission for
+        const scope = await getRequestListingScope()
+        enriched = filterStoresForScope(scope, enriched)
 
         if (onlyOrderSync) {
             enriched = enriched.filter(s => s.order_sync_enabled !== false)

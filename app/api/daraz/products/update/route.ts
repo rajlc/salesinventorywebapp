@@ -4,6 +4,7 @@ import { getValidAccessToken, buildSignedParams, API_URL } from '@/lib/daraz/cli
 import { migrateImagesToDaraz } from '@/lib/daraz/image-migrate'
 import { buildProductUpdateXml } from '@/lib/daraz/xml-builder'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getRequestListingScope, sellerAccountAllowed } from '@/lib/daraz/listing-access'
 
 export async function POST(request: NextRequest) {
     try {
@@ -28,9 +29,31 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ success: false, error: 'Product ID is required' }, { status: 400 })
         }
 
+        const scope = await getRequestListingScope()
+        if (!scope.userId) {
+            return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
+        }
+        if (!scope.canEdit) {
+            return NextResponse.json({ success: false, error: 'You have view-only access to Daraz Listing' }, { status: 403 })
+        }
+
         const supabase = await createAdminClient()
 
-        // ── 1. Action: SAVE DRAFT ───────────────────────────────────────────────
+        // Restricted Daraz Listing staff: the product must belong to one of their allowed seller accounts
+        if (scope.restricted) {
+            const denied = NextResponse.json({ success: false, error: 'You do not have permission for this seller account' }, { status: 403 })
+            if (storeId && !scope.allowedStoreIds.includes(storeId)) return denied
+            if (sellerAccount && !sellerAccountAllowed(scope, sellerAccount)) return denied
+
+            const { data: ownedProd } = await supabase
+                .from('products')
+                .select('seller_account1, seller_account2, seller_account3, seller_account4')
+                .eq('id', productId)
+                .maybeSingle()
+            const accounts = [ownedProd?.seller_account1, ownedProd?.seller_account2, ownedProd?.seller_account3, ownedProd?.seller_account4].filter(Boolean) as string[]
+            if (!accounts.some(a => sellerAccountAllowed(scope, a))) return denied
+        }
+        // ───────────────────────────────────────────────
         if (action === 'save_draft') {
             const draftData = {
                 name,
@@ -105,6 +128,10 @@ export async function POST(request: NextRequest) {
 
         if (!targetStoreId) {
             return NextResponse.json({ success: false, error: 'No connected Daraz store found for this product.' }, { status: 400 })
+        }
+
+        if (scope.restricted && !scope.allowedStoreIds.includes(targetStoreId)) {
+            return NextResponse.json({ success: false, error: 'You do not have permission for this seller account' }, { status: 403 })
         }
 
         const accessToken = await getValidAccessToken(targetStoreId, 'order')

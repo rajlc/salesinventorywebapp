@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import axios from 'axios'
 import { getValidAccessToken, buildSignedParams, API_URL } from '@/lib/daraz/client'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getRequestListingScope } from '@/lib/daraz/listing-access'
 
 // GET /api/daraz/products/list?status=active&store_id=xxx&offset=0&limit=50
 // Fetches live products from Daraz and cross-references with internal inventory
@@ -15,6 +16,14 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get('search') || ''
 
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) {
+            return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
+        }
+        if (scope.restricted && storeId && !scope.allowedStoreIds.includes(storeId)) {
+            return NextResponse.json({ success: false, error: 'You do not have permission for this seller account' }, { status: 403 })
+        }
+
         const supabase = await createAdminClient()
 
         // Get stores to translate storeId to seller_account name
@@ -25,6 +34,8 @@ export async function GET(request: NextRequest) {
 
         if (storeId) {
             storeQuery = storeQuery.eq('id', storeId)
+        } else if (scope.restricted) {
+            storeQuery = storeQuery.in('id', scope.allowedStoreIds.length > 0 ? scope.allowedStoreIds : ['00000000-0000-0000-0000-000000000000'])
         }
 
         const { data: stores } = await storeQuery
@@ -46,8 +57,11 @@ export async function GET(request: NextRequest) {
         if (storeId && stores && stores.length > 0) {
             const accName = stores[0].seller_account
             dbQuery = dbQuery.or(`seller_account1.eq."${accName}",seller_account2.eq."${accName}",seller_account3.eq."${accName}",seller_account4.eq."${accName}"`)
+        } else if (scope.restricted) {
+            // Restricted staff: only products connected to their allowed seller accounts
+            const orParts = (stores || []).flatMap(s => [1, 2, 3, 4].map(n => `seller_account${n}.eq."${s.seller_account}"`))
+            dbQuery = dbQuery.or(orParts.length > 0 ? orParts.join(',') : 'seller_account1.eq."__none__"')
         } else {
-            // All active Daraz accounts
             dbQuery = dbQuery.or('seller_account1.not.is.null,seller_account2.not.is.null,seller_account3.not.is.null,seller_account4.not.is.null')
         }
 

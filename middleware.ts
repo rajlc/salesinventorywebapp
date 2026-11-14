@@ -1,4 +1,4 @@
-import { createServerClient } from '@supabase/ssr'
+﻿import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
@@ -10,7 +10,7 @@ export async function middleware(request: NextRequest) {
 
     const pathname = request.nextUrl.pathname
 
-    // ── Claude Custom Connector & Remote MCP OAuth Discovery Handlers ──────
+    // â”€â”€ Claude Custom Connector & Remote MCP OAuth Discovery Handlers â”€â”€â”€â”€â”€â”€
     if (pathname.startsWith('/.well-known/oauth-protected-resource')) {
         const host = request.headers.get('x-forwarded-host') || request.headers.get('host') || request.nextUrl.host
         const proto = request.headers.get('x-forwarded-proto') || (host.includes('localhost') ? 'http' : 'https')
@@ -103,37 +103,9 @@ export async function middleware(request: NextRequest) {
         })
     }
 
-    if (pathname === '/api/oauth/authorize') {
-        const redirectUri = request.nextUrl.searchParams.get('redirect_uri') || 'https://claude.ai/api/auth/callback'
-        const state = request.nextUrl.searchParams.get('state') || ''
-        const code = 'auth_code_' + Math.random().toString(36).substring(2, 12)
+    // NOTE: /api/oauth/authorize and /api/oauth/token are real route handlers (per-staff connector tokens).
 
-        const targetUrl = new URL(redirectUri)
-        targetUrl.searchParams.set('code', code)
-        if (state) targetUrl.searchParams.set('state', state)
-
-        return NextResponse.redirect(targetUrl, 302)
-    }
-
-    if (pathname === '/api/oauth/token') {
-        return new NextResponse(JSON.stringify({
-            access_token: 'claude_daraz_bearer_token_' + Date.now(),
-            token_type: 'Bearer',
-            expires_in: 315360000,
-            refresh_token: 'claude_daraz_refresh_token_' + Date.now(),
-            scope: 'tools'
-        }), {
-            status: 200,
-            headers: {
-                'content-type': 'application/json',
-                'access-control-allow-origin': '*',
-                'access-control-allow-methods': 'POST, OPTIONS',
-                'access-control-allow-headers': '*'
-            }
-        })
-    }
-
-    // ── Early exit for routes that do NOT need Supabase auth ──────────────
+    // â”€â”€ Early exit for routes that do NOT need Supabase auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // These are background jobs, webhooks, and internal API routes.
     const noAuthPrefixes = [
         '/api/',
@@ -227,7 +199,7 @@ export async function middleware(request: NextRequest) {
         return response
     }
 
-    // ── Bypass router prefetch requests from consuming refresh tokens ──────────────
+    // â”€â”€ Bypass router prefetch requests from consuming refresh tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const isPrefetch =
         request.headers.get('next-router-prefetch') === '1' ||
         request.headers.get('purpose') === 'prefetch' ||
@@ -237,7 +209,7 @@ export async function middleware(request: NextRequest) {
         return response
     }
 
-    // ── Token is expiring (<= 120s), expired, or needs refresh ───────────────────
+    // â”€â”€ Token is expiring (<= 120s), expired, or needs refresh â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
@@ -331,7 +303,7 @@ export async function middleware(request: NextRequest) {
         if (!user) {
             // Do NOT log the user out or wipe cookies if Supabase Nano DB temporarily timed out
             if (isTransientAuthFailure && hasAuthCookie) {
-                console.warn('[Middleware] Transient DB/Auth timeout — preserving existing session cookies.')
+                console.warn('[Middleware] Transient DB/Auth timeout â€” preserving existing session cookies.')
                 return response
             }
             const redirectResponse = createRedirect('/login')

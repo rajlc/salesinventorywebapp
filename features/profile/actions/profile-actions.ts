@@ -129,16 +129,30 @@ export async function getMyRoleAndPermissions(): Promise<{
     return withMemoryCache(`user_role_perms:${user.id}`, 30_000, async () => {
         try {
             const admin = await createAdminClient()
-            const [profileRes, permsRes] = await Promise.all([
+            const [profileRes, permsRes, storesRes] = await Promise.all([
                 admin.from('user_profiles').select('role').eq('id', user.id).maybeSingle(),
                 admin
                     .from('user_permissions')
                     .select('id, user_id, main_page_role, sub_page_role, permission_type')
                     .eq('user_id', user.id),
+                admin
+                    .from('online_stores')
+                    .select('seller_account')
+                    .eq('is_active', true)
             ])
 
+            const validStoreNames = new Set(
+                (storesRes.data || []).map((s: any) => (s.seller_account || '').toLowerCase().trim())
+            )
+
             const role = profileRes.data?.role || (user.user_metadata?.role as string) || null
-            const permissions = (permsRes.data || []) as UserPermissionItem[]
+            const rawPerms = (permsRes.data || []) as UserPermissionItem[]
+            const permissions = rawPerms.filter(p => {
+                if ((p.main_page_role || '').toLowerCase().trim() !== 'daraz listing') return true
+                const sub = (p.sub_page_role || '').toLowerCase().trim()
+                if (!sub || sub === 'all') return true
+                return validStoreNames.has(sub)
+            })
 
             return { userId: user.id, role, permissions }
         } catch (err) {

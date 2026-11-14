@@ -77,6 +77,9 @@ export default function InventoryPage() {
     // Admin sees everything; restricted users see only permitted modules
     const visibleModules = ALL_INVENTORY_MODULES.filter((module) => {
         if (userRole === 'admin') return true
+        if (module.href === '/dashboard/inventory/daraz-product-management' && hasPermission('Daraz Listing')) {
+            return true
+        }
         const primary = hasPermission(module.mainRole, module.subRole)
         const alternate = module.altSubRole ? hasPermission(module.mainRole, module.altSubRole) : false
         return primary || alternate

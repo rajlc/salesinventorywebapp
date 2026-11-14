@@ -142,29 +142,32 @@ export async function getPurchasePlans() {
 export async function getProductPurchaseStats(productId: string): Promise<ProductPurchaseStats> {
     const supabase = await createClient()
 
-    // Latest Purchase
+    // Latest Purchase (Buy only; ignore Sell)
     const { data: latest } = await supabase
         .from('purchases')
         .select('unit_amount, supplier:suppliers(supplier_name)')
         .eq('product_id', productId)
+        .or('purchase_type.ilike.buy,purchase_type.is.null')
         .order('purchase_date', { ascending: false })
         .limit(1)
-        .single()
+        .maybeSingle()
 
-    // Lowest Price
+    // Lowest Price (Buy only; ignore Sell)
     const { data: lowest } = await supabase
         .from('purchases')
         .select('unit_amount, supplier:suppliers(supplier_name)')
         .eq('product_id', productId)
+        .or('purchase_type.ilike.buy,purchase_type.is.null')
         .order('unit_amount', { ascending: true })
         .limit(1)
-        .single()
+        .maybeSingle()
 
-    // Last 3 Orders
+    // Last 3 Orders (Buy only; ignore Sell)
     const { data: last3 } = await supabase
         .from('purchases')
         .select('purchase_date, unit_amount, quantity, supplier:suppliers(supplier_name)')
         .eq('product_id', productId)
+        .or('purchase_type.ilike.buy,purchase_type.is.null')
         .order('purchase_date', { ascending: false })
         .limit(3)
 

@@ -1,9 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import {
+    getRequestListingScope,
+    filterVisibleDrafts,
+    isDraftVisible,
+    mergeTargetStoresForScope
+} from '@/lib/daraz/listing-access'
 
-// GET /api/daraz/drafts — fetch all draft listings
+const unauthorized = () => NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+const readOnly = () => NextResponse.json({ error: 'You have view-only access to Daraz Listing' }, { status: 403 })
+
+// GET /api/daraz/drafts — fetch draft listings (restricted staff only see drafts of their allowed stores)
 export async function GET() {
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) return unauthorized()
+
         const supabase = await createAdminClient()
         const { data, error } = await supabase
             .from('daraz_draft_listings')
@@ -12,7 +24,7 @@ export async function GET() {
 
         if (error) throw error
 
-        const normalized = (data || []).map((item: any) => ({
+        const normalized = filterVisibleDrafts(scope, data || []).map((item: any) => ({
             ...item,
             product_link: item.attributes?.product_link || null,
             draft_type: item.attributes?.draft_type || null,
@@ -77,8 +89,24 @@ function computeDraftType(item: {
 // POST /api/daraz/drafts — create a new draft
 export async function POST(req: NextRequest) {
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) return unauthorized()
+        if (!scope.canEdit) return readOnly()
+
         const supabase = await createAdminClient()
         const body = await req.json()
+
+        // Restricted staff can only target stores inside their permission scope
+        let effectiveTargetStores: string[] = Array.isArray(body.target_stores) ? body.target_stores : []
+        if (scope.restricted) {
+            const allowedSet = new Set(scope.allowedStoreIds)
+            if (effectiveTargetStores.some(id => !allowedSet.has(id))) {
+                return NextResponse.json({ error: 'You do not have permission for one of the selected seller accounts' }, { status: 403 })
+            }
+            if (effectiveTargetStores.length === 0 && scope.allowedStoreIds.length === 1) {
+                effectiveTargetStores = [scope.allowedStoreIds[0]]
+            }
+        }
 
         const productLink = (body.product_link || body.attributes?.product_link || '').trim() || null
         const images = body.images || []
@@ -119,6 +147,7 @@ export async function POST(req: NextRequest) {
 
         const attributesPayload = {
             ...(body.attributes || {}),
+            created_by: scope.userId,
             product_link: productLink,
             draft_type: draftType,
             ...(campaignPrice !== null ? { campaign_price: campaignPrice } : {}),
@@ -135,7 +164,7 @@ export async function POST(req: NextRequest) {
             category_path: body.category_path || null,
             images,
             attributes: attributesPayload,
-            target_stores: body.target_stores || [],
+            target_stores: effectiveTargetStores,
             price: body.price || null,
             special_price: body.special_price || null,
             special_price_from: body.special_price_from || null,
@@ -153,11 +182,21 @@ export async function POST(req: NextRequest) {
             insertRow.campaign_price = campaignPrice
         }
 
+        insertRow.created_by = scope.userId
+
         let { data, error } = await supabase
             .from('daraz_draft_listings')
             .insert(insertRow)
             .select('*')
             .single()
+
+        if (error && (error.code === 'PGRST204' || error.message?.includes('created_by'))) {
+            // created_by column not migrated yet - retry without it
+            delete insertRow.created_by
+            const retryCreator = await supabase.from('daraz_draft_listings').insert(insertRow).select('*').single()
+            data = retryCreator.data
+            error = retryCreator.error
+        }
 
         if (error && (error.code === 'PGRST204' || error.message?.includes('campaign_price'))) {
             delete insertRow.campaign_price
@@ -217,6 +256,10 @@ const VALID_DRAFT_COLUMNS = new Set([
 // Body: { id, ...fields }
 export async function PATCH(req: NextRequest) {
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) return unauthorized()
+        if (!scope.canEdit) return readOnly()
+
         const supabase = await createAdminClient()
         const body = await req.json()
         const { id, ...fields } = body
@@ -230,8 +273,18 @@ export async function PATCH(req: NextRequest) {
             .eq('id', id)
             .single()
 
-        if (!existing) {
+        if (!existing || !isDraftVisible(scope, existing)) {
             return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+        }
+
+        if (scope.restricted && Array.isArray(fields.target_stores)) {
+            const allowedSet = new Set(scope.allowedStoreIds)
+            const existingTargets: string[] = Array.isArray(existing.target_stores) ? existing.target_stores : []
+            const newlyAdded = fields.target_stores.filter((sid: string) => !existingTargets.includes(sid))
+            if (newlyAdded.some((sid: string) => !allowedSet.has(sid))) {
+                return NextResponse.json({ error: 'You do not have permission for one of the selected seller accounts' }, { status: 403 })
+            }
+            fields.target_stores = mergeTargetStoresForScope(scope, existingTargets, fields.target_stores)
         }
 
         const mergedAttributes = {
@@ -327,11 +380,26 @@ export async function PATCH(req: NextRequest) {
 // DELETE /api/daraz/drafts?id=xxx — delete a draft
 export async function DELETE(req: NextRequest) {
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) return unauthorized()
+        if (!scope.canEdit) return readOnly()
+
         const supabase = await createAdminClient()
         const { searchParams } = new URL(req.url)
         const id = searchParams.get('id')
 
         if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+
+        if (scope.restricted) {
+            const { data: existing } = await supabase
+                .from('daraz_draft_listings')
+                .select('*')
+                .eq('id', id)
+                .maybeSingle()
+            if (!existing || !isDraftVisible(scope, existing)) {
+                return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
+            }
+        }
 
         const { error } = await supabase
             .from('daraz_draft_listings')

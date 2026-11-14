@@ -15,6 +15,8 @@ import {
     generateStudioImagesAction,
     searchSuppliersAction
 } from '@/lib/claude/connector-service'
+import { authenticateConnectorRequest } from '@/lib/claude/connector-auth'
+import { runWithConnectorScope } from '@/lib/claude/connector-scope'
 
 // ── CORS Helper ─────────────────────────────────────────────────────────────
 
@@ -27,35 +29,6 @@ function withCors(response: NextResponse | Response): Response {
 
 export async function OPTIONS() {
     return withCors(new NextResponse(null, { status: 204 }))
-}
-
-// ── Authentication Helper ───────────────────────────────────────────────────
-
-function isAuthorized(req: NextRequest): boolean {
-    const requiredKey = process.env.CLAUDE_CONNECTOR_API_KEY
-    if (!requiredKey || requiredKey.trim() === '') {
-        return true // Open if no secret key configured
-    }
-
-    const authHeader = req.headers.get('authorization')
-    const customHeader = req.headers.get('x-api-key')
-    const queryKey = req.nextUrl.searchParams.get('key')
-
-    if (authHeader && authHeader.startsWith('Bearer claude_daraz_bearer_token_')) {
-        return true
-    }
-
-    if (authHeader && authHeader.replace(/^Bearer\s+/i, '').trim() === requiredKey) {
-        return true
-    }
-    if (customHeader && customHeader.trim() === requiredKey) {
-        return true
-    }
-    if (queryKey && queryKey.trim() === requiredKey) {
-        return true
-    }
-
-    return false
 }
 
 // ── MCP Tool Definitions ────────────────────────────────────────────────────
@@ -738,15 +711,19 @@ const CLAUDE_TOOLS = [
 // ── GET: Supports MCP SSE Streaming and JSON Tool Discovery ─────────────────
 
 export async function GET(req: NextRequest) {
-    if (!isAuthorized(req)) {
-        return withCors(NextResponse.json({ error: 'Unauthorized. Invalid or missing API key.' }, { status: 401 }))
+    const auth = await authenticateConnectorRequest(req)
+    if (!auth.ok || !auth.scope) {
+        return withCors(NextResponse.json({ error: auth.error || 'Unauthorized. Invalid or missing API key.' }, { status: auth.status || 401 }))
     }
 
     // 1. MCP SSE Stream (Server-Sent Events)
     const acceptHeader = req.headers.get('accept') || ''
     if (acceptHeader.includes('text/event-stream')) {
         const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
-        const endpointUrl = `${baseUrl}/api/claude-connector`
+        const keyParam = req.nextUrl.searchParams.get('key') || req.nextUrl.searchParams.get('token')
+        const endpointUrl = keyParam
+            ? `${baseUrl}/api/claude-connector?key=${encodeURIComponent(keyParam)}`
+            : `${baseUrl}/api/claude-connector`
 
         const encoder = new TextEncoder()
         const stream = new ReadableStream({
@@ -787,8 +764,9 @@ export async function GET(req: NextRequest) {
 // ── POST: Universal MCP & REST Tool Execution ───────────────────────────────
 
 export async function POST(req: NextRequest) {
-    if (!isAuthorized(req)) {
-        return withCors(NextResponse.json({ error: 'Unauthorized. Invalid or missing API key.' }, { status: 401 }))
+    const auth = await authenticateConnectorRequest(req)
+    if (!auth.ok || !auth.scope) {
+        return withCors(NextResponse.json({ error: auth.error || 'Unauthorized. Invalid or missing API key.' }, { status: auth.status || 401 }))
     }
 
     try {
@@ -864,7 +842,7 @@ export async function POST(req: NextRequest) {
                 const args = body.params?.arguments || body.params || {}
 
                 try {
-                    const result = await executeTool(toolName, args)
+                    const result = await runWithConnectorScope(auth.scope, () => executeTool(toolName, args))
                     const anyResult = result as any
                     const attachedImages = Array.isArray(anyResult?._images) ? anyResult._images : []
 
@@ -926,7 +904,7 @@ export async function POST(req: NextRequest) {
             }, { status: 400 }))
         }
 
-        const result = await executeTool(action, args)
+        const result = await runWithConnectorScope(auth.scope, () => executeTool(action, args))
 
         // Strip raw base64 _images and data_url bloat for REST/OpenAPI clients (ChatGPT Actions limit responses to ~100KB)
         const sanitizedData = typeof result === 'object' && result !== null ? { ...(result as any) } : result

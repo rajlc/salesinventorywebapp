@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getRequestListingScope, isDraftVisible, sellerAccountAllowed } from '@/lib/daraz/listing-access'
 
 interface StoreMapping {
     sellerAccount: string
@@ -10,6 +11,14 @@ interface StoreMapping {
 // Marks a draft as manually pushed on Daraz and optionally syncs it into the products inventory list
 export async function POST(request: NextRequest) {
     try {
+        const scope = await getRequestListingScope()
+        if (!scope.userId) {
+            return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+        }
+        if (!scope.canEdit) {
+            return NextResponse.json({ error: 'You have view-only access to Daraz Listing' }, { status: 403 })
+        }
+
         const body = await request.json()
         const { draftId, skipInventory, rawName, mappings } = body
 
@@ -26,7 +35,7 @@ export async function POST(request: NextRequest) {
             .eq('id', draftId)
             .single()
 
-        if (draftErr || !draft) {
+        if (draftErr || !draft || !isDraftVisible(scope, draft)) {
             return NextResponse.json({ error: 'Draft not found' }, { status: 404 })
         }
 
@@ -66,6 +75,10 @@ export async function POST(request: NextRequest) {
 
         if (validMappings.length === 0) {
             return NextResponse.json({ error: 'At least one Seller Account and Seller SKU are required' }, { status: 400 })
+        }
+
+        if (scope.restricted && validMappings.some(m => !sellerAccountAllowed(scope, m.sellerAccount))) {
+            return NextResponse.json({ error: 'You do not have permission for one of the selected Seller Accounts' }, { status: 403 })
         }
 
         // Check if product already exists in products table by raw name

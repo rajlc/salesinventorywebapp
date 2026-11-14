@@ -1,9 +1,9 @@
 "use client"
 
-import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { getUsers } from "../actions/staff-actions"
 import { getPageRoles } from "@/features/settings/actions/role-actions"
+import { getOnlineStores } from "@/features/settings/actions/settingsActions"
 import { StaffListItem } from "./StaffListItem"
 import { Loader2 } from "lucide-react"
 
@@ -17,6 +17,13 @@ export default function StaffList() {
         queryKey: ['page-roles'],
         queryFn: async () => await getPageRoles()
     })
+
+    const { data: storesResult } = useQuery({
+        queryKey: ['online-stores-staff-mgmt'],
+        queryFn: async () => await getOnlineStores()
+    })
+
+    const onlineStores = (storesResult?.data || []).filter((s: any) => s.is_active !== false)
 
     if (usersLoading) {
         return (
@@ -43,7 +50,7 @@ export default function StaffList() {
                         <th className="px-4 py-3 font-medium">S.N.</th>
                         <th className="px-4 py-3 font-medium">Name</th>
                         <th className="px-4 py-3 font-medium">Role</th>
-                        <th className="px-4 py-3 font-medium">Page View</th>
+                        <th className="px-4 py-3 font-medium">Page View & AI Connector</th>
                         <th className="px-4 py-3 font-medium">Status</th>
                         <th className="px-4 py-3 font-medium text-right">Action</th>
                     </tr>
@@ -55,6 +62,7 @@ export default function StaffList() {
                             user={user}
                             serialNumber={index + 1}
                             pageRoles={roles || []}
+                            onlineStores={onlineStores}
                             onUpdate={refetch}
                         />
                     ))}

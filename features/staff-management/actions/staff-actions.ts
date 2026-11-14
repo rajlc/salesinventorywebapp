@@ -2,6 +2,7 @@
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 export interface UserProfile {
     id: string
@@ -121,6 +122,8 @@ export async function updateUserStatus(userId: string, status: 'pending' | 'acti
 
     if (error) throw new Error(error.message)
 
+    invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
+    invalidateMemoryCachePrefix(`listing_scope:${userId}`)
     revalidatePath('/dashboard/staff-management')
 }
 
@@ -149,6 +152,8 @@ export async function updateUserRole(userId: string, role: 'admin' | 'editor' | 
 
     if (error) throw new Error(error.message)
 
+    invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
+    invalidateMemoryCachePrefix(`listing_scope:${userId}`)
     revalidatePath('/dashboard/staff-management')
 }
 
@@ -368,6 +373,8 @@ export async function bulkUpdateUserPermissions(userId: string, permissions: Arr
         .update({ updated_at: new Date().toISOString() })
         .eq('id', userId)
 
+    invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
+    invalidateMemoryCachePrefix(`listing_scope:${userId}`)
     revalidatePath('/dashboard/staff-management')
 }
 
@@ -380,14 +387,32 @@ export async function getUserPermissions(userId?: string) {
 
     const targetUserId = userId || user.id
 
-    const { data: permissions, error } = await supabase
-        .from('user_permissions')
-        .select('*')
-        .eq('user_id', targetUserId)
+    const [{ data: permissions, error }, { data: activeStores }] = await Promise.all([
+        supabase
+            .from('user_permissions')
+            .select('*')
+            .eq('user_id', targetUserId),
+        supabase
+            .from('online_stores')
+            .select('seller_account')
+            .eq('is_active', true)
+    ])
 
     if (error) throw new Error(error.message)
 
-    return permissions as UserPermission[]
+    const validStoreNames = new Set(
+        (activeStores || []).map(s => (s.seller_account || '').toLowerCase().trim())
+    )
+
+    // Filter out any Daraz Listing sub_page_role whose store was deleted
+    const filtered = (permissions || []).filter((p: any) => {
+        if ((p.main_page_role || '').toLowerCase().trim() !== 'daraz listing') return true
+        const sub = (p.sub_page_role || '').toLowerCase().trim()
+        if (!sub || sub === 'all') return true
+        return validStoreNames.has(sub)
+    })
+
+    return filtered as UserPermission[]
 }
 
 // Log user activity
