@@ -44,6 +44,8 @@ if (process.env.NEXT_PUBLIC_ALLOWED_ORIGINS) {
 const nextConfig: NextConfig = {
   serverExternalPackages: ['sharp'],
   experimental: {
+    cpus: 2,
+    workerThreads: false,
     turbopackFileSystemCacheForDev: false,
     turbopackFileSystemCacheForBuild: false,
     serverActions: {
