@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { X, ArrowRight, Package } from 'lucide-react'
+import { X, ArrowRight, Package, Loader2 } from 'lucide-react'
 import { getResolvedProductsByIds } from '@/features/inventory/actions/product-actions'
 import { getProductsStock } from '@/features/sales/actions/get-order-stock-info'
 
@@ -14,6 +14,8 @@ interface ProductSelectionModalProps {
         image_url?: string | null
         quantity?: number
         stock?: number
+        product_type?: 'single' | 'combo' | null
+        combo_items?: any[] | null
     }>
     stockBreakdown?: any[] // List of products with stock details from getOrdersStockInfo
     onProductSelect: (productId: string, remarks?: string, quantity?: number, productName?: string) => void
@@ -27,57 +29,132 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
     const [resolvedItems, setResolvedItems] = useState<any[]>([])
     const [zoomedImage, setZoomedImage] = useState<string | null>(null)
     const [stockMap, setStockMap] = useState<Record<string, number>>({})
+    const [isLoadingComponents, setIsLoadingComponents] = useState(false)
 
     useEffect(() => {
         if (!isOpen || products.length === 0) return
 
-        // 1. Immediately seed stockMap from caches or props so stocks appear with 0ms delay
+        let cancelled = false
+
+        // 1. Seed caches & stockMap immediately from props / stockBreakdown so pre-resolved combos render in 0ms
         const initialStock: Record<string, number> = {}
         products.forEach(p => {
+            if (!p.product_id) return
+            const breakdownItem = stockBreakdown?.find((s: any) => s.product_id === p.product_id)
+
+            // Seed stock for parent product if available
             if (componentsStockCache.has(p.product_id)) {
                 initialStock[p.product_id] = componentsStockCache.get(p.product_id)!
-            } else {
-                const found = stockBreakdown?.find((s: any) => s.product_id === p.product_id)
-                if (found?.total_stock !== undefined) {
-                    initialStock[p.product_id] = found.total_stock
-                } else if (typeof p.stock === 'number') {
-                    initialStock[p.product_id] = p.stock
+            } else if (breakdownItem?.total_stock !== undefined) {
+                initialStock[p.product_id] = breakdownItem.total_stock
+                componentsStockCache.set(p.product_id, breakdownItem.total_stock)
+            } else if (typeof p.stock === 'number') {
+                initialStock[p.product_id] = p.stock
+                componentsStockCache.set(p.product_id, p.stock)
+            }
+
+            // Seed resolved product & combo children from breakdown or order item props
+            const prodType = breakdownItem?.product_type || p.product_type
+            const rawCombos = breakdownItem?.combo_items || p.combo_items
+            if (prodType === 'combo' && Array.isArray(rawCombos) && rawCombos.length > 0) {
+                const normalizedCombos = rawCombos.map((c: any) => {
+                    const childObj = Array.isArray(c.child) ? c.child[0] : c.child
+                    const childId = childObj?.id || c.child_product_id
+                    if (childId && typeof childObj?.total_stock === 'number') {
+                        initialStock[childId] = childObj.total_stock
+                        componentsStockCache.set(childId, childObj.total_stock)
+                    } else if (childId && componentsStockCache.has(childId)) {
+                        initialStock[childId] = componentsStockCache.get(childId)!
+                    }
+                    return {
+                        ...c,
+                        child_product_id: childId,
+                        child: childObj || null
+                    }
+                })
+                resolvedProductsCache.set(p.product_id, {
+                    id: p.product_id,
+                    product_name: p.product_name,
+                    image_url: p.image_url,
+                    product_type: 'combo',
+                    combo_items: normalizedCombos
+                })
+            } else if (prodType === 'single' && !resolvedProductsCache.has(p.product_id)) {
+                resolvedProductsCache.set(p.product_id, {
+                    id: p.product_id,
+                    product_name: p.product_name,
+                    image_url: p.image_url,
+                    product_type: 'single',
+                    combo_items: []
+                })
+            } else if (resolvedProductsCache.has(p.product_id)) {
+                const cached = resolvedProductsCache.get(p.product_id)
+                if (cached?.product_type === 'combo' && Array.isArray(cached.combo_items)) {
+                    cached.combo_items.forEach((c: any) => {
+                        const cid = c.child?.id || c.child_product_id
+                        if (cid && componentsStockCache.has(cid)) {
+                            initialStock[cid] = componentsStockCache.get(cid)!
+                        }
+                    })
                 }
             }
         })
         setStockMap(initialStock)
 
-        // 2. Immediately map order items to resolved representation (from cache or immediate fallback)
-        // This ensures the modal renders immediately without waiting for any server network roundtrip!
+        // 2. Map order items using ONLY verified resolved cache entries (never assume an unresolved item is 'single'!)
         const initialMapped = products.map(orderItem => {
-            const cached = resolvedProductsCache.get(orderItem.product_id)
-            if (cached) {
-                return { orderItem, resolved: cached }
-            }
+            const cached = orderItem.product_id ? resolvedProductsCache.get(orderItem.product_id) : null
             return {
                 orderItem,
-                resolved: {
-                    id: orderItem.product_id,
-                    product_name: orderItem.product_name,
-                    image_url: orderItem.image_url,
-                    product_type: 'single'
-                }
+                resolved: cached || null
             }
         })
         setResolvedItems(initialMapped)
 
-        // 3. Resolve full combo/component breakdown in the background if not cached yet
-        fetchResolvedProducts()
+        // Check if any product or component stock is still missing
+        const needsResolution = products.some(p => {
+            if (!p.product_id) return false
+            const cached = resolvedProductsCache.get(p.product_id)
+            if (!cached) return true
+            if (cached.product_type === 'combo') {
+                if (!Array.isArray(cached.combo_items) || cached.combo_items.length === 0) return true
+                return cached.combo_items.some((c: any) => {
+                    const cid = c.child?.id || c.child_product_id
+                    return cid && !componentsStockCache.has(cid) && initialStock[cid] === undefined
+                })
+            }
+            return !componentsStockCache.has(p.product_id) && initialStock[p.product_id] === undefined
+        })
+
+        setIsLoadingComponents(needsResolution)
+
+        // 3. Resolve full combo/component breakdown & stocks if any data is not cached yet
+        if (needsResolution) {
+            fetchResolvedProducts(() => cancelled)
+        }
+
+        return () => {
+            cancelled = true
+        }
     }, [isOpen, products, stockBreakdown])
 
-    const fetchResolvedProducts = async () => {
+    const fetchResolvedProducts = async (isCancelled: () => boolean) => {
         try {
             const ids = products.map(p => p.product_id).filter(Boolean)
-            if (ids.length === 0) return
+            if (ids.length === 0) {
+                if (!isCancelled()) setIsLoadingComponents(false)
+                return
+            }
 
-            // Check if any id is not in cache yet
-            const missingIds = ids.filter(id => !resolvedProductsCache.has(id))
-            let resolvedData: any[] = []
+            // Check if any id is not in cache yet (or is a combo with missing combo_items)
+            const missingIds = ids.filter(id => {
+                const cached = resolvedProductsCache.get(id)
+                if (!cached) return true
+                if (cached.product_type === 'combo' && (!Array.isArray(cached.combo_items) || cached.combo_items.length === 0)) {
+                    return true
+                }
+                return false
+            })
 
             if (missingIds.length > 0) {
                 const fetched = await getResolvedProductsByIds(missingIds)
@@ -86,17 +163,18 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                 })
             }
 
-            resolvedData = ids.map(id => resolvedProductsCache.get(id)).filter(Boolean)
+            const resolvedData = ids.map(id => resolvedProductsCache.get(id)).filter(Boolean)
 
             // Extract all component IDs for stock fetching
             const componentIds = new Set<string>()
             resolvedData.forEach((r: any) => {
-                if (r.product_type === 'combo' && r.combo_items) {
+                if (r.product_type === 'combo' && Array.isArray(r.combo_items)) {
                     r.combo_items.forEach((c: any) => {
-                        if (c.child?.id) componentIds.add(c.child.id)
+                        const cid = c.child?.id || c.child_product_id
+                        if (cid) componentIds.add(cid)
                     })
-                } else {
-                    if (r.id) componentIds.add(r.id)
+                } else if (r.id) {
+                    componentIds.add(r.id)
                 }
             })
 
@@ -108,11 +186,13 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                     Object.entries(stocks).forEach(([k, v]) => {
                         componentsStockCache.set(k, v)
                     })
-                    setStockMap(prev => ({ ...prev, ...stocks }))
+                    if (!isCancelled()) {
+                        setStockMap(prev => ({ ...prev, ...stocks }))
+                    }
                 } catch (err) {
                     console.error("Failed to fetch component stocks", err)
                 }
-            } else if (componentIds.size > 0) {
+            } else if (componentIds.size > 0 && !isCancelled()) {
                 const cachedStocks: Record<string, number> = {}
                 componentIds.forEach(id => {
                     if (componentsStockCache.has(id)) {
@@ -122,9 +202,11 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                 setStockMap(prev => ({ ...prev, ...cachedStocks }))
             }
 
+            if (isCancelled()) return
+
             // Map original order items to resolved structure
             const mapped = products.map(orderItem => {
-                const resolved = resolvedProductsCache.get(orderItem.product_id)
+                const resolved = orderItem.product_id ? resolvedProductsCache.get(orderItem.product_id) : null
                 return {
                     orderItem,
                     resolved: resolved || {
@@ -138,10 +220,15 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
             setResolvedItems(mapped)
         } catch (error) {
             console.error('Failed to resolve products:', error)
+        } finally {
+            if (!isCancelled()) {
+                setIsLoadingComponents(false)
+            }
         }
     }
 
     const getStock = (productId: string) => {
+        if (!productId) return 'N/A'
         if (stockMap[productId] !== undefined) {
             return stockMap[productId]
         }
@@ -156,7 +243,7 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
         if (prod?.stock !== undefined) {
             return prod.stock
         }
-        return 'N/A'
+        return undefined
     }
 
     const getStockColor = (stock: any) => {
@@ -176,7 +263,12 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                     {/* Header */}
                     <div className="flex items-center justify-between px-6 py-4 border-b dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800/50">
                         <div>
-                            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Select Product to Plan</h2>
+                            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                                <span>Select Product to Plan</span>
+                                {isLoadingComponents && (
+                                    <Loader2 size={16} className="animate-spin text-blue-600 dark:text-blue-400" />
+                                )}
+                            </h2>
                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                                 Choose which component to add to the daily plan.
                             </p>
@@ -199,20 +291,33 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                                 const resolvedEntry = resolvedItems.find((r: any) => r.orderItem.product_id === orderItem.product_id)
                                 const resolved = resolvedEntry?.resolved
 
+                                // Determine if this item's component breakdown is still loading
+                                const isComboType = resolved?.product_type === 'combo' || orderItem.product_type === 'combo'
+                                const hasComboItems = Array.isArray(resolved?.combo_items) && resolved.combo_items.length > 0
+                                const isItemResolving = Boolean(
+                                    orderItem.product_id && (
+                                        !resolved ||
+                                        (isComboType && !hasComboItems && isLoadingComponents)
+                                    )
+                                )
+
                                 let rightComponents: any[] = []
                                 let isCombo = false
 
-                                if (resolved) {
-                                    if (resolved.product_type === 'combo' && resolved.combo_items?.length > 0) {
+                                if (!isItemResolving && resolved) {
+                                    if (resolved.product_type === 'combo' && hasComboItems) {
                                         isCombo = true
-                                        rightComponents = resolved.combo_items.map((c: any) => ({
-                                            id: c.child?.id || c.child_product_id,
-                                            name: c.child?.product_name || orderItem.product_name,
-                                            image: c.child?.image_url,
-                                            qty: c.quantity || 1,
-                                            isComboChild: true
-                                        }))
-                                    } else {
+                                        rightComponents = resolved.combo_items.map((c: any) => {
+                                            const childObj = Array.isArray(c.child) ? c.child[0] : c.child
+                                            return {
+                                                id: childObj?.id || c.child_product_id,
+                                                name: childObj?.product_name || orderItem.product_name,
+                                                image: childObj?.image_url,
+                                                qty: c.quantity || 1,
+                                                isComboChild: true
+                                            }
+                                        })
+                                    } else if (resolved.product_type !== 'combo') {
                                         rightComponents = [{
                                             id: resolved.id || orderItem.product_id,
                                             name: resolved.product_name || orderItem.product_name,
@@ -221,10 +326,9 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
                                             isComboChild: false
                                         }]
                                     }
-                                } else {
-                                    // Immediate fallback so there's never an empty delay
+                                } else if (!orderItem.product_id) {
                                     rightComponents = [{
-                                        id: orderItem.product_id,
+                                        id: '',
                                         name: orderItem.product_name,
                                         image: orderItem.image_url,
                                         qty: 1,
@@ -271,62 +375,109 @@ export function ProductSelectionModal({ isOpen, onClose, products, stockBreakdow
 
                                         {/* RIGHT COLUMN: Components List */}
                                         <div className="col-span-8 flex flex-col gap-2 pl-2 min-w-0">
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
-                                                {rightComponents.map((comp, cIdx) => {
-                                                    const stock = getStock(comp.id)
-                                                    return (
-                                                        <div
-                                                            key={cIdx}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            onClick={() => {
-                                                                const remarks = isCombo ? orderItem.product_name : undefined
-                                                                onProductSelect(comp.id, remarks, (orderItem.quantity || 1) * comp.qty, comp.name)
-                                                            }}
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter' || e.key === ' ') {
-                                                                    e.preventDefault()
-                                                                    const remarks = isCombo ? orderItem.product_name : undefined
-                                                                    onProductSelect(comp.id, remarks, (orderItem.quantity || 1) * comp.qty, comp.name)
-                                                                }
-                                                            }}
-                                                            className="group relative w-full min-w-0 flex flex-col justify-between p-3.5 text-left border border-gray-200 dark:border-zinc-700 rounded-xl hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/15 transition-all cursor-pointer active:scale-[0.98] bg-white dark:bg-zinc-800 shadow-sm overflow-hidden"
-                                                        >
-                                                            {/* Top Row: Icon + Stock Badge */}
-                                                            <div className="flex items-center justify-between w-full min-w-0 mb-2.5">
-                                                                <div className="p-1.5 bg-gray-100 dark:bg-zinc-700/60 rounded-lg group-hover:bg-blue-100 dark:group-hover:bg-blue-900/40 text-gray-600 dark:text-gray-300 group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">
-                                                                    <Package className="w-4 h-4" />
-                                                                </div>
-                                                                <div className={`text-[11px] font-bold px-2 py-0.5 rounded-full border border-gray-100 dark:border-zinc-600 bg-gray-50/80 dark:bg-zinc-800/80 ${getStockColor(stock)}`}>
-                                                                    Stock: {stock}
-                                                                </div>
+                                            {isItemResolving ? (
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+                                                    <div className="w-full min-w-0 flex flex-col justify-between p-4 border border-blue-200 dark:border-blue-900/50 rounded-xl bg-blue-50/30 dark:bg-blue-950/20 shadow-xs select-none cursor-wait">
+                                                        <div className="flex items-center justify-between w-full mb-3">
+                                                            <div className="p-1.5 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-blue-600 dark:text-blue-400">
+                                                                <Loader2 className="w-4 h-4 animate-spin" />
                                                             </div>
-
-                                                            {/* Middle: Product Title & Combo Details */}
-                                                            <div className="w-full min-w-0 flex-1 flex flex-col justify-start">
-                                                                <div
-                                                                    className="font-semibold text-[13px] leading-snug text-gray-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 break-words line-clamp-2 transition-colors"
-                                                                    title={comp.name}
-                                                                >
-                                                                    {comp.name}
-                                                                </div>
-
-                                                                {comp.isComboChild && (
-                                                                    <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-medium">
-                                                                        Qty per Bundle: <span className="font-mono font-bold text-gray-700 dark:text-gray-300">{comp.qty}</span>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-
-                                                            {/* Bottom Row: In-card Action Footer */}
-                                                            <div className="flex items-center justify-between w-full min-w-0 mt-3 pt-2 border-t border-gray-100 dark:border-zinc-700/60 text-[11px] text-gray-400 dark:text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
-                                                                <span className="font-medium">Add to plan</span>
-                                                                <ArrowRight size={13} className="transform group-hover:translate-x-1 transition-transform" />
-                                                            </div>
+                                                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-100/80 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 animate-pulse">
+                                                                Loading...
+                                                            </span>
                                                         </div>
-                                                    )
-                                                })}
-                                            </div>
+                                                        <div className="space-y-2 my-1">
+                                                            <div className="h-4 w-3/4 bg-gray-200 dark:bg-zinc-700 rounded animate-pulse" />
+                                                            <div className="h-3 w-1/2 bg-gray-100 dark:bg-zinc-800 rounded animate-pulse" />
+                                                        </div>
+                                                        <div className="flex items-center justify-between w-full mt-3 pt-2 border-t border-gray-100 dark:border-zinc-800 text-[11px] text-blue-600 dark:text-blue-400 font-medium">
+                                                            <span>Loading inventory components...</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+                                                    {rightComponents.map((comp, cIdx) => {
+                                                        const rawStock = getStock(comp.id)
+                                                        const isCardLoading = isLoadingComponents || (Boolean(comp.id) && rawStock === undefined)
+                                                        const displayStock = rawStock === undefined ? '...' : rawStock
+
+                                                        const handleCardClick = () => {
+                                                            if (isCardLoading) return
+                                                            if (isComboType && !comp.isComboChild) return
+                                                            const remarks = isCombo ? orderItem.product_name : undefined
+                                                            onProductSelect(comp.id, remarks, (orderItem.quantity || 1) * comp.qty, comp.name)
+                                                        }
+
+                                                        return (
+                                                            <div
+                                                                key={cIdx}
+                                                                role="button"
+                                                                tabIndex={isCardLoading ? -1 : 0}
+                                                                aria-disabled={isCardLoading}
+                                                                onClick={handleCardClick}
+                                                                onKeyDown={(e) => {
+                                                                    if (isCardLoading) return
+                                                                    if (e.key === 'Enter' || e.key === ' ') {
+                                                                        e.preventDefault()
+                                                                        handleCardClick()
+                                                                    }
+                                                                }}
+                                                                className={`group relative w-full min-w-0 flex flex-col justify-between p-3.5 text-left border rounded-xl transition-all bg-white dark:bg-zinc-800 shadow-sm overflow-hidden ${
+                                                                    isCardLoading
+                                                                        ? 'border-gray-200 dark:border-zinc-700 opacity-75 cursor-wait select-none'
+                                                                        : 'border-gray-200 dark:border-zinc-700 hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/15 cursor-pointer active:scale-[0.98]'
+                                                                }`}
+                                                            >
+                                                                {/* Top Row: Icon + Stock Badge */}
+                                                                <div className="flex items-center justify-between w-full min-w-0 mb-2.5">
+                                                                    <div className="p-1.5 bg-gray-100 dark:bg-zinc-700/60 rounded-lg group-hover:bg-blue-100 dark:group-hover:bg-blue-900/40 text-gray-600 dark:text-gray-300 group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">
+                                                                        {isCardLoading ? (
+                                                                            <Loader2 className="w-4 h-4 animate-spin text-blue-600 dark:text-blue-400" />
+                                                                        ) : (
+                                                                            <Package className="w-4 h-4" />
+                                                                        )}
+                                                                    </div>
+                                                                    <div className={`text-[11px] font-bold px-2 py-0.5 rounded-full border border-gray-100 dark:border-zinc-600 bg-gray-50/80 dark:bg-zinc-800/80 ${getStockColor(displayStock)}`}>
+                                                                        Stock: {displayStock}
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* Middle: Product Title & Combo Details */}
+                                                                <div className="w-full min-w-0 flex-1 flex flex-col justify-start">
+                                                                    <div
+                                                                        className="font-semibold text-[13px] leading-snug text-gray-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 break-words line-clamp-2 transition-colors"
+                                                                        title={comp.name}
+                                                                    >
+                                                                        {comp.name}
+                                                                    </div>
+
+                                                                    {comp.isComboChild && (
+                                                                        <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 font-medium">
+                                                                            Qty per Bundle: <span className="font-mono font-bold text-gray-700 dark:text-gray-300">{comp.qty}</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+
+                                                                {/* Bottom Row: In-card Action Footer */}
+                                                                <div className="flex items-center justify-between w-full min-w-0 mt-3 pt-2 border-t border-gray-100 dark:border-zinc-700/60 text-[11px] text-gray-400 dark:text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+                                                                    {isCardLoading ? (
+                                                                        <>
+                                                                            <span className="font-medium text-blue-600 dark:text-blue-400">Loading component...</span>
+                                                                            <Loader2 size={13} className="animate-spin text-blue-600 dark:text-blue-400" />
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <span className="font-medium">Add to plan</span>
+                                                                            <ArrowRight size={13} className="transform group-hover:translate-x-1 transition-transform" />
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )
+                                                    })}
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )

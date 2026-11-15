@@ -88,9 +88,20 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
         setSelectedProductRemarks('')
     }
 
-    // Check if any product in this order is already in active plans
-    // order.items contains { product_id }
-    const isPlanActive = order.items?.some((item: any) => activePlanProductIds.includes(item.product_id))
+    // Check if any product (or its combo component) in this order is already in active plans
+    const isPlanActive = order.items?.some((item: any) => {
+        if (activePlanProductIds.includes(item.product_id)) return true
+        const productStock = stockInfo?.products?.find((p: any) => p.product_id === item.product_id)
+        const comboItems = productStock?.combo_items || item.combo_items
+        if (Array.isArray(comboItems) && comboItems.length > 0) {
+            return comboItems.some((c: any) => {
+                const childObj = Array.isArray(c.child) ? c.child[0] : c.child
+                const childId = childObj?.id || c.child_product_id
+                return Boolean(childId && activePlanProductIds.includes(childId))
+            })
+        }
+        return false
+    })
 
     const buttonClass = isPlanActive
         ? "flex items-center gap-0.5 px-1 py-0.5 text-[11px] font-medium bg-blue-100 text-blue-700 border border-blue-200 hover:bg-blue-200 rounded disabled:opacity-50 transition-colors" // Active (Plan Exists) - Light Blue
@@ -127,14 +138,16 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
                         })
                     }
 
-                    // Get stock for this product from stockInfo
+                    // Get stock and pre-resolved combo info for this product from stockInfo or order item
                     const productStock = stockInfo?.products?.find((p: any) => p.product_id === item.product_id)
                     return {
                         product_id: item.product_id,
                         product_name: item.product_name || 'Unknown Product',
                         image_url: productStock?.image_url || item.image_url,
                         quantity: totalItemQty > 0 ? totalItemQty : item.quantity,
-                        stock: productStock?.total_stock ?? productStock?.stock ?? 0
+                        stock: productStock?.total_stock ?? productStock?.stock,
+                        product_type: productStock?.product_type || item.product_type,
+                        combo_items: productStock?.combo_items || item.combo_items
                     }
                 })}
                 stockBreakdown={stockInfo?.products}

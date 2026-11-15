@@ -3,7 +3,7 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
-import { withMemoryCache } from '@/lib/cache/memory-cache'
+import { withMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -397,51 +397,46 @@ export async function getProductById(productId: string) {
  * Get multiple products by IDs with combo items (Batch Resolve)
  */
 export async function getResolvedProductsByIds(productIds: string[]) {
-    const supabase = await createClient()
+    const cleanIds = Array.from(new Set(productIds.filter(Boolean))).sort()
+    if (cleanIds.length === 0) return []
 
-    if (productIds.length === 0) return []
+    return withMemoryCache(`products:resolved_by_ids_v2:${cleanIds.join(',')}`, 60_000, async () => {
+        const supabase = await createClient()
 
-    // Get products
-    const { data: products, error: productsError } = await supabase
-        .from('products')
-        .select('*')
-        .in('id', productIds)
-
-    if (productsError) throw new Error(productsError.message)
-    if (!products) return []
-
-    // Get all combo items for these products (where parent is in list)
-    // Filter productIds to only those that are 'combo' type to optimize
-    const comboProductIds = products.filter(p => p.product_type === 'combo').map(p => p.id)
-
-    let allComboItems: any[] = []
-    if (comboProductIds.length > 0) {
-        const { data: combos, error: comboError } = await supabase
-            .from('product_combos')
+        // Single query fetching products + embedded combo components
+        const { data: products, error: productsError } = await supabase
+            .from('products')
             .select(`
-                parent_product_id,
-                id,
-                quantity,
-                child:products!product_combos_child_product_id_fkey(
+                *,
+                product_combos!product_combos_parent_product_id_fkey(
+                    parent_product_id,
                     id,
-                    product_id,
-                    product_name,
-                    image_url
+                    quantity,
+                    child_product_id,
+                    child:products!product_combos_child_product_id_fkey(
+                        id,
+                        product_id,
+                        product_name,
+                        image_url
+                    )
                 )
             `)
-            .in('parent_product_id', comboProductIds)
+            .in('id', cleanIds)
 
-        if (comboError) throw new Error(comboError.message)
-        allComboItems = combos || []
-    }
+        if (productsError) throw new Error(productsError.message)
+        if (!products) return []
 
-    // Stitch together
-    return products.map(product => {
-        const comboItems = allComboItems.filter(c => c.parent_product_id === product.id)
-        return {
-            ...product,
-            combo_items: comboItems
-        }
+        return products.map((product: any) => {
+            const { product_combos, ...rest } = product
+            const comboItems = (Array.isArray(product_combos) ? product_combos : []).map((c: any) => ({
+                ...c,
+                child: Array.isArray(c.child) ? c.child[0] : c.child
+            }))
+            return {
+                ...rest,
+                combo_items: comboItems
+            }
+        })
     })
 }
 
@@ -538,6 +533,9 @@ export async function createProduct(data: {
         console.error('Failed to log product creation:', logError)
     }
 
+    invalidateMemoryCachePrefix('products:')
+    invalidateMemoryCachePrefix('order_stock_info')
+    invalidateMemoryCachePrefix('daraz_orders:')
     revalidatePath('/dashboard/inventory/product-list')
     return product
 }
@@ -625,6 +623,9 @@ export async function updateProduct(
         console.error('Failed to log product update:', logError)
     }
 
+    invalidateMemoryCachePrefix('products:')
+    invalidateMemoryCachePrefix('order_stock_info')
+    invalidateMemoryCachePrefix('daraz_orders:')
     revalidatePath('/dashboard/inventory/product-list')
     return updatedProduct
 }

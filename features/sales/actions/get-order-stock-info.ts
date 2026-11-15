@@ -3,11 +3,26 @@
 import { createClient } from '@/lib/supabase/server'
 import { withMemoryCache } from '@/lib/cache/memory-cache'
 
+export interface ComboItemStockInfo {
+    id: string
+    quantity: number
+    child_product_id: string
+    child: {
+        id: string
+        product_id?: number
+        product_name: string
+        image_url: string | null
+        total_stock: number
+    } | null
+}
+
 export interface ProductStockInfo {
     product_id: string
     product_name: string
     image_url: string | null
     total_stock: number
+    product_type?: 'single' | 'combo'
+    combo_items?: ComboItemStockInfo[]
 }
 
 export interface OrderStockInfo {
@@ -27,7 +42,7 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
     }
 
     const sortedKey = [...orderIds].sort().join(',')
-    return withMemoryCache(`order_stock_info_v2:${sortedKey}`, 30_000, async () => {
+    return withMemoryCache(`order_stock_info_v3:${sortedKey}`, 30_000, async () => {
         const supabase = await createClient()
 
         // 1. Fetch all order items for the given orders (chunked to prevent URL length overflow)
@@ -49,7 +64,18 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
                             id,
                             product_name,
                             image_url,
-                            product_type
+                            product_type,
+                            product_combos!product_combos_parent_product_id_fkey(
+                                id,
+                                quantity,
+                                child_product_id,
+                                child:products!product_combos_child_product_id_fkey(
+                                    id,
+                                    product_id,
+                                    product_name,
+                                    image_url
+                                )
+                            )
                         )
                     `)
                     .in('order_id', chunk)
@@ -70,8 +96,20 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
             return {}
         }
 
-        // 2. Get unique product IDs
-        const productIds = [...new Set(orderItems.map(item => item.product_id))]
+        // 2. Get unique product IDs (including combo child component IDs)
+        const productIdsSet = new Set<string>()
+        for (const item of orderItems) {
+            if (item.product_id) productIdsSet.add(item.product_id)
+            const prod = Array.isArray(item.product) ? item.product[0] : item.product
+            if (Array.isArray(prod?.product_combos)) {
+                for (const c of prod.product_combos) {
+                    const childObj = Array.isArray(c.child) ? c.child[0] : c.child
+                    const childId = childObj?.id || c.child_product_id
+                    if (childId) productIdsSet.add(childId)
+                }
+            }
+        }
+        const productIds = Array.from(productIdsSet)
 
         // 3. Calculate stock for each product (batch processing)
         const stockMap = await calculateProductStocks(productIds)
@@ -90,12 +128,32 @@ export async function getOrdersStockInfo(orderIds: string[]): Promise<Record<str
             const items = itemsByOrder.get(orderId) || []
 
             const products: ProductStockInfo[] = items.map(item => {
-                const product = item.product as any
+                const product = (Array.isArray(item.product) ? item.product[0] : item.product) as any
+                const rawCombos = Array.isArray(product?.product_combos) ? product.product_combos : []
+                const combo_items: ComboItemStockInfo[] = rawCombos.map((c: any) => {
+                    const childObj = Array.isArray(c.child) ? c.child[0] : c.child
+                    const childId = childObj?.id || c.child_product_id
+                    return {
+                        id: c.id,
+                        quantity: Number(c.quantity) || 1,
+                        child_product_id: childId,
+                        child: childObj ? {
+                            id: childObj.id,
+                            product_id: childObj.product_id,
+                            product_name: childObj.product_name,
+                            image_url: childObj.image_url || null,
+                            total_stock: stockMap.get(childObj.id) ?? 0
+                        } : null
+                    }
+                })
+
                 return {
                     product_id: item.product_id,
                     product_name: product?.product_name || 'Unknown Product',
                     image_url: product?.image_url || null,
-                    total_stock: stockMap.get(item.product_id) || 0
+                    total_stock: stockMap.get(item.product_id) || 0,
+                    product_type: product?.product_type || 'single',
+                    combo_items
                 }
             })
 

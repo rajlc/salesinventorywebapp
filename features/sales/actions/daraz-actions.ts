@@ -164,16 +164,17 @@ export async function createDarazOrder(data: CreateDarazOrderData) {
 
 // Get Daraz orders with filters (for Sales Entry page)
 export async function getDarazOrders(params: GetDarazOrdersParams) {
-    const cacheKey = `daraz_orders:entry_v2:${JSON.stringify(params || {})}`
+    const cacheKey = `daraz_orders:entry_v3:${JSON.stringify(params || {})}`
     return withMemoryCache(cacheKey, 30_000, async () => {
         const t0 = Date.now()
         const supabase = await createClient()
         const { page = 1, limit = 50, status, todayOnly = false, fiscalYearId, sellerAccount, unprintedOnly } = params
 
         const hasSpecificSeller = Boolean(sellerAccount && sellerAccount !== 'all')
+        const productJoin = 'product:products(id, product_name, image_url, product_type, product_combos!product_combos_parent_product_id_fkey(id, quantity, child_product_id, child:products!product_combos_child_product_id_fkey(id, product_id, product_name, image_url)))'
         const itemJoinSelect = hasSpecificSeller
-            ? 'daraz_order_items!inner(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost)'
-            : 'daraz_order_items(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost)'
+            ? `daraz_order_items!inner(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost, ${productJoin})`
+            : `daraz_order_items(id, order_id, item_status, quantity, product_id, product_name, seller_sku, amount, total_amount, seller_account, item_sequence, purchase_cost, ${productJoin})`
 
         // Query indexed daraz_orders table directly with embedded items & store (eliminates 6 correlated subqueries/row in daraz_orders_with_totals view)
         let query = supabase
@@ -237,20 +238,26 @@ export async function getDarazOrders(params: GetDarazOrdersParams) {
 
             const storeSellerAccount = (order as any).online_stores?.seller_account || null
 
-            let orderItems = rawJoinedItems.map((i: any) => ({
-                id: i.id,
-                order_id: i.order_id || order.id,
-                item_status: i.item_status,
-                quantity: Number(i.quantity) || 1,
-                product_id: i.product_id,
-                product_name: i.product_name,
-                seller_sku: i.seller_sku,
-                amount: Number(i.amount) || 0,
-                total_amount: Number(i.total_amount) || ((Number(i.quantity) || 1) * (Number(i.amount) || 0)),
-                seller_account: i.seller_account || storeSellerAccount,
-                item_sequence: i.item_sequence,
-                purchase_cost: i.purchase_cost
-            }))
+            let orderItems = rawJoinedItems.map((i: any) => {
+                const prod = Array.isArray(i.product) ? i.product[0] : i.product
+                return {
+                    id: i.id,
+                    order_id: i.order_id || order.id,
+                    item_status: i.item_status,
+                    quantity: Number(i.quantity) || 1,
+                    product_id: i.product_id,
+                    product_name: i.product_name || prod?.product_name,
+                    image_url: prod?.image_url || null,
+                    product_type: prod?.product_type || null,
+                    combo_items: Array.isArray(prod?.product_combos) ? prod.product_combos : null,
+                    seller_sku: i.seller_sku,
+                    amount: Number(i.amount) || 0,
+                    total_amount: Number(i.total_amount) || ((Number(i.quantity) || 1) * (Number(i.amount) || 0)),
+                    seller_account: i.seller_account || storeSellerAccount,
+                    item_sequence: i.item_sequence,
+                    purchase_cost: i.purchase_cost
+                }
+            })
 
             // Fallback: If no rows in daraz_order_items table yet, normalize order.items_detail from Daraz sync
             if (orderItems.length === 0 && Array.isArray(order.items_detail) && order.items_detail.length > 0) {
