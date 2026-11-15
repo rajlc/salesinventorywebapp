@@ -2,8 +2,10 @@
 
 import { useState } from 'react'
 import { Plus } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { ProductSelectionModal } from './ProductSelectionModal'
 import { AddPlanModal } from '@/features/purchase/components/daily-plan/AddPlanModal'
+import { checkActiveProductPlan } from '@/features/purchase/actions/plan-actions'
 import { toast } from 'sonner'
 
 interface QuickPlanButtonProps {
@@ -14,6 +16,7 @@ interface QuickPlanButtonProps {
 }
 
 export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanProductIds = [] }: QuickPlanButtonProps) {
+    const queryClient = useQueryClient()
     const [showProductSelection, setShowProductSelection] = useState(false)
     const [showPlanModal, setShowPlanModal] = useState(false)
     const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
@@ -40,7 +43,7 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
         setShowProductSelection(true)
     }
 
-    const handleProductSelect = (productId: string, remarks?: string, quantity?: number, productName?: string) => {
+    const handleProductSelect = async (productId: string, remarks?: string, quantity?: number, productName?: string) => {
         setShowProductSelection(false)
 
         if (!productId) {
@@ -50,12 +53,29 @@ export function QuickPlanButton({ order, stockInfo, allOrders = [], activePlanPr
             return
         }
 
-        // Fast check against activePlanProductIds in memory
-        if (activePlanProductIds.includes(productId)) {
-            toast.error('Product Already in Purchase List', {
-                description: 'This product is already in the pending purchase list.'
-            })
-            return
+        // Always verify against the database if client cache thinks it's active (or to catch expired/deleted plans)
+        setIsChecking(true)
+        try {
+            const isActuallyActive = await checkActiveProductPlan(productId)
+            if (isActuallyActive) {
+                if (!activePlanProductIds.includes(productId)) {
+                    queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
+                }
+                toast.error('Product Already in Purchase List', {
+                    description: 'This product is already in the pending purchase list.'
+                })
+                return
+            } else if (activePlanProductIds.includes(productId)) {
+                // Stale or expired plan was in client cache — remove immediately and refresh
+                queryClient.setQueryData<string[]>(['active-purchase-plans'], (old = []) =>
+                    Array.isArray(old) ? old.filter(id => id !== productId) : []
+                )
+                queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
+            }
+        } catch (err) {
+            console.error('Error verifying active product plan:', err)
+        } finally {
+            setIsChecking(false)
         }
 
         // If a precalculated quantity is provided, use it.

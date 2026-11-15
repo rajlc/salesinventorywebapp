@@ -116,13 +116,17 @@ export default function DailyPurchaseListContent({ isEmbedded = false }: DailyPu
 
     const handlePlanAdded = async () => {
         // Invalidate queries to refresh list
-        queryClient.invalidateQueries({ queryKey: ['purchase-plans'] })
+        await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['purchase-plans'] }),
+            queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] })
+        ])
     }
 
     const handlePlanUpdated = async () => {
         // Invalidate both plans and today's purchases (for purchased status check)
         await Promise.all([
             queryClient.invalidateQueries({ queryKey: ['purchase-plans'] }),
+            queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] }),
             queryClient.invalidateQueries({ queryKey: ['today-purchases-for-plan'] }),
             queryClient.invalidateQueries({ queryKey: ['today-purchases'] }) // Also refresh main purchase list if needed
         ])
@@ -134,6 +138,7 @@ export default function DailyPurchaseListContent({ isEmbedded = false }: DailyPu
 
         // Invalidate with refetchType background to revalidate without blocking UI
         await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['active-purchase-plans'] }),
             queryClient.invalidateQueries({
                 queryKey: ['today-purchases-for-plan'],
                 refetchType: 'active' // Only refetch if query is currently being used

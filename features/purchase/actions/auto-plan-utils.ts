@@ -149,11 +149,21 @@ export async function getProductPurchaseStatsInternal(productId: string, supabas
  * Returns the primary (oldest created) active plan, or null if none.
  */
 async function getOrMergeActivePlans(productId: string, supabase: any): Promise<any | null> {
+    const now = new Date().toISOString()
+
+    // Cleanup expired plans for this product first
+    await supabase
+        .from('purchase_plans')
+        .delete()
+        .eq('product_id', productId)
+        .lt('expires_at', now)
+
     const { data: existingPlans, error: plansErr } = await supabase
         .from('purchase_plans')
         .select('id, status, quantity, remarks')
         .eq('product_id', productId)
         .in('status', ['Pending', 'Pending Confirmation'])
+        .or(`expires_at.is.null,expires_at.gt.${now}`)
         .order('created_at', { ascending: true }) // oldest first = primary
 
     if (plansErr) {

@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath, unstable_cache } from 'next/cache'
+import { revalidatePath } from 'next/cache'
 
 export interface PurchasePlan {
     id: string
@@ -54,6 +54,31 @@ export interface ProductPurchaseStats {
 }
 
 /**
+ * Helper to delete expired plans using Admin client so RLS never prevents cleanup.
+ */
+async function cleanupExpiredPurchasePlans(productId?: string) {
+    try {
+        const adminSupabase = await createAdminClient()
+        const now = new Date().toISOString()
+        let query = adminSupabase
+            .from('purchase_plans')
+            .delete()
+            .lt('expires_at', now)
+
+        if (productId) {
+            query = query.eq('product_id', productId)
+        }
+
+        const { error } = await query
+        if (error) {
+            console.error('Error cleaning up expired purchase plans:', error)
+        }
+    } catch (err) {
+        console.error('Failed to cleanup expired purchase plans:', err)
+    }
+}
+
+/**
  * Cleanup expired plans and fetch active ones.
  * Includes server-side deduplication: if the same product appears multiple
  * times with an active status (Pending / Pending Confirmation), we keep only
@@ -62,15 +87,12 @@ export interface ProductPurchaseStats {
 export async function getPurchasePlans() {
     const supabase = await createClient()
 
-    // 1. Cleanup expired plans
-    const { error: deleteError } = await supabase
-        .from('purchase_plans')
-        .delete()
-        .lt('expires_at', new Date().toISOString())
+    // 1. Cleanup expired plans across all users/auto-plans
+    await cleanupExpiredPurchasePlans()
 
-    if (deleteError) console.error('Error cleaning up plans:', deleteError)
+    const now = new Date().toISOString()
 
-    // 2. Fetch all plans (newest first for display)
+    // 2. Fetch all non-expired plans (newest first for display)
     const { data, error } = await supabase
         .from('purchase_plans')
         .select(`
@@ -94,6 +116,7 @@ export async function getPurchasePlans() {
                 )
             )
         `)
+        .or(`expires_at.is.null,expires_at.gt.${now}`)
         .order('created_at', { ascending: false })
 
     if (error) throw new Error(error.message)
@@ -181,55 +204,44 @@ export async function getProductPurchaseStats(productId: string): Promise<Produc
 }
 
 /**
- * Check if product already has an active pending plan
+ * Check if product already has an active pending plan (ignoring and cleaning up expired ones)
  */
 export async function checkActiveProductPlan(productId: string): Promise<boolean> {
-    const supabase = await createClient()
+    await cleanupExpiredPurchasePlans(productId)
+
+    const supabase = await createAdminClient()
+    const now = new Date().toISOString()
 
     const { count } = await supabase
         .from('purchase_plans')
         .select('*', { count: 'exact', head: true })
         .eq('product_id', productId)
         .in('status', ['Pending', 'Pending Confirmation'])
+        .or(`expires_at.is.null,expires_at.gt.${now}`)
 
     return (count && count > 0) ? true : false
 }
 
-const getCachedActivePlanProductIds = unstable_cache(
-    async () => {
-        const supabase = await createAdminClient()
-
-        const { data } = await supabase
-            .from('purchase_plans')
-            .select('product_id')
-            .in('status', ['Pending', 'Pending Confirmation'])
-
-        if (!data || data.length === 0) return []
-
-        const planProductIds = data.map(plan => plan.product_id).filter(Boolean) as string[]
-
-        if (planProductIds.length === 0) return []
-
-        // Fetch parent combo product IDs that contain these children as components
-        const { data: combos } = await supabase
-            .from('product_combos')
-            .select('parent_product_id')
-            .in('child_product_id', planProductIds)
-
-        const parentIds = combos ? combos.map((c: any) => c.parent_product_id).filter(Boolean) as string[] : []
-
-        // Return union of child IDs and parent combo IDs
-        return Array.from(new Set([...planProductIds, ...parentIds]))
-    },
-    ['active-plan-product-ids'],
-    { revalidate: 30 }
-)
-
 /**
- * Get all active pending plan product IDs
+ * Get all active pending plan product IDs (non-expired only)
  */
 export async function getActivePlanProductIds(): Promise<string[]> {
-    return getCachedActivePlanProductIds()
+    await cleanupExpiredPurchasePlans()
+
+    const supabase = await createAdminClient()
+    const now = new Date().toISOString()
+
+    const { data } = await supabase
+        .from('purchase_plans')
+        .select('product_id')
+        .in('status', ['Pending', 'Pending Confirmation'])
+        .or(`expires_at.is.null,expires_at.gt.${now}`)
+
+    if (!data || data.length === 0) return []
+
+    const planProductIds = data.map(plan => plan.product_id).filter(Boolean) as string[]
+
+    return Array.from(new Set(planProductIds))
 }
 
 /**
@@ -253,12 +265,18 @@ export async function createPurchasePlan(data: {
 
     if (!user) throw new Error('Not authenticated')
 
-    // Check for duplicate pending plan
+    // Cleanup any expired plans for this product before checking duplicates
+    await cleanupExpiredPurchasePlans(data.product_id)
+
+    const now = new Date().toISOString()
+
+    // Check for duplicate active (non-expired) pending plan
     const { count } = await supabase
         .from('purchase_plans')
         .select('*', { count: 'exact', head: true })
         .eq('product_id', data.product_id)
         .in('status', ['Pending', 'Pending Confirmation'])
+        .or(`expires_at.is.null,expires_at.gt.${now}`)
 
     if (count && count > 0) {
         throw new Error('Product Already in Purchase List')
