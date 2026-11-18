@@ -113,6 +113,16 @@ export async function GET(req: NextRequest) {
                                             type: 'string',
                                             description: 'Product description. Can be provided in clean Markdown or HTML. System formats it with paragraphs and bolding.'
                                         },
+                                        descriptions_per_store: {
+                                            type: 'object',
+                                            additionalProperties: { type: 'string' },
+                                            description: 'Optional unique HTML descriptions per Daraz store when multiple stores are targeted: {"Balaju Shop": "<p>...</p>", "Bagmati Traders": "<p>...</p>"}'
+                                        },
+                                        highlights_per_store: {
+                                            type: 'object',
+                                            additionalProperties: { type: 'array', items: { type: 'string' } },
+                                            description: 'Optional unique highlight bullet arrays per Daraz store when multiple stores are targeted: {"Balaju Shop": ["Point 1", ...], "Bagmati Traders": ["Point 1", ...]}'
+                                        },
                                         include_image_in_description: {
                                             type: 'boolean',
                                             description: 'Set to true to embed a product image (<img> tag) inside the HTML main description'

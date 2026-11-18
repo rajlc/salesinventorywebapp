@@ -116,23 +116,23 @@ export async function POST(request: NextRequest) {
 
         const storeMap = new Map(stores?.map(s => [s.id, s.seller_account]) || [])
         const titlesPerStore: Record<string, string> = body.titlesPerStore || body.titles_per_store || {}
+        const descriptionsPerStore: Record<string, string> = body.descriptionsPerStore || body.descriptions_per_store || {}
+        const highlightsPerStore: Record<string, string[] | string> = body.highlightsPerStore || body.highlights_per_store || {}
 
-        // Helper to generate a clean store code (e.g. "Bagmati Traders" -> "BT", "Balaju Shop" -> "BS")
+        const resolvePerStoreValue = <T>(map: Record<string, T>, storeId: string, sellerAccount: string): T | undefined => {
+            if (map[storeId] !== undefined) return map[storeId]
+            if (map[sellerAccount] !== undefined) return map[sellerAccount]
+            const found = Object.entries(map).find(([k]) => k.toLowerCase() === sellerAccount.toLowerCase())
+            return found ? found[1] : undefined
+        }
+
+        // Helper to generate a clean 3-letter store prefix (e.g. "Bagmati Traders" -> "BAG", "Balaju Shop" -> "BAL")
         const usedStoreCodes = new Set<string>()
         const getStoreCode = (accountName: string, idx: number): string => {
-            const words = String(accountName || '')
-                .replace(/[^a-zA-Z0-9\s]/g, ' ')
-                .trim()
-                .split(/\s+/)
-                .filter(Boolean)
-            let code = ''
-            if (words.length >= 2) {
-                code = words.map(w => w[0]).join('').toUpperCase().slice(0, 4)
-            } else if (words.length === 1) {
-                code = words[0].toUpperCase().slice(0, 3)
-            } else {
-                code = `ST${idx + 1}`
-            }
+            const cleanAlphaNum = String(accountName || '')
+                .replace(/[^a-zA-Z0-9]/g, '')
+                .toUpperCase()
+            let code = cleanAlphaNum.slice(0, 3) || `ST${idx + 1}`
             if (usedStoreCodes.has(code)) {
                 code = `${code}${idx + 1}`
             }
@@ -145,12 +145,17 @@ export async function POST(request: NextRequest) {
             const storeId = storeIds[storeIdx]
             const sellerAccount = storeMap.get(storeId) || storeId
             const storeCode = getStoreCode(sellerAccount, storeIdx)
-            const storeSpecificTitle = (
-                titlesPerStore[storeId] ||
-                titlesPerStore[sellerAccount] ||
-                Object.entries(titlesPerStore).find(([k]) => k.toLowerCase() === sellerAccount.toLowerCase())?.[1] ||
-                name
-            )
+            const storeSpecificTitle = resolvePerStoreValue(titlesPerStore, storeId, sellerAccount) || name
+            const storeSpecificRawDescription = resolvePerStoreValue(descriptionsPerStore, storeId, sellerAccount)
+            const storeSpecificRawHighlights = resolvePerStoreValue(highlightsPerStore, storeId, sellerAccount)
+            const effectiveRawDescription = (typeof storeSpecificRawDescription === 'string' && storeSpecificRawDescription.trim())
+                ? storeSpecificRawDescription
+                : (description || '')
+            const effectiveRawShortDescription = Array.isArray(storeSpecificRawHighlights)
+                ? storeSpecificRawHighlights.filter(Boolean).join('\n')
+                : (typeof storeSpecificRawHighlights === 'string' && storeSpecificRawHighlights.trim()
+                    ? storeSpecificRawHighlights
+                    : (shortDescription || ''))
             try {
                 // 1. Get valid access token
                 const accessToken = await getValidAccessToken(storeId, 'order')
@@ -160,7 +165,7 @@ export async function POST(request: NextRequest) {
                 const darazMainImages = await migrateImagesToDaraz(images, accessToken)
 
                 // Automatically replace Supabase image URLs inside the description with their migrated Daraz CDN counterparts
-                let migratedDescription = description || ''
+                let migratedDescription = effectiveRawDescription
                 if (Array.isArray(images) && darazMainImages) {
                     (images as string[]).forEach((supabaseUrl: string, index: number) => {
                         const darazUrl = darazMainImages[index]
@@ -247,7 +252,7 @@ export async function POST(request: NextRequest) {
                 }
 
                 // Format shortDescription (highlights) to valid HTML ul/li if not already HTML
-                let formattedShortDesc = shortDescription || ''
+                let formattedShortDesc = effectiveRawShortDescription
                 if (formattedShortDesc && !formattedShortDesc.includes('<ul') && !formattedShortDesc.includes('<li')) {
                     const items = formattedShortDesc
                         .split(/\n+/)

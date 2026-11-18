@@ -66,7 +66,9 @@ export interface SaveDraftInput {
     title?: string
     titles_per_store?: Record<string, string>
     description?: string
+    descriptions_per_store?: Record<string, string>
     highlights?: string[] | string
+    highlights_per_store?: Record<string, string[] | string>
     price?: number
     special_price?: number
     campaign_price?: number
@@ -104,7 +106,9 @@ export interface UpdateDraftInput {
     title?: string
     titles_per_store?: Record<string, string>
     description?: string
+    descriptions_per_store?: Record<string, string>
     highlights?: string[] | string
+    highlights_per_store?: Record<string, string[] | string>
     price?: number
     special_price?: number
     campaign_price?: number
@@ -195,9 +199,11 @@ export interface PushProductInput {
     variants?: VariantItemInput[] | string[]
     images?: string[]
     description?: string
+    descriptions_per_store?: Record<string, string>
     include_image_in_description?: boolean
     description_image_url?: string
     highlights?: string[] | string
+    highlights_per_store?: Record<string, string[] | string>
     brand?: string
 }
 
@@ -1344,6 +1350,32 @@ async function resolveCategoryInput(
     }
 }
 
+// ── Per-Store Map Resolution Helper ─────────────────────────────────────────
+
+function resolvePerStoreMap<T>(
+    rawMap: Record<string, any> | undefined,
+    stores: StoreAccountInfo[],
+    transform: (val: any) => T
+): Record<string, T> {
+    const out: Record<string, T> = {}
+    if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) {
+        return out
+    }
+    Object.entries(rawMap).forEach(([storeKey, val]) => {
+        if (val === undefined || val === null) return
+        const keyTerm = storeKey.toLowerCase()
+        const matchedStore = stores.find(s =>
+            s.seller_account.toLowerCase().includes(keyTerm) ||
+            keyTerm.includes(s.seller_account.toLowerCase()) ||
+            s.id === storeKey
+        )
+        if (matchedStore) {
+            out[matchedStore.id] = transform(val)
+        }
+    })
+    return out
+}
+
 // ── Save Product Draft ──────────────────────────────────────────────────────
 
 export async function saveProductDraft(input: SaveDraftInput) {
@@ -1459,8 +1491,35 @@ export async function saveProductDraft(input: SaveDraftInput) {
     }
 
     const embedImgUrl = input.description_image_url || (input.include_image_in_description ? cleanedImages[0] : null)
-    const description = formatDescription(input.description, rawName, embedImgUrl)
-    const highlights = formatHighlights(input.highlights)
+    const resolvedDescriptionsPerStore = resolvePerStoreMap(
+        input.descriptions_per_store,
+        stores,
+        (val) => formatDescription(String(val), rawName, embedImgUrl)
+    )
+    const resolvedHighlightsPerStore = resolvePerStoreMap(
+        input.highlights_per_store,
+        stores,
+        (val) => formatHighlights(val)
+    )
+    const fallbackDescInput = input.description || Object.values(resolvedDescriptionsPerStore)[0]
+    const fallbackHighlightsInput = input.highlights || Object.values(resolvedHighlightsPerStore)[0]
+    const description = formatDescription(fallbackDescInput, rawName, embedImgUrl)
+    const highlights = formatHighlights(fallbackHighlightsInput)
+
+    if (Object.keys(resolvedDescriptionsPerStore).length > 0) {
+        stores.forEach(store => {
+            if (!resolvedDescriptionsPerStore[store.id]) {
+                resolvedDescriptionsPerStore[store.id] = description
+            }
+        })
+    }
+    if (Object.keys(resolvedHighlightsPerStore).length > 0) {
+        stores.forEach(store => {
+            if (!resolvedHighlightsPerStore[store.id]) {
+                resolvedHighlightsPerStore[store.id] = highlights
+            }
+        })
+    }
 
     // 5. Resolve Variants
     const variantInfo = buildVariantSkuRows(rawName, input.variants, finalMrp, pricing.specialPrice)
@@ -1516,6 +1575,12 @@ export async function saveProductDraft(input: SaveDraftInput) {
     if (resolvedSupplierName) {
         attributesPayload.supplier_name = resolvedSupplierName
     }
+    if (Object.keys(resolvedDescriptionsPerStore).length > 0) {
+        attributesPayload.descriptions_per_store = resolvedDescriptionsPerStore
+    }
+    if (Object.keys(resolvedHighlightsPerStore).length > 0) {
+        attributesPayload.highlights_per_store = resolvedHighlightsPerStore
+    }
 
     const computedDraftType = computeDraftType({
         raw_name: rawName,
@@ -1568,7 +1633,16 @@ export async function saveProductDraft(input: SaveDraftInput) {
         const existing = recentDrafts[0]
         const mergedStoreIds = Array.from(new Set([...(existing.target_stores || []), ...targetStoreIds]))
         const mergedTitles = { ...(existing.titles_per_store || {}), ...resolvedTitlesPerStore }
-        const mergedAttributes = { ...(existing.attributes || {}), ...attributesPayload }
+        const mergedAttributes = {
+            ...(existing.attributes || {}),
+            ...attributesPayload,
+            ...(Object.keys(resolvedDescriptionsPerStore).length > 0
+                ? { descriptions_per_store: { ...(existing.attributes?.descriptions_per_store || {}), ...resolvedDescriptionsPerStore } }
+                : {}),
+            ...(Object.keys(resolvedHighlightsPerStore).length > 0
+                ? { highlights_per_store: { ...(existing.attributes?.highlights_per_store || {}), ...resolvedHighlightsPerStore } }
+                : {})
+        }
         const mergedImages = cleanedImages.length > 0
             ? (input.replace_existing_images ? cleanedImages : Array.from(new Set([...cleanedImages, ...(existing.images || [])])))
             : (existing.images || [])
@@ -1887,6 +1961,37 @@ export async function updateProductDraft(input: UpdateDraftInput) {
     }
 
     let existingAttributes = { ...(existingDraft.attributes || {}) }
+    if (input.descriptions_per_store || input.highlights_per_store) {
+        const allStores = await listDarazStores()
+        if (input.descriptions_per_store) {
+            const mappedDescs = resolvePerStoreMap(
+                input.descriptions_per_store,
+                allStores,
+                (val) => formatDescription(String(val), updates.raw_name || existingDraft.raw_name, embedImgUrl)
+            )
+            existingAttributes.descriptions_per_store = {
+                ...(existingAttributes.descriptions_per_store || {}),
+                ...mappedDescs
+            }
+            if (!updates.description && Object.values(mappedDescs)[0]) {
+                updates.description = Object.values(mappedDescs)[0]
+            }
+        }
+        if (input.highlights_per_store) {
+            const mappedHighlights = resolvePerStoreMap(
+                input.highlights_per_store,
+                allStores,
+                (val) => formatHighlights(val)
+            )
+            existingAttributes.highlights_per_store = {
+                ...(existingAttributes.highlights_per_store || {}),
+                ...mappedHighlights
+            }
+            if (!updates.highlights && Object.values(mappedHighlights)[0]) {
+                updates.highlights = Object.values(mappedHighlights)[0]
+            }
+        }
+    }
     if (input.product_link !== undefined) {
         existingAttributes.product_link = input.product_link
     }
@@ -2252,6 +2357,8 @@ export async function getDraftDetails(input: GetDraftDetailsInput) {
             visual_analysis: visualAnalysis,
             title: draft.title,
             titles_per_store: draft.titles_per_store,
+            descriptions_per_store: draft.attributes?.descriptions_per_store || {},
+            highlights_per_store: draft.attributes?.highlights_per_store || {},
             price: draft.price,
             special_price: draft.special_price,
             campaign_price: draft.attributes?.campaign_price || null,
@@ -2775,6 +2882,14 @@ export async function pushProductToDaraz(input: PushProductInput) {
                 name: title,
                 rawName: productName,
                 titlesPerStore,
+                descriptionsPerStore: {
+                    ...(mergedAttributes.descriptions_per_store || {}),
+                    ...(input.descriptions_per_store ? resolvePerStoreMap(input.descriptions_per_store, stores, (v) => formatDescription(String(v), productName)) : {})
+                },
+                highlightsPerStore: {
+                    ...(mergedAttributes.highlights_per_store || {}),
+                    ...(input.highlights_per_store ? resolvePerStoreMap(input.highlights_per_store, stores, (v) => formatHighlights(v)) : {})
+                },
                 shortDescription: highlights.join('\n'),
                 description,
                 brand: input.brand || mergedAttributes.brand || 'No Brand',

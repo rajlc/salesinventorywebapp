@@ -427,11 +427,28 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [alreadyPushedMappings, setAlreadyPushedMappings] = useState<Array<{ sellerAccount: string; sellerSku: string }>>([])
     const [alreadyPushedSubmitting, setAlreadyPushedSubmitting] = useState<boolean>(false)
 
-    // Per-store titles: { storeId: title }
+    // Per-store titles, descriptions & highlights: { storeId: value }
     const [titlesPerStore, setTitlesPerStore] = useState<Record<string, string>>({})
+    const [descriptionsPerStore, setDescriptionsPerStore] = useState<Record<string, string>>({})
+    const [highlightsPerStore, setHighlightsPerStore] = useState<Record<string, string[]>>({})
     const [isAiGeneratedTitle, setIsAiGeneratedTitle] = useState<boolean>(false)
-    // Which store tab is active in the title editor
+    // Which store tab is active in the title / description / highlights editor
     const [activeTitleStoreId, setActiveTitleStoreId] = useState<string>('')
+
+    const mapAiPerStoreFields = useCallback((data: any, targetStoreIds: string[], fallbackTitle: string) => {
+        const newTitles: Record<string, string> = {}
+        const newDescriptions: Record<string, string> = {}
+        const newHighlights: Record<string, string[]> = {}
+        targetStoreIds.forEach(storeId => {
+            const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
+            newTitles[storeId] = data.titles?.[storeName] || fallbackTitle
+            const storeDesc = data.descriptions?.[storeName] || data.description || ''
+            if (storeDesc) newDescriptions[storeId] = storeDesc
+            const storeHl = data.highlights_per_store?.[storeName] || data.highlights || []
+            if (Array.isArray(storeHl) && storeHl.length > 0) newHighlights[storeId] = storeHl
+        })
+        return { newTitles, newDescriptions, newHighlights }
+    }, [stores])
 
     const [categoryId, setCategoryId] = useState<number | null>(null)
     const [categoryPath, setCategoryPath] = useState('')
@@ -1607,13 +1624,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setSavingDraft(true)
         try {
             const primaryTitle = Object.values(titlesPerStore)[0] || titlesPerStore['__manual__'] || (rawName.trim() || effectiveRawName)
-            const cleanHighlights = highlights
+            const primaryDesc = Object.values(descriptionsPerStore)[0] || description || ''
+            const primaryHighlightsRaw = Object.values(highlightsPerStore)[0] || highlights
+            const cleanHighlights = (Array.isArray(primaryHighlightsRaw) ? primaryHighlightsRaw : highlights)
                 .filter(h => h.trim().length > 0)
                 .map(h => h.replace(/^[•\-\*\s]+/, '').trim())
                 .filter(Boolean)
 
+            const cleanedHighlightsPerStore: Record<string, string[]> = {}
+            Object.entries(highlightsPerStore).forEach(([sid, arr]) => {
+                if (Array.isArray(arr)) {
+                    const cleaned = arr.map(h => h.replace(/^[•\-\*\s]+/, '').trim()).filter(Boolean)
+                    if (cleaned.length > 0) cleanedHighlightsPerStore[sid] = cleaned
+                }
+            })
+
             const existingDraftObj = editingDraftId ? drafts.find(d => d.id === editingDraftId) : null
-            const isReadyNow = Boolean(categoryId && description?.trim() && cleanHighlights.length > 0 && (images?.length || 0) > 0)
+            const isReadyNow = Boolean(categoryId && primaryDesc?.trim() && cleanHighlights.length > 0 && (images?.length || 0) > 0)
             const nextStatus = existingDraftObj?.status === 'pushed'
                 ? 'pushed'
                 : (isReadyNow ? 'generated' : (existingDraftObj?.status || 'draft'))
@@ -1623,7 +1650,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 product_link: singleProductLink.trim() || undefined,
                 title: primaryTitle,
                 titles_per_store: titlesPerStore,
-                description: description || '',
+                description: primaryDesc,
                 highlights: cleanHighlights,
                 category_id: categoryId || null,
                 category_path: categoryPath || '',
@@ -1631,6 +1658,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 attributes: {
                     ...(existingDraftObj?.attributes || {}),
                     ...(dynamicAttributes || {}),
+                    descriptions_per_store: descriptionsPerStore,
+                    highlights_per_store: cleanedHighlightsPerStore,
                     ...(hasVariants ? {
                         has_variants: true,
                         variant1_name: variant1Name,
@@ -1736,19 +1765,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             }
 
             // ── Apply generated content ──────────────────────────────────────
-            // 1. Per-store titles
-            const newTitlesPerStore: Record<string, string> = {}
-            selectedStores.forEach(storeId => {
-                const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
-                newTitlesPerStore[storeId] = data.titles?.[storeName] || rawName
-            })
+            // 1. Per-store titles, descriptions & highlights
+            const { newTitles: newTitlesPerStore, newDescriptions: newDescriptionsPerStore, newHighlights: newHighlightsPerStore } =
+                mapAiPerStoreFields(data, selectedStores, rawName)
             setTitlesPerStore(newTitlesPerStore)
+            setDescriptionsPerStore(newDescriptionsPerStore)
+            setHighlightsPerStore(newHighlightsPerStore)
             setIsAiGeneratedTitle(true)
             if (selectedStores.length > 0) {
                 setActiveTitleStoreId(selectedStores[0])
             }
 
-            // 2. Description
+            // 2. Description (fallback / primary)
             if (data.description) setDescription(data.description)
 
             // 3. Highlights (8-10 points)
@@ -1778,7 +1806,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     titles_per_store: newTitlesPerStore as any,
                     description: data.description || '',
                     highlights: data.highlights || [],
-                    attributes: data.attributes || {},
+                    attributes: {
+                        ...(data.attributes || {}),
+                        descriptions_per_store: newDescriptionsPerStore,
+                        highlights_per_store: newHighlightsPerStore
+                    },
                     category_id: data.category_id || null,
                     category_path: data.category_suggestion || categoryPath,
                     status: 'generated'
@@ -1853,11 +1885,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             const data = await res.json()
 
             if (data.success) {
-                const newTitlesPerStore: Record<string, string> = {}
-                targetStores.forEach(storeId => {
-                    const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
-                    newTitlesPerStore[storeId] = data.titles?.[storeName] || effectiveName
-                })
+                const { newTitles: newTitlesPerStore, newDescriptions: newDescriptionsPerStore, newHighlights: newHighlightsPerStore } =
+                    mapAiPerStoreFields(data, targetStores, effectiveName)
 
                 const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
@@ -1888,7 +1917,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         titles_per_store: newTitlesPerStore,
                         description: data.description || '',
                         highlights: data.highlights || [],
-                        attributes: { ...(data.attributes || {}), brand: 'No Brand' },
+                        attributes: {
+                            ...(data.attributes || {}),
+                            brand: 'No Brand',
+                            descriptions_per_store: newDescriptionsPerStore,
+                            highlights_per_store: newHighlightsPerStore
+                        },
                         category_id: resolvedCatId,
                         category_path: resolvedCatPath,
                         status: 'generated'
@@ -2152,11 +2186,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 const data = await res.json()
 
                 if (data.success) {
-                    const newTitlesPerStore: Record<string, string> = {}
-                    targetStores.forEach(storeId => {
-                        const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
-                        newTitlesPerStore[storeId] = data.titles?.[storeName] || effectiveName
-                    })
+                    const { newTitles: newTitlesPerStore, newDescriptions: newDescriptionsPerStore, newHighlights: newHighlightsPerStore } =
+                        mapAiPerStoreFields(data, targetStores, effectiveName)
 
                     const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
 
@@ -2187,7 +2218,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             titles_per_store: newTitlesPerStore,
                             description: data.description || '',
                             highlights: data.highlights || [],
-                            attributes: { ...(data.attributes || {}), brand: 'No Brand' },
+                            attributes: {
+                                ...(data.attributes || {}),
+                                brand: 'No Brand',
+                                descriptions_per_store: newDescriptionsPerStore,
+                                highlights_per_store: newHighlightsPerStore
+                            },
                             category_id: resolvedCatId,
                             category_path: resolvedCatPath,
                             status: 'generated'
@@ -2270,6 +2306,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
 
         setTitlesPerStore(initialTitles)
+        setDescriptionsPerStore(draft.attributes?.descriptions_per_store || {})
+        setHighlightsPerStore(draft.attributes?.highlights_per_store || {})
         setActiveTitleStoreId(targetStores[0] || '')
         setSelectedStores(targetStores)
         setCategoryId(draft.category_id || null)
@@ -2449,6 +2487,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 body: JSON.stringify({
                     storeIds: draft.target_stores,
                     titlesPerStore: draft.titles_per_store,
+                    descriptionsPerStore: draft.attributes?.descriptions_per_store || {},
+                    highlightsPerStore: draft.attributes?.highlights_per_store || {},
                     primaryCategory: categoryId,
                     name: primaryTitle,
                     rawName: draft.raw_name,
@@ -2625,8 +2665,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
             // Build final titles per store — fallback to rawName for stores without a manual/AI title
             const finalTitlesPerStore: Record<string, string> = {}
+            const finalDescriptionsPerStore: Record<string, string> = {}
+            const finalHighlightsPerStore: Record<string, string[]> = {}
             selectedStores.forEach(storeId => {
                 finalTitlesPerStore[storeId] = titlesPerStore[storeId] || titlesPerStore['__manual__'] || rawName
+                if (descriptionsPerStore[storeId]?.trim()) {
+                    finalDescriptionsPerStore[storeId] = descriptionsPerStore[storeId]
+                }
+                if (Array.isArray(highlightsPerStore[storeId]) && highlightsPerStore[storeId].some(h => h.trim())) {
+                    finalHighlightsPerStore[storeId] = highlightsPerStore[storeId]
+                        .map(h => h.replace(/^[•\-\*\s]+/, '').trim())
+                        .filter(Boolean)
+                }
             })
             const primaryTitle = Object.values(finalTitlesPerStore)[0] || rawName
 
@@ -2636,6 +2686,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 body: JSON.stringify({
                     storeIds: selectedStores,
                     titlesPerStore: finalTitlesPerStore,
+                    descriptionsPerStore: finalDescriptionsPerStore,
+                    highlightsPerStore: finalHighlightsPerStore,
                     primaryCategory: categoryId,
                     name: primaryTitle,
                     rawName: rawName,
@@ -2830,48 +2882,70 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         <span>Draft Saved Successfully</span>
                     </div>
                 )}
-                {/* Status Tabs Bar */}
-                <div className="flex border-b border-gray-200 dark:border-zinc-800 overflow-x-auto gap-4 scrollbar-none bg-white dark:bg-zinc-900 p-2 rounded-t-lg shadow-xs">
-                    {statusTabs.map(tab => (
-                        <button
-                            key={tab.value}
-                            type="button"
-                            onClick={() => {
-                                setStatusFilter(tab.value)
-                                setCurrentPage(1)
-                            }}
-                            className={`pb-2 px-3 text-sm font-semibold transition-all relative border-b-2 whitespace-nowrap ${
-                                statusFilter === tab.value
-                                    ? 'border-orange-500 text-orange-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-zinc-100'
-                            }`}
-                        >
-                            {tab.label}
-                            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-gray-400">
-                                {tab.count}
-                            </span>
-                        </button>
-                    ))}
+                {/* Compact Status Overview Strip */}
+                <div className="bg-white dark:bg-zinc-900 border border-slate-200/90 dark:border-zinc-800 rounded-xl p-1.5 flex items-center gap-1 overflow-x-auto scrollbar-none">
+                    {statusTabs.map(tab => {
+                        const isSelected = statusFilter === tab.value
+                        return (
+                            <button
+                                key={tab.value}
+                                type="button"
+                                onClick={() => {
+                                    setStatusFilter(tab.value)
+                                    setCurrentPage(1)
+                                }}
+                                className={`h-8 px-3 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                                    isSelected
+                                        ? 'bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 shadow-2xs'
+                                        : 'text-slate-600 dark:text-zinc-400 hover:bg-slate-100/80 dark:hover:bg-zinc-800/80 hover:text-slate-900 dark:hover:text-zinc-100'
+                                }`}
+                            >
+                                <span>{tab.value === 'all' ? 'All Products' : tab.label}</span>
+                                <span
+                                    className={`px-1.5 py-0.5 rounded-md text-[11px] font-semibold tabular-nums ${
+                                        isSelected
+                                            ? 'bg-white/15 text-white dark:bg-zinc-900/15 dark:text-zinc-900'
+                                            : 'bg-slate-100 dark:bg-zinc-800 text-slate-600 dark:text-zinc-400'
+                                    }`}
+                                >
+                                    {tab.count}
+                                </span>
+                            </button>
+                        )
+                    })}
                 </div>
 
-                {/* Filter & Action Bar */}
-                <div className="p-4 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-3 flex-1">
+                {/* Search, Filter & Primary Action Bar */}
+                <div className="px-3.5 py-2.5 bg-white dark:bg-zinc-900 border border-slate-200/90 dark:border-zinc-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2 flex-1">
                         {/* Search Field */}
-                        <div className="relative min-w-[240px] flex-1 max-w-sm">
-                            <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">
-                                <Search size={16} />
+                        <div className="relative min-w-[220px] flex-1 max-w-sm">
+                            <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 pointer-events-none">
+                                <Search size={14} />
                             </span>
                             <input
                                 type="text"
-                                placeholder="Search by Product Name..."
+                                placeholder="Search by product name or title..."
                                 value={searchQuery}
                                 onChange={(e) => {
                                     setSearchQuery(e.target.value)
                                     setCurrentPage(1)
                                 }}
-                                className="w-full pl-9 pr-4 py-2 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                                className="w-full h-9 pl-8 pr-8 border border-slate-200 dark:border-zinc-700 rounded-lg text-xs bg-slate-50/70 dark:bg-zinc-800/60 text-slate-900 dark:text-zinc-100 placeholder:text-slate-400 focus:outline-none focus:bg-white dark:focus:bg-zinc-900 focus:border-slate-400 dark:focus:border-zinc-500 transition-colors"
                             />
+                            {searchQuery && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSearchQuery('')
+                                        setCurrentPage(1)
+                                    }}
+                                    className="absolute inset-y-0 right-0 flex items-center pr-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-zinc-200 cursor-pointer"
+                                    title="Clear search"
+                                >
+                                    <X size={13} />
+                                </button>
+                            )}
                         </div>
 
                         {/* Store Account Switcher */}
@@ -2882,7 +2956,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 setCurrentPage(1)
                             }}
                             disabled={isStoreRestricted && stores.length === 1}
-                            className="py-2 px-3 border border-gray-200 dark:border-zinc-700 rounded-md text-sm bg-gray-50 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-orange-500 font-medium disabled:opacity-75 disabled:cursor-not-allowed"
+                            className="h-9 px-3 border border-slate-200 dark:border-zinc-700 rounded-lg text-xs bg-slate-50/70 dark:bg-zinc-800/60 text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-slate-400 font-medium disabled:opacity-75 disabled:cursor-not-allowed"
                         >
                             {!(isStoreRestricted && stores.length === 1) && (
                                 <option value="">
@@ -2898,24 +2972,23 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             type="button"
                             onClick={() => fetchDrafts()}
                             disabled={draftsLoading}
-                            className="p-2 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-md border border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400"
-                            title="Refresh List"
+                            className="h-9 px-3 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded-lg border border-slate-200 dark:border-zinc-700 text-slate-600 dark:text-zinc-300 text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                            title="Refresh product list"
                         >
-                            <RefreshCw size={16} className={draftsLoading ? 'animate-spin' : ''} />
+                            <RefreshCw size={13} className={draftsLoading ? 'animate-spin' : ''} />
+                            <span className="hidden sm:inline">Refresh</span>
                         </button>
                     </div>
 
-                    <div className="relative">
+                    <div className="relative shrink-0">
                         <button
                             type="button"
                             onClick={() => setIsAddMenuOpen(!isAddMenuOpen)}
-                            className="px-4 py-2 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600 hover:from-orange-600 hover:via-amber-600 hover:to-orange-700 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 shadow-md shadow-orange-500/25 hover:shadow-lg hover:shadow-orange-500/35 transition-all transform active:scale-95 cursor-pointer ring-1 ring-white/20"
+                            className="h-9 px-3.5 bg-slate-900 hover:bg-slate-800 dark:bg-orange-600 dark:hover:bg-orange-500 text-white rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
                         >
-                            <span className="w-5 h-5 rounded-lg bg-white/20 flex items-center justify-center">
-                                <Plus size={13} strokeWidth={3} />
-                            </span>
+                            <Plus size={14} />
                             <span>Add Product</span>
-                            <ChevronDown size={14} className={`transition-transform duration-200 opacity-80 ${isAddMenuOpen ? 'rotate-180' : ''}`} />
+                            <ChevronDown size={13} className={`transition-transform duration-150 opacity-80 ${isAddMenuOpen ? 'rotate-180' : ''}`} />
                         </button>
 
                         {isAddMenuOpen && (
@@ -3106,344 +3179,358 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         return (
                             <>
-                                {paginatedDrafts.map((draft) => (
-                                    <div
-                                        key={draft.id}
-                                        onMouseEnter={() => setHoveredDraftId(draft.id)}
-                                        onMouseLeave={() => setHoveredDraftId(prev => prev === draft.id ? null : prev)}
-                                        className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-4 shadow-xs hover:border-gray-300 dark:hover:border-zinc-700 transition-all flex flex-col md:flex-row gap-4 items-start md:items-center justify-between"
-                                    >
-                                        <div className="flex items-start md:items-center gap-3.5 flex-1 min-w-0">
-                                            {/* Checkbox */}
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedDraftIds.has(draft.id)}
-                                                onChange={() => handleSelectDraft(draft.id)}
-                                                className="mt-1 md:mt-0 rounded border-gray-300 text-orange-600 focus:ring-orange-500 shrink-0 cursor-pointer"
-                                            />
-
-                                            {/* Product Image - Click opens Gallery & Desktop Upload */}
-                                            <div className="flex flex-col items-center flex-none">
-                                                <div 
-                                                    onClick={() => {
-                                                        setImageModalDraft(draft)
-                                                        setModalImages(draft.images ? [...draft.images] : [])
-                                                    }}
-                                                    className="relative cursor-pointer group"
-                                                    title="Click to view & edit all photos"
-                                                >
-                                                    <img
-                                                        src={draft.images?.[0] || '/placeholder.png'}
-                                                        alt="Preview"
-                                                        className="w-20 h-20 rounded-lg object-cover border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 transition-transform group-hover:scale-105 group-hover:shadow-md"
-                                                    />
-                                                    <div className="absolute inset-0 bg-black/40 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                                                        <Pencil size={15} />
-                                                    </div>
-                                                    {draft.images && draft.images.length > 1 && (
-                                                        <span className="absolute bottom-1 right-1 bg-black/75 text-[9px] text-white px-1.5 py-0.5 rounded font-bold">
-                                                            +{draft.images.length - 1}
-                                                        </span>
-                                                    )}
+                                <div className="bg-white dark:bg-zinc-900 border border-slate-200/90 dark:border-zinc-800 rounded-xl overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        <div className="min-w-[880px] divide-y divide-slate-100 dark:divide-zinc-800/80">
+                                            {/* Table Header */}
+                                            <div className="px-4 py-2.5 bg-slate-50/80 dark:bg-zinc-900/80 border-b border-slate-200/80 dark:border-zinc-800 flex items-center gap-3.5 text-[11px] font-semibold text-slate-500 dark:text-zinc-400 tracking-wide">
+                                                <div className="w-4 shrink-0" />
+                                                <div className="w-[70px] shrink-0">Image</div>
+                                                <div className="flex-1 grid grid-cols-12 gap-4 items-center">
+                                                    <div className="col-span-5">Product &amp; SEO Title</div>
+                                                    <div className="col-span-4">Category &amp; Seller Stores</div>
+                                                    <div className="col-span-3 text-right pr-2">Price, Profit &amp; Status</div>
                                                 </div>
-
-                                                {/* Pre-flight Image Progress Line */}
-                                                <div className="w-20 mt-1.5" title={`Image count: ${draft.images?.length || 0}/8. Less than 2 or 2-3: Yellow, More than 3: Green`}>
-                                                    <div className="w-full h-1.5 bg-gray-200 dark:bg-zinc-700 rounded-full overflow-hidden">
-                                                        <div 
-                                                            className={`h-full transition-all duration-300 ${
-                                                                (draft.images?.length || 0) > 3 
-                                                                    ? 'w-full bg-emerald-500' 
-                                                                    : (draft.images?.length || 0) >= 2 
-                                                                        ? 'w-2/3 bg-amber-400' 
-                                                                        : (draft.images?.length || 0) === 1
-                                                                            ? 'w-1/3 bg-amber-400'
-                                                                            : 'w-0 bg-gray-300'
-                                                            }`}
-                                                        />
-                                                    </div>
-                                                    <span className={`text-[9px] font-semibold block text-center mt-0.5 ${
-                                                        (draft.images?.length || 0) > 3 
-                                                            ? 'text-emerald-600 dark:text-emerald-400' 
-                                                            : (draft.images?.length || 0) > 0 
-                                                                ? 'text-amber-600 dark:text-amber-400' 
-                                                                : 'text-gray-400'
-                                                    }`}>
-                                                        {(draft.images?.length || 0)}/8 photos {(draft.images?.length || 0) > 3 ? '✓' : ''}
-                                                    </span>
-                                                </div>
+                                                <div className="w-[156px] shrink-0 text-right pr-1">Actions</div>
                                             </div>
 
-                                            {/* Main info columns */}
-                                            <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 items-center min-w-0 font-sans">
-                                                
-                                                {/* Column 1: Names + Copy Button for Daraz Title */}
-                                                <div className="min-w-0 flex flex-col justify-center">
-                                                    <span className="font-semibold text-gray-900 dark:text-zinc-100 block truncate text-[15px] leading-snug tracking-tight" title={draft.raw_name}>
-                                                        {draft.raw_name}
-                                                    </span>
-                                                    <div className="mt-1 flex items-center min-w-0">
-                                                        {draft.title ? (
-                                                            <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300 font-normal min-w-0 max-w-full text-xs sm:text-[13px]">
-                                                                <Sparkles size={13} className="shrink-0 text-amber-500" />
-                                                                <span className="truncate" title={draft.title}>{draft.title}</span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation()
-                                                                        navigator.clipboard.writeText(draft.title || '')
-                                                                        setCopiedTitleId(draft.id)
-                                                                        setTimeout(() => setCopiedTitleId(null), 2000)
-                                                                    }}
-                                                                    className="shrink-0 p-1 text-gray-400 hover:text-amber-600 dark:hover:text-amber-300 hover:bg-amber-100/60 dark:hover:bg-amber-950/40 rounded transition-colors"
-                                                                    title={copiedTitleId === draft.id ? 'Copied!' : 'Copy Daraz Title'}
-                                                                >
-                                                                    {copiedTitleId === draft.id ? (
-                                                                        <Check size={12} className="text-emerald-500" />
-                                                                    ) : (
-                                                                        <Copy size={12} />
-                                                                    )}
-                                                                </button>
+                                            {paginatedDrafts.map((draft) => (
+                                                <div
+                                                    key={draft.id}
+                                                    onMouseEnter={() => setHoveredDraftId(draft.id)}
+                                                    onMouseLeave={() => setHoveredDraftId(prev => prev === draft.id ? null : prev)}
+                                                    className="px-4 py-3 hover:bg-slate-50/80 dark:hover:bg-zinc-800/40 transition-colors flex items-center gap-3.5 justify-between"
+                                                >
+                                                    <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                                                        {/* A. Checkbox */}
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedDraftIds.has(draft.id)}
+                                                            onChange={() => handleSelectDraft(draft.id)}
+                                                            className="w-4 h-4 rounded border-slate-300 dark:border-zinc-600 text-slate-900 focus:ring-slate-500 shrink-0 cursor-pointer"
+                                                        />
+
+                                                        {/* A. Product Image + Photo Count */}
+                                                        <div className="flex flex-col items-center flex-none w-[70px]">
+                                                            <div
+                                                                onClick={() => {
+                                                                    setImageModalDraft(draft)
+                                                                    setModalImages(draft.images ? [...draft.images] : [])
+                                                                }}
+                                                                className="relative cursor-pointer group"
+                                                                title="Click to view & edit all photos"
+                                                            >
+                                                                <img
+                                                                    src={draft.images?.[0] || '/placeholder.png'}
+                                                                    alt="Preview"
+                                                                    className="w-[68px] h-[68px] rounded-lg object-cover border border-slate-200 dark:border-zinc-700 bg-slate-50 dark:bg-zinc-800 transition-transform group-hover:scale-[1.03]"
+                                                                />
+                                                                <div className="absolute inset-0 bg-black/35 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                                                    <Pencil size={13} />
+                                                                </div>
+                                                                {draft.images && draft.images.length > 1 && (
+                                                                    <span className="absolute bottom-1 right-1 bg-slate-900/80 text-[9px] text-white px-1 py-0.5 rounded font-semibold leading-none">
+                                                                        +{draft.images.length - 1}
+                                                                    </span>
+                                                                )}
                                                             </div>
-                                                        ) : (
-                                                            <span className="italic text-gray-400 text-xs">AI Content Not Generated</span>
-                                                        )}
-                                                    </div>
-                                                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handleOpenAiStudioForDraft(draft)
-                                                            }}
-                                                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-gradient-to-r from-orange-500/10 to-amber-500/10 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-900/40 hover:bg-orange-500 hover:text-white transition-all shadow-2xs group/btn cursor-pointer"
-                                                            title="Generate pure white studio cover & AI lifestyle scenes"
-                                                        >
-                                                            <Sparkles size={11} className="text-orange-500 group-hover/btn:text-white transition-colors" />
-                                                            AI Image Studio
-                                                        </button>
 
-                                                        <button
-                                                            type="button"
-                                                            disabled={pastingDraftId === draft.id}
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handlePasteToDraftRow(draft, false)
-                                                            }}
-                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/50 hover:bg-emerald-600 hover:text-white transition-all shadow-2xs cursor-pointer disabled:opacity-50"
-                                                            title="Paste copied image from Gemini/ChatGPT as Primary Cover (or hover row & press Ctrl+V)"
-                                                        >
-                                                            {pastingDraftId === draft.id ? (
-                                                                <Loader2 size={11} className="animate-spin" />
-                                                            ) : pastedSuccessId === draft.id ? (
-                                                                <Check size={11} />
-                                                            ) : (
-                                                                <Copy size={11} />
-                                                            )}
-                                                            {pastedSuccessId === draft.id ? 'Pasted!' : 'Paste Image'}
-                                                        </button>
+                                                            <div className="w-[68px] mt-1" title={`Image count: ${draft.images?.length || 0}/8`}>
+                                                                <div className="w-full h-1 bg-slate-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                                                                    <div
+                                                                        className={`h-full transition-all duration-300 ${
+                                                                            (draft.images?.length || 0) > 3
+                                                                                ? 'w-full bg-emerald-500'
+                                                                                : (draft.images?.length || 0) >= 2
+                                                                                    ? 'w-2/3 bg-amber-400'
+                                                                                    : (draft.images?.length || 0) === 1
+                                                                                        ? 'w-1/3 bg-amber-400'
+                                                                                        : 'w-0 bg-slate-300'
+                                                                        }`}
+                                                                    />
+                                                                </div>
+                                                                <span className={`text-[10px] font-medium block text-center mt-0.5 tabular-nums ${
+                                                                    (draft.images?.length || 0) > 3
+                                                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                                                        : (draft.images?.length || 0) > 0
+                                                                            ? 'text-amber-600 dark:text-amber-400'
+                                                                            : 'text-slate-400'
+                                                                }`}>
+                                                                    {(draft.images?.length || 0)}/8
+                                                                </span>
+                                                            </div>
+                                                        </div>
 
-                                                        <button
-                                                            type="button"
-                                                            disabled={pastingDraftId === draft.id}
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handlePasteToDraftRow(draft, true)
-                                                            }}
-                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/50 hover:bg-blue-600 hover:text-white transition-all shadow-2xs cursor-pointer disabled:opacity-50"
-                                                            title="Paste copied image from Gemini/ChatGPT and REPLACE old raw images"
-                                                        >
-                                                            Paste & Replace
-                                                        </button>
-                                                    </div>
-                                                </div>
+                                                        {/* Main Info Grid */}
+                                                        <div className="flex-1 grid grid-cols-12 gap-4 items-center min-w-0">
+                                                            {/* B & C: Product Info + Image Management */}
+                                                            <div className="col-span-5 min-w-0 flex flex-col justify-center">
+                                                                <span className="font-semibold text-slate-900 dark:text-zinc-100 block truncate text-[13.5px] leading-snug" title={draft.raw_name}>
+                                                                    {draft.raw_name}
+                                                                </span>
+                                                                <div className="mt-0.5 flex items-start gap-1 min-w-0">
+                                                                    {draft.title ? (
+                                                                        <>
+                                                                            <span className="text-xs text-slate-600 dark:text-zinc-400 line-clamp-2 leading-snug flex-1 min-w-0" title={draft.title}>
+                                                                                {draft.title}
+                                                                            </span>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation()
+                                                                                    navigator.clipboard.writeText(draft.title || '')
+                                                                                    setCopiedTitleId(draft.id)
+                                                                                    setTimeout(() => setCopiedTitleId(null), 2000)
+                                                                                }}
+                                                                                className="shrink-0 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                                                                                title={copiedTitleId === draft.id ? 'Copied!' : 'Copy SEO Title'}
+                                                                            >
+                                                                                {copiedTitleId === draft.id ? (
+                                                                                    <Check size={12} className="text-emerald-600" />
+                                                                                ) : (
+                                                                                    <Copy size={12} />
+                                                                                )}
+                                                                            </button>
+                                                                        </>
+                                                                    ) : (
+                                                                        <span className="italic text-slate-400 text-xs">AI Content Not Generated</span>
+                                                                    )}
+                                                                </div>
 
-                                                {/* Column 2: Category & Attributes + Edit Icon */}
-                                                <div className="flex flex-col min-w-0">
-                                                    <div className="flex items-center gap-1.5 min-w-0">
-                                                        <span 
-                                                            onClick={() => handleOpenCategoryModal(draft)}
-                                                            className="text-xs sm:text-[13px] font-medium text-gray-800 dark:text-zinc-200 truncate cursor-pointer hover:text-orange-600 dark:hover:text-orange-400 transition-colors"
-                                                            title="Click to edit category & specifications"
-                                                        >
-                                                            {draft.category_path || 'No Category Selected'}
-                                                        </span>
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handleOpenCategoryModal(draft)
-                                                            }}
-                                                            className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
-                                                            title="Edit Category & Product Specifications"
-                                                        >
-                                                            <Pencil size={11} />
-                                                        </button>
-                                                    </div>
-                                                    <div className="flex items-center flex-wrap gap-1 mt-1">
-                                                        {draft.target_stores && draft.target_stores.length > 0 ? (
-                                                            <>
-                                                                {draft.target_stores.map(storeId => {
-                                                                    const sName = stores.find(s => s.id === storeId)?.seller_account || 'Account'
-                                                                    return (
-                                                                        <span 
-                                                                            key={storeId} 
-                                                                            onClick={() => handleOpenStoreModal(draft)}
-                                                                            className="inline-flex items-center gap-1 text-[11px] px-2.5 py-0.5 bg-amber-50/80 dark:bg-amber-950/20 text-amber-900 dark:text-amber-200 border border-amber-200/60 dark:border-amber-900/40 rounded-md font-medium transition-all hover:bg-amber-100/50 dark:hover:bg-amber-950/40 cursor-pointer"
-                                                                            title="Click to edit seller account"
+                                                                <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleOpenAiStudioForDraft(draft)
+                                                                        }}
+                                                                        className="inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-zinc-800 text-slate-700 dark:text-zinc-300 border border-slate-200/80 dark:border-zinc-700 hover:bg-slate-200/70 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                                                                        title="Generate pure white studio cover & AI lifestyle scenes"
+                                                                    >
+                                                                        <Sparkles size={11} className="text-orange-500" />
+                                                                        AI Image Studio
+                                                                    </button>
+
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={pastingDraftId === draft.id}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handlePasteToDraftRow(draft, false)
+                                                                        }}
+                                                                        className="inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium bg-white dark:bg-zinc-900 text-slate-700 dark:text-zinc-300 border border-slate-200 dark:border-zinc-700 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-50"
+                                                                        title="Paste copied image as Primary Cover (or hover row & press Ctrl+V)"
+                                                                    >
+                                                                        {pastingDraftId === draft.id ? (
+                                                                            <Loader2 size={11} className="animate-spin" />
+                                                                        ) : pastedSuccessId === draft.id ? (
+                                                                            <Check size={11} className="text-emerald-600" />
+                                                                        ) : (
+                                                                            <Copy size={11} className="text-slate-400" />
+                                                                        )}
+                                                                        {pastedSuccessId === draft.id ? 'Pasted!' : 'Paste Image'}
+                                                                    </button>
+
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={pastingDraftId === draft.id}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handlePasteToDraftRow(draft, true)
+                                                                        }}
+                                                                        className="inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium bg-white dark:bg-zinc-900 text-slate-700 dark:text-zinc-300 border border-slate-200 dark:border-zinc-700 hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-50"
+                                                                        title="Paste copied image and replace old raw images"
+                                                                    >
+                                                                        Paste &amp; Replace
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* D & E: Category & Seller Accounts */}
+                                                            <div className="col-span-4 flex flex-col min-w-0">
+                                                                <div className="flex items-center gap-1 min-w-0">
+                                                                    <span
+                                                                        onClick={() => handleOpenCategoryModal(draft)}
+                                                                        className="text-xs font-medium text-slate-700 dark:text-zinc-300 truncate cursor-pointer hover:text-slate-950 dark:hover:text-white transition-colors"
+                                                                        title={draft.category_path || 'Click to edit category & specifications'}
+                                                                    >
+                                                                        {draft.category_path || 'No Category Selected'}
+                                                                    </span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleOpenCategoryModal(draft)
+                                                                        }}
+                                                                        className="shrink-0 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                                                                        title="Edit Category & Product Specifications"
+                                                                    >
+                                                                        <Pencil size={11} />
+                                                                    </button>
+                                                                </div>
+
+                                                                <div className="flex items-center flex-wrap gap-1 mt-1.5">
+                                                                    {draft.target_stores && draft.target_stores.length > 0 ? (
+                                                                        <>
+                                                                            {draft.target_stores.map(storeId => {
+                                                                                const sName = stores.find(s => s.id === storeId)?.seller_account || 'Account'
+                                                                                return (
+                                                                                    <span
+                                                                                        key={storeId}
+                                                                                        onClick={() => handleOpenStoreModal(draft)}
+                                                                                        className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-slate-100 dark:bg-zinc-800 text-slate-700 dark:text-zinc-300 border border-slate-200/80 dark:border-zinc-700 rounded-md font-medium hover:bg-slate-200/70 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                                                                                        title="Click to edit seller account"
+                                                                                    >
+                                                                                        <Store size={10} className="shrink-0 text-slate-500 dark:text-zinc-400" />
+                                                                                        {sName}
+                                                                                    </span>
+                                                                                )
+                                                                            })}
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation()
+                                                                                    handleOpenStoreModal(draft)
+                                                                                }}
+                                                                                className="shrink-0 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                                                                                title="Edit Seller Accounts"
+                                                                            >
+                                                                                <Pencil size={11} />
+                                                                            </button>
+                                                                        </>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation()
+                                                                                handleOpenStoreModal(draft)
+                                                                            }}
+                                                                            className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 text-slate-500 dark:text-zinc-400 hover:text-slate-800 dark:hover:text-zinc-200 border border-dashed border-slate-300 dark:border-zinc-700 rounded-md font-medium transition-colors cursor-pointer"
+                                                                            title="Select Seller Account"
                                                                         >
-                                                                            <Store size={10} className="shrink-0 text-amber-600 dark:text-amber-500" />
-                                                                            {sName}
-                                                                        </span>
+                                                                            <Store size={10} className="shrink-0" />
+                                                                            <span>Select Seller Account</span>
+                                                                            <Pencil size={10} className="shrink-0 ml-0.5" />
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+
+                                                                {(() => {
+                                                                    const pLink = draft.product_link || draft.attributes?.product_link
+                                                                    if (!pLink) return null
+                                                                    let hostname = 'link'
+                                                                    try {
+                                                                        hostname = new URL(pLink).hostname.replace('www.', '')
+                                                                    } catch {
+                                                                        hostname = 'link'
+                                                                    }
+                                                                    return (
+                                                                        <a
+                                                                            href={pLink}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                            className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400 hover:underline max-w-[200px] truncate mt-1"
+                                                                            title={pLink}
+                                                                        >
+                                                                            <ExternalLink size={10} className="shrink-0" />
+                                                                            <span>{hostname}</span>
+                                                                        </a>
                                                                     )
-                                                                })}
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation()
-                                                                        handleOpenStoreModal(draft)
-                                                                    }}
-                                                                    className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
-                                                                    title="Edit Seller Accounts"
-                                                                >
-                                                                    <Pencil size={11} />
-                                                                </button>
-                                                            </>
-                                                        ) : (
+                                                                })()}
+                                                            </div>
+
+                                                            {/* F & G: Pricing, Profit & Status */}
+                                                            <div className="col-span-3 flex flex-col items-end justify-center min-w-0 pr-2">
+                                                                <div className="flex items-center gap-1">
+                                                                    <div className="flex items-baseline gap-1.5 tabular-nums">
+                                                                        {draft.special_price ? (
+                                                                            <>
+                                                                                <span className="text-sm font-semibold text-slate-900 dark:text-zinc-100">
+                                                                                    NPR {draft.special_price}
+                                                                                </span>
+                                                                                <span className="text-[11px] text-slate-400 line-through">
+                                                                                    NPR {draft.price || 0}
+                                                                                </span>
+                                                                            </>
+                                                                        ) : (
+                                                                            <span className="text-sm font-semibold text-slate-900 dark:text-zinc-100">
+                                                                                {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleOpenPriceModal(draft)
+                                                                        }}
+                                                                        className="shrink-0 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-zinc-200 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                                                                        title="Edit Regular & Special Price"
+                                                                    >
+                                                                        <Pencil size={11} />
+                                                                    </button>
+                                                                </div>
+
+                                                                {(() => {
+                                                                    const effectiveSelling = draft.special_price || draft.price
+                                                                    const profitInfo = computeProfitInfo(draft.category_path, effectiveSelling, draft.wholesale_price)
+                                                                    if (!profitInfo) return null
+
+                                                                    if (profitInfo.hasWholesale) {
+                                                                        return (
+                                                                            <div className="mt-0.5 text-right tabular-nums" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted. Net Payout: NPR ${profitInfo.receivableAmount}`}>
+                                                                                <span className={`text-[11px] font-medium ${
+                                                                                    profitInfo.isPositive
+                                                                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                                                                        : 'text-rose-600 dark:text-rose-400'
+                                                                                }`}>
+                                                                                    {profitInfo.isPositive ? '+' : ''}Rs. {profitInfo.profit} profit
+                                                                                </span>
+                                                                            </div>
+                                                                        )
+                                                                    }
+
+                                                                    return (
+                                                                        <div className="mt-0.5 text-right tabular-nums" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted`}>
+                                                                            <span className="text-[11px] text-slate-500 dark:text-zinc-400 font-medium">
+                                                                                Payout: NPR {profitInfo.receivableAmount}
+                                                                            </span>
+                                                                        </div>
+                                                                    )
+                                                                })()}
+
+                                                                <div className="mt-1">
+                                                                    {statusBadge(draft.status, draft)}
+                                                                </div>
+                                                                {draft.status === 'failed' && draft.error && (
+                                                                    <div className="mt-1 text-[10px] text-rose-600 dark:text-rose-400 text-right max-w-[200px] truncate cursor-help" title={draft.error}>
+                                                                        {draft.error}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* H. Actions Column */}
+                                                    <div className="flex-none flex items-center gap-1.5 border-l border-slate-100 dark:border-zinc-800 pl-3.5 min-w-[156px] justify-end">
+                                                        {canViewListing(draft) && (
                                                             <button
                                                                 type="button"
                                                                 onClick={(e) => {
                                                                     e.stopPropagation()
-                                                                    handleOpenStoreModal(draft)
+                                                                    setViewActiveImageIdx(0)
+                                                                    setViewModalDraft(draft)
                                                                 }}
-                                                                className="inline-flex items-center gap-1 text-[11px] px-2.5 py-0.5 text-gray-600 dark:text-zinc-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/20 border border-dashed border-gray-300 dark:border-zinc-700 hover:border-orange-400 rounded-md font-medium transition-all"
-                                                                title="Select Seller Account"
+                                                                className="h-7 px-2.5 rounded-md text-xs font-medium bg-white dark:bg-zinc-900 hover:bg-slate-50 dark:hover:bg-zinc-800 text-slate-700 dark:text-zinc-200 border border-slate-200 dark:border-zinc-700 transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                                                title="View complete product details & verify QC Pass"
                                                             >
-                                                                <Store size={10} className="shrink-0" />
-                                                                <span>Select Seller Account</span>
-                                                                <Pencil size={10} className="shrink-0 ml-0.5" />
+                                                                <Eye size={12} className="text-slate-500 dark:text-zinc-400" />
+                                                                View
                                                             </button>
                                                         )}
-                                                    </div>
-                                                    {(() => {
-                                                        const pLink = draft.product_link || draft.attributes?.product_link
-                                                        if (!pLink) return null
-                                                        let hostname = 'link'
-                                                        try {
-                                                            hostname = new URL(pLink).hostname.replace('www.', '')
-                                                        } catch {
-                                                            hostname = 'link'
-                                                        }
-                                                        return (
-                                                            <a
-                                                                href={pLink}
-                                                                target="_blank"
-                                                                rel="noopener noreferrer"
-                                                                onClick={(e) => e.stopPropagation()}
-                                                                className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400 hover:underline max-w-[220px] truncate mt-1 bg-blue-50/50 dark:bg-blue-950/20 px-1.5 py-0.5 rounded border border-blue-100 dark:border-blue-900/30"
-                                                                title={pLink}
-                                                            >
-                                                                <ExternalLink size={10} className="shrink-0" />
-                                                                <span>{hostname}</span>
-                                                            </a>
-                                                        )
-                                                    })()}
-                                                </div>
 
-                                                {/* Column 3: Price (Regular & Special) + Real-time Profit / Receivable + Edit Icon */}
-                                                <div className="flex flex-col md:items-center justify-center min-w-0">
-                                                    <div className="flex items-center gap-1.5">
-                                                        <div className="flex flex-col md:items-center">
-                                                            {draft.special_price ? (
-                                                                <div className="flex items-baseline gap-1.5">
-                                                                    <span className="text-[15px] font-semibold text-gray-900 dark:text-zinc-100">
-                                                                        NPR {draft.special_price}
-                                                                    </span>
-                                                                    <span className="text-xs text-gray-400 line-through">
-                                                                        NPR {draft.price || 0}
-                                                                    </span>
-                                                                </div>
-                                                            ) : (
-                                                                <span className="text-[15px] font-semibold text-gray-900 dark:text-zinc-100">
-                                                                    {draft.price ? `NPR ${draft.price}` : 'Price: N/A'}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handleOpenPriceModal(draft)
-                                                            }}
-                                                            className="shrink-0 p-1 text-gray-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors"
-                                                            title="Edit Regular & Special Price"
-                                                        >
-                                                            <Pencil size={11} />
-                                                        </button>
-                                                    </div>
-
-                                                    {/* Real-time Profit Amount in clean text */}
-                                                    {(() => {
-                                                        const effectiveSelling = draft.special_price || draft.price
-                                                        const profitInfo = computeProfitInfo(draft.category_path, effectiveSelling, draft.wholesale_price)
-                                                        if (!profitInfo) return null
-
-                                                        if (profitInfo.hasWholesale) {
-                                                            return (
-                                                                <div className="mt-0.5 text-center" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted. Net Payout: NPR ${profitInfo.receivableAmount}`}>
-                                                                    <span className={`text-xs font-semibold ${
-                                                                        profitInfo.isPositive 
-                                                                            ? 'text-emerald-600 dark:text-emerald-400' 
-                                                                            : 'text-rose-600 dark:text-rose-400'
-                                                                    }`}>
-                                                                        {profitInfo.isPositive ? '+' : ''}Rs. {profitInfo.profit} profit
-                                                                    </span>
-                                                                </div>
-                                                            )
-                                                        }
-
-                                                        return (
-                                                            <div className="mt-0.5 text-center" title={`Category commission ~${profitInfo.commRate}% + Daraz fees deducted`}>
-                                                                <span className="text-[11px] text-gray-500 dark:text-zinc-400 font-medium">
-                                                                    Payout: NPR {profitInfo.receivableAmount}
-                                                                </span>
-                                                            </div>
-                                                        )
-                                                    })()}
-
-                                                    <div className="mt-1">
-                                                        {statusBadge(draft.status, draft)}
-                                                    </div>
-                                                    {draft.status === 'failed' && draft.error && (
-                                                        <div className="mt-1.5 text-[10px] text-rose-600 dark:text-rose-400 md:text-center max-w-[220px] bg-rose-50/50 dark:bg-rose-950/10 border border-rose-100/50 dark:border-rose-900/10 px-2 py-1 rounded leading-tight font-medium hover:max-w-none transition-all duration-200 cursor-help" title={draft.error}>
-                                                            {draft.error}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            {/* Dedicated "View" Button between Price and Publish / Generate AI */}
-                                            {canViewListing(draft) && (
-                                                <div className="flex-none flex items-center justify-center sm:px-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation()
-                                                            setViewActiveImageIdx(0)
-                                                            setViewModalDraft(draft)
-                                                        }}
-                                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white border border-indigo-200 dark:border-indigo-800/60 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                                                        title="View complete product details without HTML & verify QC Pass"
-                                                    >
-                                                        <Eye size={13} />
-                                                        View
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Action Buttons Column */}
-                                            <div className="flex-none flex sm:flex-col items-stretch justify-center gap-1.5 border-t sm:border-t-0 sm:border-l border-gray-100 dark:border-zinc-800 pt-3 sm:pt-0 sm:pl-4 min-w-[110px]">
+                                                        <div className="flex flex-col gap-1 min-w-[96px]">
                                                 {/* 1. Draft/Failed/Generating Status Action Group (when not QC Passed) */}
                                                 {(draft.status === 'draft' || draft.status === 'failed' || draft.status === 'generating') && !isQcPassed(draft) && (
                                                     <>
@@ -3694,14 +3781,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                         </button>
                                                     </div>
                                                 )}
+                                                </div>
                                             </div>
                                         </div>
                                     ))}
+                                        </div>
+                                    </div>
+                                </div>
 
                                     {/* Pagination Controls */}
                                     {sortedDrafts.length > ITEMS_PER_PAGE && (
-                                        <div className="flex justify-between items-center bg-white dark:bg-zinc-900 p-4 border dark:border-zinc-800 rounded-lg shadow-sm mt-4">
-                                            <span className="text-xs text-gray-500">
+                                        <div className="flex justify-between items-center bg-white dark:bg-zinc-900 px-4 py-2.5 border border-slate-200/90 dark:border-zinc-800 rounded-xl mt-3">
+                                            <span className="text-xs text-slate-500 dark:text-zinc-400 tabular-nums">
                                                 Showing {startIndex + 1} to {Math.min(startIndex + ITEMS_PER_PAGE, sortedDrafts.length)} of {sortedDrafts.length} listings
                                             </span>
                                             <div className="flex items-center gap-2">
@@ -3709,18 +3800,18 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                     type="button"
                                                     disabled={currentPage === 1}
                                                     onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-                                                    className="px-3 py-1.5 border rounded text-xs bg-white hover:bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 disabled:opacity-50 font-medium"
+                                                    className="h-7 px-2.5 border border-slate-200 dark:border-zinc-700 rounded-md text-xs bg-white hover:bg-slate-50 dark:bg-zinc-800 disabled:opacity-50 font-medium cursor-pointer"
                                                 >
                                                     Previous
                                                 </button>
-                                                <span className="text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                                                <span className="text-xs font-medium text-slate-700 dark:text-zinc-300 tabular-nums">
                                                     Page {currentPage} of {totalPages}
                                                 </span>
                                                 <button
                                                     type="button"
                                                     disabled={currentPage === totalPages}
                                                     onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-                                                    className="px-3 py-1.5 border rounded text-xs bg-white hover:bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 disabled:opacity-50 font-medium"
+                                                    className="h-7 px-2.5 border border-slate-200 dark:border-zinc-700 rounded-md text-xs bg-white hover:bg-slate-50 dark:bg-zinc-800 disabled:opacity-50 font-medium cursor-pointer"
                                                 >
                                                     Next
                                                 </button>
@@ -6969,60 +7060,116 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                 </div>
 
                                 {/* Textarea or Preview */}
-                                {previewDesc ? (
-                                    <div
-                                        className={`p-4 prose dark:prose-invert max-w-none text-xs bg-gray-50/50 dark:bg-zinc-900/30 overflow-y-auto ${
-                                            isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
-                                        }`}
-                                        dangerouslySetInnerHTML={{
-                                            __html: description || '<p class="text-gray-400 dark:text-zinc-500 italic">No description content to preview</p>'
-                                        }}
-                                    />
-                                ) : (
-                                    <textarea
-                                        value={description}
-                                        onChange={(e) => setDescription(e.target.value)}
-                                        placeholder="Please input"
-                                        style={{ textAlign: descAlign }}
-                                        className={`w-full p-3.5 text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans ${
-                                            isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
-                                        }`}
-                                        required
-                                    />
-                                )}
+                                {(() => {
+                                    const activeStoreId = activeTitleStoreId || selectedStores[0]
+                                    const activeDesc = (activeStoreId && descriptionsPerStore[activeStoreId] !== undefined)
+                                        ? descriptionsPerStore[activeStoreId]
+                                        : description
+                                    const updateActiveDesc = (val: string) => {
+                                        if (activeStoreId) {
+                                            setDescriptionsPerStore(prev => ({ ...prev, [activeStoreId]: val }))
+                                            if (activeStoreId === selectedStores[0]) setDescription(val)
+                                        } else {
+                                            setDescription(val)
+                                        }
+                                    }
+                                    return previewDesc ? (
+                                        <div
+                                            className={`p-4 prose dark:prose-invert max-w-none text-xs bg-gray-50/50 dark:bg-zinc-900/30 overflow-y-auto ${
+                                                isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
+                                            }`}
+                                            dangerouslySetInnerHTML={{
+                                                __html: activeDesc || '<p class="text-gray-400 dark:text-zinc-500 italic">No description content to preview</p>'
+                                            }}
+                                        />
+                                    ) : (
+                                        <textarea
+                                            value={activeDesc}
+                                            onChange={(e) => updateActiveDesc(e.target.value)}
+                                            placeholder="Please input"
+                                            style={{ textAlign: descAlign }}
+                                            className={`w-full p-3.5 text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans ${
+                                                isAdvancedMode ? 'min-h-[400px]' : 'min-h-[220px]'
+                                            }`}
+                                            required
+                                        />
+                                    )
+                                })()}
                             </div>
                         </div>
 
                         {/* Highlights */}
                         <div className="space-y-1.5">
-                            <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
-                                <span className="text-red-500 font-bold">*</span> Highlights
-                            </label>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <label className="text-xs font-medium text-gray-700 dark:text-zinc-300 flex items-center gap-1">
+                                    <span className="text-red-500 font-bold">*</span> Highlights
+                                </label>
+                                {selectedStores.length > 1 && (
+                                    <div className="flex items-center gap-1 flex-wrap">
+                                        {selectedStores.map(storeId => {
+                                            const storeName = stores.find(s => s.id === storeId)?.seller_account || storeId
+                                            const isActive = (activeTitleStoreId || selectedStores[0]) === storeId
+                                            return (
+                                                <button
+                                                    key={storeId}
+                                                    type="button"
+                                                    onClick={() => setActiveTitleStoreId(storeId)}
+                                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors cursor-pointer ${
+                                                        isActive
+                                                            ? 'bg-orange-500 text-white'
+                                                            : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:bg-gray-200 dark:hover:bg-zinc-700'
+                                                    }`}
+                                                >
+                                                    {storeName}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                )}
+                            </div>
                             <div className="border border-gray-300 dark:border-zinc-700 rounded-md overflow-hidden bg-white dark:bg-zinc-900 focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange-500 transition-colors shadow-xs">
-                                {/* Daraz Toolbar */}
-                                <div className="bg-[#f8f9fa] dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex items-center justify-between select-none">
-                                    <button
-                                        type="button"
-                                        title="Bulleted List"
-                                        className="p-1.5 rounded bg-white dark:bg-zinc-700 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-600 cursor-default"
-                                    >
-                                        <List size={14} />
-                                    </button>
-                                    <span className="text-[11px] text-gray-400">
-                                        {highlights.filter(h => h.trim()).length} point{highlights.filter(h => h.trim()).length === 1 ? '' : 's'} (1 per line)
-                                    </span>
-                                </div>
+                                {(() => {
+                                    const activeStoreId = activeTitleStoreId || selectedStores[0]
+                                    const activeHighlights = (activeStoreId && Array.isArray(highlightsPerStore[activeStoreId]))
+                                        ? highlightsPerStore[activeStoreId]
+                                        : highlights
+                                    const updateActiveHighlights = (lines: string[]) => {
+                                        if (activeStoreId) {
+                                            setHighlightsPerStore(prev => ({ ...prev, [activeStoreId]: lines }))
+                                            if (activeStoreId === selectedStores[0]) setHighlights(lines)
+                                        } else {
+                                            setHighlights(lines)
+                                        }
+                                    }
+                                    return (
+                                        <>
+                                            {/* Daraz Toolbar */}
+                                            <div className="bg-[#f8f9fa] dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-700 px-3 py-2 flex items-center justify-between select-none">
+                                                <button
+                                                    type="button"
+                                                    title="Bulleted List"
+                                                    className="p-1.5 rounded bg-white dark:bg-zinc-700 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-600 cursor-default"
+                                                >
+                                                    <List size={14} />
+                                                </button>
+                                                <span className="text-[11px] text-gray-400">
+                                                    {activeHighlights.filter(h => h.trim()).length} point{activeHighlights.filter(h => h.trim()).length === 1 ? '' : 's'} (1 per line)
+                                                </span>
+                                            </div>
 
-                                {/* Highlights Textarea */}
-                                <textarea
-                                    value={highlights.join('\n')}
-                                    onChange={(e) => {
-                                        setHighlights(e.target.value.split('\n'))
-                                    }}
-                                    placeholder="Please input bullet points..."
-                                    rows={6}
-                                    className="w-full p-3.5 min-h-[140px] text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans"
-                                />
+                                            {/* Highlights Textarea */}
+                                            <textarea
+                                                value={activeHighlights.join('\n')}
+                                                onChange={(e) => {
+                                                    updateActiveHighlights(e.target.value.split('\n'))
+                                                }}
+                                                placeholder="Please input bullet points..."
+                                                rows={6}
+                                                className="w-full p-3.5 min-h-[140px] text-xs text-gray-800 dark:text-zinc-100 bg-white dark:bg-zinc-900 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none resize-y leading-relaxed font-sans"
+                                            />
+                                        </>
+                                    )
+                                })()}
                             </div>
                         </div>
                     </div>

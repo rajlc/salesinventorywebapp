@@ -190,36 +190,41 @@ function DashboardLayout({
                     {/* Hide sidebar content if in mobile mode */}
                     {!isMobileMode && (
                         <>
-                            {/* Desktop Toggle Button & Logo (Staff Panel text removed) */}
-                            <div className="h-16 flex items-center justify-between px-4 border-b border-slate-100 dark:border-zinc-800 shrink-0">
+                            <div className="h-14 flex items-center justify-between px-3.5 border-b border-slate-200/80 dark:border-zinc-800 shrink-0">
                                 {!isCollapsed && (
-                                    <div className="hidden md:block">
-                                        <h2 className="font-bold text-xl text-blue-600">Bagmati ERP</h2>
-                                    </div>
+                                    <Link href="/dashboard" className="hidden md:flex items-center gap-2 min-w-0">
+                                        <div className="w-7 h-7 rounded-lg bg-slate-900 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center text-xs font-bold shrink-0">
+                                            BT
+                                        </div>
+                                        <div className="flex items-baseline gap-1.5 min-w-0">
+                                            <span className="font-semibold text-[14px] text-slate-900 dark:text-zinc-100 tracking-tight truncate">Bagmati Traders</span>
+                                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 dark:bg-zinc-800 text-slate-500 dark:text-zinc-400">ERP</span>
+                                        </div>
+                                    </Link>
                                 )}
                                 {/* Unique Logo for Mobile sidebar header */}
                                 <div className="md:hidden">
-                                    <h2 className="font-bold text-xl text-blue-600">Menu</h2>
+                                    <span className="font-semibold text-base text-slate-900 dark:text-zinc-100">Bagmati Traders ERP</span>
                                 </div>
 
                                 <button
                                     onClick={() => setIsCollapsed(!isCollapsed)}
-                                    className="p-2 text-gray-600 dark:text-gray-300 hidden md:block hover:bg-slate-50 dark:hover:bg-zinc-800 rounded-md transition-colors"
+                                    className="p-1.5 text-slate-500 dark:text-zinc-400 hidden md:flex items-center justify-center hover:bg-slate-100 dark:hover:bg-zinc-800 hover:text-slate-900 dark:hover:text-zinc-100 rounded-md transition-colors cursor-pointer"
                                     title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
                                 >
-                                    <Menu size={20} />
+                                    <Menu size={18} />
                                 </button>
 
                                 {/* Close button for mobile */}
                                 <button
                                     onClick={closeMobileMenu}
-                                    className="md:hidden p-2 text-gray-600 dark:text-gray-300"
+                                    className="md:hidden p-1.5 text-slate-500 dark:text-zinc-400"
                                 >
-                                    <Menu size={20} />
+                                    <Menu size={18} />
                                 </button>
                             </div>
 
-                            <nav className={`flex-1 overflow-y-auto ${isCollapsed ? 'p-2' : 'p-4'}`}>
+                            <nav className={`flex-1 overflow-y-auto space-y-0.5 ${isCollapsed ? 'p-2' : 'px-3 py-3'}`}>
                                 {isAdmin ? (
                                     <>
                                         <PermissionFilteredNav adminOnly>
@@ -368,23 +373,43 @@ function DashboardLayout({
                     ${pathname === '/dashboard/purchase/inventory-price-reports' || pathname === '/dashboard/purchase/analytics' || pathname === '/dashboard/purchase/daily-purchase-list' || pathname?.startsWith('/dashboard/suppliers') || pathname === '/dashboard/purchase/buy-sell-suppliers' || pathname === '/dashboard/sales/daraz/status-sync' || pathname === '/dashboard/sales/daraz/order-sync' || pathname === '/dashboard/sales/daraz/dashboard' || pathname?.startsWith('/dashboard/sales/daraz/profit-tracker') ? 'h-full' : 'h-[calc(100vh-4rem)] md:h-full'}
                     pointer-events-auto
                 `}>
-                    {/* Desktop Top Header Bar - Only show on Dashboard menu for admin */}
-                    {pathname === '/dashboard' && userRole === 'admin' && (
-                        <header className="hidden md:flex h-14 bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800/80 px-5 items-center justify-between sticky top-0 z-30 shadow-2xs">
-                            <div className="flex items-center gap-3">
+                    {/* Desktop Top Header Bar */}
+                    {((pathname === '/dashboard' && userRole === 'admin') || pathname === '/dashboard/inventory/daraz-product-management') && (
+                        <header className="hidden md:flex h-13 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-sm border-b border-slate-200/80 dark:border-zinc-800 px-6 items-center justify-between sticky top-0 z-30">
+                            <div className="flex items-center gap-2 text-xs">
                                 {headerTitle ? (
                                     typeof headerTitle === 'string' ? (
-                                        <h1 className="font-bold text-lg text-slate-800 dark:text-slate-100">{headerTitle}</h1>
+                                        <h1 className="font-semibold text-sm text-slate-900 dark:text-slate-100">{headerTitle}</h1>
                                     ) : (
                                         headerTitle
                                     )
+                                ) : pathname === '/dashboard/inventory/daraz-product-management' ? (
+                                    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-slate-500 dark:text-zinc-400">
+                                        <Link href="/dashboard" className="hover:text-slate-900 dark:hover:text-zinc-100 transition-colors font-medium">
+                                            Bagmati Traders ERP
+                                        </Link>
+                                        <span className="text-slate-300 dark:text-zinc-700">/</span>
+                                        <Link href="/dashboard/inventory" className="hover:text-slate-900 dark:hover:text-zinc-100 transition-colors font-medium">
+                                            Inventory Management
+                                        </Link>
+                                        <span className="text-slate-300 dark:text-zinc-700">/</span>
+                                        <span className="text-slate-900 dark:text-zinc-100 font-semibold">Daraz Product Management</span>
+                                    </nav>
                                 ) : (
-                                    <span className="font-semibold text-slate-600 dark:text-slate-300 text-sm">BagmatiERP System</span>
+                                    <span className="font-semibold text-slate-700 dark:text-slate-200 text-sm">Bagmati Traders ERP</span>
                                 )}
                             </div>
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2.5">
                                 {headerAction}
                                 <ChequeNotificationBell />
+                                <Link
+                                    href="/dashboard/profile"
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-slate-50 dark:hover:bg-zinc-800 text-xs font-medium text-slate-700 dark:text-zinc-300 transition-colors"
+                                    title="My Profile & Connector Tokens"
+                                >
+                                    <User size={13} className="text-slate-500 dark:text-zinc-400" />
+                                    <span>Account</span>
+                                </Link>
                             </div>
                         </header>
                     )}
@@ -398,7 +423,8 @@ function DashboardLayout({
                         pathname === '/dashboard/sales/daraz/status-sync' ||
                         pathname === '/dashboard/sales/daraz/order-sync' ||
                         pathname === '/dashboard/sales/daraz/dashboard' ||
-                        pathname?.startsWith('/dashboard/sales/daraz/profit-tracker')
+                        pathname?.startsWith('/dashboard/sales/daraz/profit-tracker') ||
+                        pathname === '/dashboard/inventory/daraz-product-management'
                             ? 'p-0 h-full'
                             : pathname === '/dashboard'
                             ? 'px-3 py-3 md:px-5 md:py-4'

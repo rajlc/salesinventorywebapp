@@ -21,68 +21,70 @@ export default function DarazProductManagementPage() {
     }
 
     return (
-        <div className="flex flex-col h-full bg-gray-50 dark:bg-zinc-900 space-y-4 font-[family-name:var(--font-inter)]">
-            {/* Top Navigation Bar */}
-            <div className="bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-b border-gray-200 dark:border-zinc-800 px-5 py-3 shadow-xs sticky top-0 z-40 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-amber-500 text-white flex items-center justify-center shadow-md shadow-orange-500/20">
-                        <Package size={22} />
-                    </div>
-                    <div>
-                        <h1 className="text-lg font-bold text-gray-900 dark:text-zinc-100 leading-tight">
-                            Daraz Product Management
-                        </h1>
-                        <p className="text-[11px] text-gray-500 dark:text-zinc-400 font-medium">
-                            Multi-Store Publishing, Profit & Catalog Engine
-                        </p>
+        <div className="flex flex-col h-full bg-slate-50/70 dark:bg-zinc-950 font-[family-name:var(--font-inter)]">
+            {/* Page Heading Bar */}
+            <div className="bg-white dark:bg-zinc-900 border-b border-slate-200/80 dark:border-zinc-800 px-4 sm:px-6 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg bg-slate-900 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center shrink-0">
+                            <Package size={16} />
+                        </div>
+                        <div className="min-w-0">
+                            <h1 className="text-base sm:text-lg font-semibold text-slate-900 dark:text-zinc-100 tracking-tight leading-snug">
+                                Daraz Product Management
+                            </h1>
+                            <p className="text-xs text-slate-500 dark:text-zinc-400 truncate">
+                                Manage product listings, images, seller accounts, pricing, quality checks, and publishing across your Daraz stores.
+                            </p>
+                        </div>
                     </div>
                 </div>
 
                 {/* Header Actions & Tabs Switcher */}
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                     <button
                         type="button"
                         onClick={() => setIsInstructionOpen(true)}
-                        className="px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 shadow-2xs"
+                        className="h-8 px-3 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer bg-white dark:bg-zinc-900 text-slate-700 dark:text-zinc-300 border border-slate-200 dark:border-zinc-700 hover:bg-slate-50 dark:hover:bg-zinc-800"
                     >
-                        <BookOpen size={14} className="text-indigo-600 dark:text-indigo-400" />
+                        <BookOpen size={13} className="text-slate-500 dark:text-zinc-400" />
                         AI Instruction
                     </button>
 
-                    <div className="flex items-center gap-1.5 p-1 bg-gray-100/80 dark:bg-zinc-800/80 rounded-xl border border-gray-200/80 dark:border-zinc-700/80 shadow-2xs">
-                    <button
-                        type="button"
-                        onClick={() => setActiveTab('new-listing')}
-                        className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
-                            activeTab === 'new-listing'
-                                ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/25 ring-1 ring-white/20'
-                                : 'text-gray-600 dark:text-zinc-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-white/70 dark:hover:bg-zinc-700/60'
-                        }`}
-                    >
-                        <Sparkles size={14} className={activeTab === 'new-listing' ? 'text-white' : 'text-orange-500'} />
-                        New Listing
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setActiveTab('products')
-                            setPrefilledData(null) // clear on manual switch
-                        }}
-                        className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
-                            activeTab === 'products'
-                                ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-zinc-100 shadow-md border border-gray-200 dark:border-zinc-700'
-                                : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-200 hover:bg-white/70 dark:hover:bg-zinc-700/60'
-                        }`}
-                    >
-                        <ShoppingBag size={14} className={activeTab === 'products' ? 'text-orange-500' : 'text-gray-400'} />
-                        Daraz Products
-                    </button>
+                    <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 dark:bg-zinc-800 rounded-lg border border-slate-200/80 dark:border-zinc-700/80">
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('new-listing')}
+                            className={`h-7 px-3 rounded-md text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+                                activeTab === 'new-listing'
+                                    ? 'bg-white dark:bg-zinc-900 text-slate-900 dark:text-zinc-100 shadow-2xs border border-slate-200/80 dark:border-zinc-700'
+                                    : 'text-slate-600 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200'
+                            }`}
+                        >
+                            <Sparkles size={13} className={activeTab === 'new-listing' ? 'text-orange-500' : 'text-slate-400'} />
+                            New Listing
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setActiveTab('products')
+                                setPrefilledData(null) // clear on manual switch
+                            }}
+                            className={`h-7 px-3 rounded-md text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+                                activeTab === 'products'
+                                    ? 'bg-white dark:bg-zinc-900 text-slate-900 dark:text-zinc-100 shadow-2xs border border-slate-200/80 dark:border-zinc-700'
+                                    : 'text-slate-600 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200'
+                            }`}
+                        >
+                            <ShoppingBag size={13} className={activeTab === 'products' ? 'text-orange-500' : 'text-slate-400'} />
+                            Daraz Products
+                        </button>
                     </div>
                 </div>
             </div>
 
             {/* Content Area */}
-            <div className="flex-1 overflow-y-auto px-4 pb-8">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
                 {activeTab === 'products' ? (
                     <DarazProductsTab onPushToAnotherAccount={handlePushToAnotherAccount} />
                 ) : (

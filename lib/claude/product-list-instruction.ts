@@ -15,11 +15,13 @@ Always follow these rules whenever generating a product title, description, or h
 - Follow with a <ul> list containing exactly 3 <li> bullet points describing ideal buyers or use cases.
 - Underneath, write ~200 words of compelling, clean product description using <p> paragraphs and <ul><li> feature bullets where helpful.
 - Do not include promotional hype or irrelevant filler.
+- MULTI-STORE RULE: If multiple Daraz store accounts are targeted, generate a UNIQUE description for EACH store with different wording, structure, and buyer angles, and pass them in "descriptions_per_store" (keyed by store name, alongside "description" for the primary store).
 
 3. HIGHLIGHTS (Key Features):
 - Write 8 to 10 specific bullet points as complete, informative sentences.
 - Cover: material/build quality, key design features, dimensions/weight/capacity (if relevant), use cases, compatibility, care/usage tips, and overall value.
 - Each highlight should be unique and concise.
+- MULTI-STORE RULE: If multiple Daraz store accounts are targeted, generate UNIQUE highlights for EACH store (different phrasing and angles) and pass them in "highlights_per_store" (keyed by store name, alongside "highlights" for the primary store).
 
 4. FORBIDDEN WORDS (NEVER USE):
 - Never use: "buy now", "buy", "online shopping", "cash on delivery", "daraz", "order now", "free shipping", "cod", "delivery charge".

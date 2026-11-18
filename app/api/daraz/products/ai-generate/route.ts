@@ -274,7 +274,7 @@ export async function POST(req: NextRequest) {
             ? storeNames.join(', ')
             : 'Default Store'
 
-        const filledPrompt = promptTemplate
+        let filledPrompt = promptTemplate
             .replace(/{productName}/g, effectiveProductName)
             .replace(/{price}/g, String(price || 'Not specified'))
             .replace(/{storeNames}/g, storeNamesStr)
@@ -282,6 +282,15 @@ export async function POST(req: NextRequest) {
             .replace(/{attributesSchema}/g, attributesSchemaStr)
             .replace(/{hasImage}/g, imageUrl ? 'Yes' : 'No')
             .replace(/{imageUrl}/g, imageUrl || '')
+
+        if (Array.isArray(storeNames) && storeNames.length > 1) {
+            filledPrompt += `\n\nMULTI-STORE REQUIREMENT:
+Because multiple stores are listed in STORE ACCOUNTS (${storeNamesStr}), you MUST ALSO generate a UNIQUE HTML "description" and UNIQUE 8-10 "highlights" for EACH store account (using different wording, structure, and buyer angles so the stores do not have duplicate content).
+Include these additional keys in your JSON response (using the exact store account names as keys):
+- "descriptions": { "${storeNames[0]}": "<p>...</p>", ... }
+- "highlights_per_store": { "${storeNames[0]}": ["Highlight 1.", ...], ... }
+Keep "description" and "highlights" populated with the first store's content as well.`
+        }
 
         // ── Optimize image if provided for multimodal vision ─────────────────
         let optImg = null
@@ -436,16 +445,34 @@ export async function POST(req: NextRequest) {
             parsed.titles = titlesObj
         }
 
-        // ── Ensure highlights is an array of strings prefixed with '• ' ──────
-        if (!Array.isArray(parsed.highlights)) {
-            parsed.highlights = []
-        } else {
-            parsed.highlights = parsed.highlights.map((h: any) => {
+        const normalizeHighlightList = (arr: any): string[] => {
+            if (!Array.isArray(arr)) return []
+            return arr.map((h: any) => {
                 const str = String(h || '').trim()
                 if (!str) return ''
                 return str.startsWith('•') ? str : `• ${str.replace(/^[-*•\s]+/, '')}`
             }).filter(Boolean)
         }
+
+        // ── Normalize per-store descriptions & highlights ─────────────────────
+        if (parsed.descriptions && typeof parsed.descriptions === 'object' && !Array.isArray(parsed.descriptions)) {
+            if (!parsed.description) {
+                parsed.description = Object.values(parsed.descriptions).find(v => typeof v === 'string' && v.trim()) || ''
+            }
+        }
+        if (parsed.highlights_per_store && typeof parsed.highlights_per_store === 'object' && !Array.isArray(parsed.highlights_per_store)) {
+            const normalizedPerStore: Record<string, string[]> = {}
+            Object.entries(parsed.highlights_per_store).forEach(([k, v]) => {
+                normalizedPerStore[k] = normalizeHighlightList(v)
+            })
+            parsed.highlights_per_store = normalizedPerStore
+            if (!Array.isArray(parsed.highlights) || parsed.highlights.length === 0) {
+                parsed.highlights = Object.values(normalizedPerStore).find(v => v.length > 0) || []
+            }
+        }
+
+        // ── Ensure highlights is an array of strings prefixed with '• ' ──────
+        parsed.highlights = normalizeHighlightList(parsed.highlights)
 
         // ── Fetch actual category recommendation from Daraz & resolve mandatory attributes ──
         const primaryTitle = Object.values(parsed.titles || {})[0] as string || effectiveProductName

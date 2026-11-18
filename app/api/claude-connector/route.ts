@@ -122,6 +122,14 @@ const CLAUDE_TOOLS = [
                     type: 'object',
                     description: 'Optional: If multiple seller accounts are requested, provide unique SEO titles for each store: {"Balaju Shop": "Title 1...", "Bagmati Traders": "Title 2..."}'
                 },
+                descriptions_per_store: {
+                    type: 'object',
+                    description: 'Optional: If multiple seller accounts are requested, provide unique HTML descriptions for each store: {"Balaju Shop": "<p>...</p>", "Bagmati Traders": "<p>...</p>"}'
+                },
+                highlights_per_store: {
+                    type: 'object',
+                    description: 'Optional: If multiple seller accounts are requested, provide unique highlight bullet arrays for each store: {"Balaju Shop": ["Point 1", ...], "Bagmati Traders": ["Point 1", ...]}'
+                },
                 store_accounts: {
                     type: 'array',
                     items: { type: 'string' },
@@ -261,6 +269,14 @@ const CLAUDE_TOOLS = [
                 titles_per_store: {
                     type: 'object',
                     description: 'Updated unique SEO titles per store account'
+                },
+                descriptions_per_store: {
+                    type: 'object',
+                    description: 'Updated unique HTML descriptions per store account: {"StoreName": "<p>...</p>"}'
+                },
+                highlights_per_store: {
+                    type: 'object',
+                    description: 'Updated unique highlight bullet arrays per store account: {"StoreName": ["Point 1", ...]}'
                 },
                 description: {
                     type: 'string',
@@ -1026,7 +1042,9 @@ async function executeTool(name: string, args: any) {
                 title: args.title || args.daraz_title || args.product_title,
                 titles_per_store: args.titles_per_store,
                 description: args.description || args.product_description || args.desc || args.body || args.content || args.details || args.main_description,
+                descriptions_per_store: args.descriptions_per_store,
                 highlights: args.highlights || args.bullet_points || args.bullets || args.key_features || args.features || args.highlight_points || args.specs || args.specifications,
+                highlights_per_store: args.highlights_per_store,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
@@ -1060,9 +1078,11 @@ async function executeTool(name: string, args: any) {
                 title: args.title || args.daraz_title || args.product_title,
                 titles_per_store: args.titles_per_store,
                 description: args.description || args.product_description || args.desc,
+                descriptions_per_store: args.descriptions_per_store,
                 include_image_in_description: args.include_image_in_description,
                 description_image_url: args.description_image_url,
                 highlights: args.highlights || args.bullet_points || args.bullets,
+                highlights_per_store: args.highlights_per_store,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
@@ -1118,6 +1138,8 @@ async function executeTool(name: string, args: any) {
                 product_name: args.product_name || args.raw_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
                 titles_per_store: args.titles_per_store,
+                descriptions_per_store: args.descriptions_per_store,
+                highlights_per_store: args.highlights_per_store,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,

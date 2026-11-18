@@ -55,20 +55,20 @@ const NavItemWithParams = ({
       <div className="space-y-1">
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className={`w-full flex items-center justify-between px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
-            ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-            : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-zinc-700/50'
+          className={`w-full flex items-center justify-between px-2.5 py-2 text-[13px] rounded-lg transition-colors cursor-pointer ${isActive
+            ? 'bg-slate-100 text-slate-950 dark:bg-zinc-800 dark:text-zinc-50 font-semibold'
+            : 'text-slate-600 dark:text-zinc-400 font-medium hover:text-slate-900 dark:hover:text-zinc-100 hover:bg-slate-50 dark:hover:bg-zinc-800/60'
             }`}
         >
-          <div className="flex items-center gap-3">
-            <span className="shrink-0">{icon}</span>
-            <span>{children}</span>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className={`shrink-0 ${isActive ? 'text-slate-900 dark:text-zinc-100' : 'text-slate-400 dark:text-zinc-500'}`}>{icon}</span>
+            <span className="truncate">{children}</span>
           </div>
-          {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          {isOpen ? <ChevronDown size={14} className="text-slate-400 shrink-0" /> : <ChevronRight size={14} className="text-slate-400 shrink-0" />}
         </button>
 
         {isOpen && (
-          <div className="pl-10 space-y-1">
+          <div className="pl-8 space-y-0.5 mt-0.5 border-l border-slate-200/70 dark:border-zinc-800 ml-4">
             {subItems.map((item) => (
               <Link
                 key={item.href}
@@ -76,13 +76,13 @@ const NavItemWithParams = ({
                 prefetch={true}
                 onMouseEnter={() => router.prefetch(item.href)}
                 onClick={onMobileItemClick}
-                className={`block px-3 py-2 text-sm rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
-                  ? 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-white font-medium'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-zinc-800/50'
+                className={`px-2.5 py-1.5 text-[12.5px] rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
+                  ? 'bg-slate-100/80 text-slate-950 dark:bg-zinc-800 dark:text-white font-medium'
+                  : 'text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200 hover:bg-slate-50 dark:hover:bg-zinc-800/40'
                   }`}
               >
                 {item.icon}
-                {item.label}
+                <span className="truncate">{item.label}</span>
               </Link>
             ))}
           </div>
@@ -97,14 +97,14 @@ const NavItemWithParams = ({
       prefetch={true}
       onMouseEnter={() => router.prefetch(href)}
       onClick={onMobileItemClick}
-      className={`flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
-        ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-        : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-zinc-700/50'
-        } ${isCollapsed ? 'justify-center' : ''}`}
+      className={`flex items-center gap-2.5 px-2.5 py-2 text-[13px] rounded-lg transition-colors ${isActive
+        ? 'bg-slate-100 text-slate-950 dark:bg-zinc-800 dark:text-zinc-50 font-semibold'
+        : 'text-slate-600 dark:text-zinc-400 font-medium hover:text-slate-900 dark:hover:text-zinc-100 hover:bg-slate-50 dark:hover:bg-zinc-800/60'
+        } ${isCollapsed ? 'justify-center px-2' : ''}`}
       title={isCollapsed ? String(children) : undefined}
     >
-      <span className="shrink-0">{icon}</span>
-      {!isCollapsed && children}
+      <span className={`shrink-0 ${isActive ? 'text-slate-900 dark:text-zinc-100' : 'text-slate-400 dark:text-zinc-500'}`}>{icon}</span>
+      {!isCollapsed && <span className="truncate">{children}</span>}
     </Link>
   );
 };
@@ -142,20 +142,20 @@ const NavItemStandard = ({
       <div className="space-y-1">
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className={`w-full flex items-center justify-between px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
-            ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-            : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-zinc-700/50'
+          className={`w-full flex items-center justify-between px-2.5 py-2 text-[13px] rounded-lg transition-colors cursor-pointer ${isActive
+            ? 'bg-slate-100 text-slate-950 dark:bg-zinc-800 dark:text-zinc-50 font-semibold'
+            : 'text-slate-600 dark:text-zinc-400 font-medium hover:text-slate-900 dark:hover:text-zinc-100 hover:bg-slate-50 dark:hover:bg-zinc-800/60'
             }`}
         >
-          <div className="flex items-center gap-3">
-            <span className="shrink-0">{icon}</span>
-            <span>{children}</span>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className={`shrink-0 ${isActive ? 'text-slate-900 dark:text-zinc-100' : 'text-slate-400 dark:text-zinc-500'}`}>{icon}</span>
+            <span className="truncate">{children}</span>
           </div>
-          {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          {isOpen ? <ChevronDown size={14} className="text-slate-400 shrink-0" /> : <ChevronRight size={14} className="text-slate-400 shrink-0" />}
         </button>
 
         {isOpen && (
-          <div className="pl-10 space-y-1">
+          <div className="pl-8 space-y-0.5 mt-0.5 border-l border-slate-200/70 dark:border-zinc-800 ml-4">
             {subItems.map((item) => (
               <Link
                 key={item.href}
@@ -163,13 +163,13 @@ const NavItemStandard = ({
                 prefetch={true}
                 onMouseEnter={() => router.prefetch(item.href)}
                 onClick={onMobileItemClick}
-                className={`block px-3 py-2 text-sm rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
-                  ? 'bg-gray-100 text-gray-900 dark:bg-zinc-800 dark:text-white font-medium'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-zinc-800/50'
+                className={`px-2.5 py-1.5 text-[12.5px] rounded-md transition-colors flex items-center gap-2 ${isLinkActive(item.href)
+                  ? 'bg-slate-100/80 text-slate-950 dark:bg-zinc-800 dark:text-white font-medium'
+                  : 'text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200 hover:bg-slate-50 dark:hover:bg-zinc-800/40'
                   }`}
               >
                 {item.icon}
-                {item.label}
+                <span className="truncate">{item.label}</span>
               </Link>
             ))}
           </div>
@@ -184,14 +184,14 @@ const NavItemStandard = ({
       prefetch={true}
       onMouseEnter={() => router.prefetch(href)}
       onClick={onMobileItemClick}
-      className={`flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors ${isActive
-        ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-        : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-zinc-700/50'
-        } ${isCollapsed ? 'justify-center' : ''}`}
+      className={`flex items-center gap-2.5 px-2.5 py-2 text-[13px] rounded-lg transition-colors ${isActive
+        ? 'bg-slate-100 text-slate-950 dark:bg-zinc-800 dark:text-zinc-50 font-semibold'
+        : 'text-slate-600 dark:text-zinc-400 font-medium hover:text-slate-900 dark:hover:text-zinc-100 hover:bg-slate-50 dark:hover:bg-zinc-800/60'
+        } ${isCollapsed ? 'justify-center px-2' : ''}`}
       title={isCollapsed ? String(children) : undefined}
     >
-      <span className="shrink-0">{icon}</span>
-      {!isCollapsed && children}
+      <span className={`shrink-0 ${isActive ? 'text-slate-900 dark:text-zinc-100' : 'text-slate-400 dark:text-zinc-500'}`}>{icon}</span>
+      {!isCollapsed && <span className="truncate">{children}</span>}
     </Link>
   );
 };
