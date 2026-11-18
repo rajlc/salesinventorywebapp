@@ -95,11 +95,19 @@ export async function GET(req: NextRequest) {
                                         },
                                         category_id: {
                                             type: 'number',
-                                            description: 'Daraz Category ID (e.g. 10002341)'
+                                            description: 'Daraz Category ID (e.g. 10002341). Can be used in both save_product_draft and update_product_draft to add or change category.'
                                         },
                                         category_path: {
                                             type: 'string',
-                                            description: 'Human readable category path (e.g. "Kitchen & Dining > Cookware > Pots & Pans")'
+                                            description: 'Category name or full path (e.g. "Water Bottle" or "Kitchen & Dining > Cookware > Pots & Pans"). Works in both save_product_draft and update_product_draft; if multiple categories match, returns suggested_categories options to confirm with the user.'
+                                        },
+                                        category_name: {
+                                            type: 'string',
+                                            description: 'Short category name/keyword (e.g. "Water Bottle") to check and assign or update category on a draft.'
+                                        },
+                                        confirm_category: {
+                                            type: 'boolean',
+                                            description: 'Set to true to confirm the top suggested category when multiple matches are returned.'
                                         },
                                         description: {
                                             type: 'string',

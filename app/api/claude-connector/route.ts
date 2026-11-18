@@ -100,11 +100,19 @@ const CLAUDE_TOOLS = [
                 },
                 category_path: {
                     type: 'string',
-                    description: 'Optional suggested category path (e.g. "Home Appliances > Small Kitchen Appliances > Coffee Machines & Accessories > Milk Frothers")'
+                    description: 'Optional category name or full path (e.g. "Water Bottle" or "Home Appliances > Small Kitchen Appliances > Milk Frothers"). If multiple Daraz categories match, the tool returns suggested_categories options to confirm with the user.'
+                },
+                category_name: {
+                    type: 'string',
+                    description: 'Optional short category name/keyword (e.g. "Water Bottle"). Checked against official Daraz categories; returns options if multiple match.'
                 },
                 category_id: {
                     type: 'number',
                     description: 'Optional Daraz category ID if known'
+                },
+                confirm_category: {
+                    type: 'boolean',
+                    description: 'Set to true after the user confirms the top suggested category when multiple matches were returned'
                 },
                 attributes: {
                     type: 'object',
@@ -181,7 +189,7 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'update_product_draft',
-        description: 'Update or edit an existing product draft in the database. Can find the draft by "id" ("draft_id") or by "raw_name". Supports updating price, special_price, wholesale_price, campaign_price, supplier_name (with fuzzy match confirmation), variants, specifications, title, description (including embedding an image), highlights, stores, generating new studio images, or deleting old images.',
+        description: 'Update or edit an existing product draft in the database. Can find the draft by "id" ("draft_id") or by "raw_name". Supports adding/changing category (category_id, category_path, or category_name — automatically checks Daraz categories and returns suggested_categories options if multiple match), updating price, special_price, wholesale_price, campaign_price, supplier_name (with fuzzy match confirmation), variants, specifications, title, description (including embedding an image), highlights, stores, generating new studio images, or deleting old images.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -277,7 +285,15 @@ const CLAUDE_TOOLS = [
                 },
                 category_path: {
                     type: 'string',
-                    description: 'Updated category path'
+                    description: 'Updated category path or category name (checks Daraz categories; returns options if multiple match)'
+                },
+                category_name: {
+                    type: 'string',
+                    description: 'Updated short category name/keyword (e.g. "Water Bottle")'
+                },
+                confirm_category: {
+                    type: 'boolean',
+                    description: 'Set to true to confirm the top suggested category when multiple matches were returned'
                 },
                 attributes: {
                     type: 'object',
@@ -1031,6 +1047,8 @@ async function executeTool(name: string, args: any) {
                 replace_existing_images: args.replace_existing_images,
                 category_id: args.category_id,
                 category_path: args.category_path,
+                category_name: args.category_name || args.category,
+                confirm_category: args.confirm_category,
                 product_link: args.product_link || args.link || args.url
             })
 
@@ -1059,6 +1077,8 @@ async function executeTool(name: string, args: any) {
                 store_accounts: args.store_accounts || args.stores || args.target_stores,
                 category_id: args.category_id,
                 category_path: args.category_path,
+                category_name: args.category_name || args.category,
+                confirm_category: args.confirm_category,
                 images: args.images,
                 generate_studio_images: args.generate_studio_images,
                 image_prompt: args.image_prompt,

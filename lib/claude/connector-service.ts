@@ -1,7 +1,7 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { createAdminClient } from '@/lib/supabase/server'
-import { getValidAccessToken, buildSignedParams, API_URL } from '@/lib/daraz/client'
 import { cleanImageUrl } from '@/lib/daraz/image-migrate'
-import { resolveBestCategory, searchDarazCategories } from '@/lib/daraz/category-service'
+import { resolveBestCategory, searchDarazCategories, getDarazLeafCategories } from '@/lib/daraz/category-service'
 import { extractCompetitorProduct } from '@/lib/daraz/link-extractor'
 import { fetchAndOptimizeImage, OptimizedImage } from './image-helper'
 import {
@@ -75,6 +75,9 @@ export interface SaveDraftInput {
     store_accounts?: string[]
     category_id?: number
     category_path?: string
+    category_name?: string
+    category?: string
+    confirm_category?: boolean
     attributes?: Record<string, any>
     variants?: VariantItemInput[] | string[]
     images?: string[]
@@ -110,6 +113,9 @@ export interface UpdateDraftInput {
     store_accounts?: string[]
     category_id?: number
     category_path?: string
+    category_name?: string
+    category?: string
+    confirm_category?: boolean
     attributes?: Record<string, any>
     variants?: VariantItemInput[] | string[]
     images?: string[]
@@ -184,6 +190,7 @@ export interface PushProductInput {
     category_path?: string
     category_name?: string
     category?: string
+    confirm_category?: boolean
     attributes?: Record<string, any>
     variants?: VariantItemInput[] | string[]
     images?: string[]
@@ -200,6 +207,9 @@ export interface CalculateDarazProfitInput {
     product_name?: string
     category_id?: number
     category_path?: string
+    category_name?: string
+    category?: string
+    confirm_category?: boolean
     selling_price?: number
     special_price?: number
     wholesale_price?: number
@@ -305,8 +315,8 @@ export async function findStoreByAccount(accountNameOrId?: string): Promise<Stor
     if (byId) return byId
 
     // 2. Exact or partial account name match (e.g. "Bagmati", "Bagmati Traders", "Balaju Shop")
-    const byName = stores.find(s => 
-        s.seller_account.toLowerCase().includes(term) || 
+    const byName = stores.find(s =>
+        s.seller_account.toLowerCase().includes(term) ||
         term.includes(s.seller_account.toLowerCase())
     )
     if (byName) return byName
@@ -346,8 +356,8 @@ export async function resolveTargetStores(input: { store_account_name?: string, 
 
     for (const q of queryList) {
         const term = q.toLowerCase()
-        const found = allStores.find(s => 
-            s.seller_account.toLowerCase().includes(term) || 
+        const found = allStores.find(s =>
+            s.seller_account.toLowerCase().includes(term) ||
             term.includes(s.seller_account.toLowerCase()) ||
             s.id.toLowerCase() === term
         )
@@ -684,7 +694,7 @@ export async function resolveSupplierByNameOrId(input: {
 
 export async function searchSuppliersAction(query?: string) {
     const supabase = await createAdminClient()
-    let dbQuery = supabase
+    const dbQuery = supabase
         .from('suppliers')
         .select('id, supplier_name, phone, address')
         .eq('is_deleted', false)
@@ -818,7 +828,7 @@ export async function calculateDarazProfitAction(input: CalculateDarazProfitInpu
         try {
             const best = await resolveBestCategory(productName, undefined)
             if (best?.path) categoryPath = best.path
-        } catch {}
+        } catch { }
     }
 
     let commissionRate = input.commission_rate
@@ -946,7 +956,7 @@ async function downloadAndUploadImagesToSupabase(
     try {
         const m = await import('sharp')
         sharpMod = m.default || m
-    } catch {}
+    } catch { }
 
     for (const rawItem of rawInputs) {
         if (!rawItem || typeof rawItem !== 'string') continue
@@ -1269,6 +1279,71 @@ export async function generateStudioImagesAction(input: GenerateStudioImagesInpu
     }
 }
 
+// ── Category Disambiguation Helper ──────────────────────────────────────────
+
+async function resolveCategoryInput(
+    query: string,
+    confirmCategory: boolean = false
+): Promise<{
+    needsConfirmation: boolean
+    categoryId: number | null
+    categoryPath: string | null
+    message?: string
+    suggestions?: Array<{ category_id: number; name: string; category_path: string }>
+}> {
+    const trimmed = query.trim()
+    if (!trimmed) {
+        return { needsConfirmation: false, categoryId: null, categoryPath: null }
+    }
+
+    const results = await searchDarazCategories(trimmed, 6)
+    if (results.length === 0) {
+        return {
+            needsConfirmation: true,
+            categoryId: null,
+            categoryPath: null,
+            message: `No matching Daraz category found for "${trimmed}". Please ask the user for a different category keyword or search using search_daraz_categories.`,
+            suggestions: []
+        }
+    }
+
+    const lower = trimmed.toLowerCase()
+    const exactPath = results.find(r => r.path.toLowerCase() === lower)
+    if (exactPath) {
+        return { needsConfirmation: false, categoryId: exactPath.id, categoryPath: exactPath.path }
+    }
+
+    const exactLeafMatches = results.filter(r => r.name.toLowerCase() === lower)
+    if (exactLeafMatches.length === 1) {
+        return { needsConfirmation: false, categoryId: exactLeafMatches[0].id, categoryPath: exactLeafMatches[0].path }
+    }
+
+    const isAmbiguous =
+        results.length > 1 &&
+        !confirmCategory &&
+        (exactLeafMatches.length > 1 || results[1].score >= results[0].score * 0.65)
+
+    if (isAmbiguous) {
+        return {
+            needsConfirmation: true,
+            categoryId: null,
+            categoryPath: null,
+            message: `Multiple Daraz categories matched "${trimmed}". Show these options to the user and ask which one is correct, then call again with the chosen category_id (or confirm_category: true for the top match).`,
+            suggestions: results.map(r => ({
+                category_id: r.id,
+                name: r.name,
+                category_path: r.path
+            }))
+        }
+    }
+
+    return {
+        needsConfirmation: false,
+        categoryId: results[0].id,
+        categoryPath: results[0].path
+    }
+}
+
 // ── Save Product Draft ──────────────────────────────────────────────────────
 
 export async function saveProductDraft(input: SaveDraftInput) {
@@ -1317,8 +1392,8 @@ export async function saveProductDraft(input: SaveDraftInput) {
     if (input.titles_per_store && typeof input.titles_per_store === 'object') {
         Object.entries(input.titles_per_store).forEach(([storeKey, titleVal]) => {
             const keyTerm = storeKey.toLowerCase()
-            const matchedStore = stores.find(s => 
-                s.seller_account.toLowerCase().includes(keyTerm) || 
+            const matchedStore = stores.find(s =>
+                s.seller_account.toLowerCase().includes(keyTerm) ||
                 keyTerm.includes(s.seller_account.toLowerCase()) ||
                 s.id === storeKey
             )
@@ -1392,13 +1467,29 @@ export async function saveProductDraft(input: SaveDraftInput) {
     const finalPrice = variantInfo.hasVariants && variantInfo.skuRows[0]?.price ? variantInfo.skuRows[0].price : finalMrp
     const finalSpecialPrice = variantInfo.hasVariants && variantInfo.skuRows[0]?.specialPrice ? variantInfo.skuRows[0].specialPrice : pricing.specialPrice
 
-    // 6. Resolve Category
+    // 6. Resolve Category (supports explicit category_id, or category_path/category_name with multi-match disambiguation)
     let categoryId = input.category_id || null
-    let categoryPath = input.category_path || (input as any).category_name || (input as any).category || null
+    let categoryPath = input.category_path || input.category_name || input.category || null
 
-    if (!categoryId || (categoryId === 10520 && !rawName.toLowerCase().includes('car'))) {
+    if (categoryId && (!categoryPath || !categoryPath.includes('>'))) {
+        const leaves = await getDarazLeafCategories()
+        const matched = leaves.find(l => l.id === Number(categoryId))
+        if (matched) categoryPath = matched.path
+    } else if (!categoryId && categoryPath) {
+        const catRes = await resolveCategoryInput(categoryPath, Boolean(input.confirm_category))
+        if (catRes.needsConfirmation) {
+            return {
+                success: false,
+                needs_category_confirmation: true,
+                message: catRes.message,
+                suggested_categories: catRes.suggestions
+            }
+        }
+        categoryId = catRes.categoryId
+        categoryPath = catRes.categoryPath
+    } else if (!categoryId || (categoryId === 10520 && !rawName.toLowerCase().includes('car'))) {
         try {
-            const best = await resolveBestCategory(rawName, categoryPath)
+            const best = await resolveBestCategory(rawName, categoryPath || undefined)
             if (best) {
                 categoryId = best.id
                 categoryPath = best.path
@@ -1456,7 +1547,7 @@ export async function saveProductDraft(input: SaveDraftInput) {
                 selling_price: finalSpecialPrice || undefined,
                 wholesale_price: input.wholesale_price
             })
-        } catch {}
+        } catch { }
     }
 
     // 8. De-duplication / Merging with recent draft
@@ -1694,8 +1785,36 @@ export async function updateProductDraft(input: UpdateDraftInput) {
     if (input.title) updates.title = input.title.trim()
     if (input.titles_per_store) updates.titles_per_store = input.titles_per_store
     if (input.highlights) updates.highlights = formatHighlights(input.highlights)
-    if (input.category_id !== undefined) updates.category_id = input.category_id
-    if (input.category_path !== undefined) updates.category_path = input.category_path
+
+    // Category add / edit with auto-lookup & multi-match disambiguation
+    const requestedCategoryQuery = (input.category_path || input.category_name || input.category || '').trim()
+    if (input.category_id !== undefined && input.category_id !== null) {
+        updates.category_id = Number(input.category_id)
+        if (requestedCategoryQuery && requestedCategoryQuery.includes('>')) {
+            updates.category_path = requestedCategoryQuery
+        } else {
+            const leaves = await getDarazLeafCategories()
+            const matched = leaves.find(l => l.id === Number(input.category_id))
+            if (matched) {
+                updates.category_path = matched.path
+            } else if (requestedCategoryQuery) {
+                updates.category_path = requestedCategoryQuery
+            }
+        }
+    } else if (requestedCategoryQuery) {
+        const catRes = await resolveCategoryInput(requestedCategoryQuery, Boolean(input.confirm_category))
+        if (catRes.needsConfirmation) {
+            return {
+                success: false,
+                needs_category_confirmation: true,
+                message: catRes.message,
+                suggested_categories: catRes.suggestions
+            }
+        }
+        updates.category_id = catRes.categoryId
+        updates.category_path = catRes.categoryPath
+    }
+
     if (input.wholesale_price !== undefined) updates.wholesale_price = input.wholesale_price
     if (resolvedSupplierId !== undefined) updates.supplier_id = resolvedSupplierId
     if (input.status) updates.status = input.status
@@ -1843,7 +1962,7 @@ export async function updateProductDraft(input: UpdateDraftInput) {
                 selling_price: updated.special_price,
                 wholesale_price: updated.wholesale_price
             })
-        } catch {}
+        } catch { }
     }
 
     return {
@@ -2015,7 +2134,7 @@ async function inspectDraftImageWithVision(
                     try {
                         visualAnalysis = JSON.parse(txt.replace(/```json|```/g, '').trim())
                         if (visualAnalysis?.identified_product_name) break
-                    } catch {}
+                    } catch { }
                 }
             }
         }
@@ -2040,7 +2159,7 @@ async function inspectDraftImageWithVision(
             if (txt) {
                 try {
                     visualAnalysis = JSON.parse(txt)
-                } catch {}
+                } catch { }
             }
         }
 
@@ -2055,8 +2174,8 @@ async function inspectDraftImageWithVision(
                 .from('daraz_draft_listings')
                 .update({ attributes: nextAttrs })
                 .eq('id', draft.id)
-                .then(() => {})
-                .catch(() => {})
+                .then(() => { })
+                .catch(() => { })
         }
 
         return visualAnalysis
@@ -2761,7 +2880,7 @@ export async function pushProductToDaraz(input: PushProductInput) {
                     error: err.message,
                     updated_at: new Date().toISOString()
                 }).eq('id', existingDraftId)
-            } catch {}
+            } catch { }
         }
         return {
             success: false,
