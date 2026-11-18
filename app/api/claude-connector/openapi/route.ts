@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
         info: {
             title: 'Inventory Webapp Daraz Connector',
             version: '1.0.0',
-            description: 'Claude AI Custom Connector for Daraz Product Management and Inventory'
+            description: 'AI Custom Connector for Daraz Product Management and Inventory. MANDATORY: At the start of any new chat or before generating any product title, description, or highlights (even if the user does not mention it), ALWAYS call action "get_product_list_instruction" first and follow every rule returned.'
         },
         servers: [
             {
@@ -42,6 +42,7 @@ export async function GET(req: NextRequest) {
                                         action: {
                                             type: 'string',
                                             enum: [
+                                                'get_product_list_instruction',
                                                 'list_daraz_stores',
                                                 'search_daraz_categories',
                                                 'calculate_daraz_profit',
@@ -57,7 +58,7 @@ export async function GET(req: NextRequest) {
                                                 'bulk_add_products',
                                                 'push_product_to_daraz'
                                             ],
-                                            description: 'The tool or action to execute. Use view_draft_images to inspect actual product images for image_only drafts (returns AI visual_analysis + image URLs). Use calculate_daraz_profit for fee/profit/minimum safe price calculations. Use generate_studio_images to generate studio product photos and delete old draft images.'
+                                            description: 'The tool or action to execute. MANDATORY FIRST STEP: Always call get_product_list_instruction first before generating any product title, description, or highlights. Use view_draft_images to inspect actual product images for image_only drafts (returns AI visual_analysis + image URLs). Use calculate_daraz_profit for fee/profit/minimum safe price calculations. Use generate_studio_images to generate studio product photos and delete old draft images.'
                                         },
                                         id: {
                                             type: 'string',

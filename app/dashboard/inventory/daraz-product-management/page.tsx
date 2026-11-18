@@ -1,14 +1,16 @@
 'use client'
 
 import { useState } from 'react'
-import { Package, Sparkles, ShoppingBag } from 'lucide-react'
+import { Package, Sparkles, ShoppingBag, BookOpen } from 'lucide-react'
 import { useDashboard } from '../../context'
 import DarazProductsTab from './DarazProductsTab'
 import NewListingTab from './NewListingTab'
+import AiInstructionModal from './AiInstructionModal'
 
 export default function DarazProductManagementPage() {
     const { setIsMobileMenuOpen } = useDashboard()
     const [activeTab, setActiveTab] = useState<'new-listing' | 'products'>('new-listing')
+    const [isInstructionOpen, setIsInstructionOpen] = useState(false)
     
     // Shared state for pre-filling "New Listing" when pushing an existing product
     const [prefilledData, setPrefilledData] = useState<any>(null)
@@ -36,8 +38,18 @@ export default function DarazProductManagementPage() {
                     </div>
                 </div>
 
-                {/* Unique Header Tabs Switcher */}
-                <div className="flex items-center gap-1.5 p-1 bg-gray-100/80 dark:bg-zinc-800/80 rounded-xl border border-gray-200/80 dark:border-zinc-700/80 shadow-2xs">
+                {/* Header Actions & Tabs Switcher */}
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => setIsInstructionOpen(true)}
+                        className="px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 shadow-2xs"
+                    >
+                        <BookOpen size={14} className="text-indigo-600 dark:text-indigo-400" />
+                        AI Instruction
+                    </button>
+
+                    <div className="flex items-center gap-1.5 p-1 bg-gray-100/80 dark:bg-zinc-800/80 rounded-xl border border-gray-200/80 dark:border-zinc-700/80 shadow-2xs">
                     <button
                         type="button"
                         onClick={() => setActiveTab('new-listing')}
@@ -65,6 +77,7 @@ export default function DarazProductManagementPage() {
                         <ShoppingBag size={14} className={activeTab === 'products' ? 'text-orange-500' : 'text-gray-400'} />
                         Daraz Products
                     </button>
+                    </div>
                 </div>
             </div>
 
@@ -76,6 +89,11 @@ export default function DarazProductManagementPage() {
                     <NewListingTab prefilledData={prefilledData} onClearPrefilled={() => setPrefilledData(null)} />
                 )}
             </div>
+
+            <AiInstructionModal
+                isOpen={isInstructionOpen}
+                onClose={() => setIsInstructionOpen(false)}
+            />
         </div>
     )
 }

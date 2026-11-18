@@ -17,6 +17,7 @@ import {
 } from '@/lib/claude/connector-service'
 import { authenticateConnectorRequest } from '@/lib/claude/connector-auth'
 import { runWithConnectorScope } from '@/lib/claude/connector-scope'
+import { getProductListInstruction } from '@/lib/claude/product-list-instruction'
 
 // ── CORS Helper ─────────────────────────────────────────────────────────────
 
@@ -35,6 +36,14 @@ export async function OPTIONS() {
 
 const CLAUDE_TOOLS = [
     {
+        name: 'get_product_list_instruction',
+        description: 'Fetch the user\'s saved "Product List Instruction" (custom rules for product title, description, highlights, formatting, and forbidden words). MANDATORY: Always call this tool at the start of a new chat or before generating any product title, description, or highlights — even if the user did not explicitly mention "Product List Instruction".',
+        inputSchema: {
+            type: 'object',
+            properties: {}
+        }
+    },
+    {
         name: 'list_daraz_stores',
         description: 'List all connected Daraz seller store accounts (e.g., Bagmati Traders, Balaju Shop) with their account IDs and status.',
         inputSchema: {
@@ -44,7 +53,7 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'save_product_draft',
-        description: 'Save a single product draft into the webapp database. CRITICAL RULES FOR CLAUDE: 1) PRICING RULE: When the user specifies a price (e.g. "Rs 450"), that price is the Special Price (discounted selling price). Regular MRP is automatically marked up with a discount. 2) VARIANTS: If user specifies variations (e.g. "Black" and "Red"), pass them in "variants". Stock will automatically be 100 for each variation and Seller SKU is automatically generated. 3) STORE TARGETING: Make ONLY ONE tool call even if multiple stores are requested (pass store_accounts: ["Balaju Shop", "Bagmati Traders"]). 4) Always generate the full SEO title, formatted description, and bullet-point highlights (each starting with "• "). 5) The status is saved as "draft".',
+        description: 'Save a single product draft into the webapp database. CRITICAL RULES: 0) ALWAYS follow the user\'s "Product List Instruction" (call get_product_list_instruction first if you have not read it in this chat) when writing title, description, and highlights. 1) PRICING RULE: When the user specifies a price (e.g. "Rs 450"), that price is the Special Price (discounted selling price). Regular MRP is automatically marked up with a discount. 2) VARIANTS: If user specifies variations (e.g. "Black" and "Red"), pass them in "variants". Stock will automatically be 100 for each variation and Seller SKU is automatically generated. 3) STORE TARGETING: Make ONLY ONE tool call even if multiple stores are requested (pass store_accounts: ["Balaju Shop", "Bagmati Traders"]). 4) Always generate the full SEO title, formatted description, and bullet-point highlights (each starting with "• "). 5) The status is saved as "draft".',
         inputSchema: {
             type: 'object',
             properties: {
@@ -784,6 +793,7 @@ export async function POST(req: NextRequest) {
 
             // MCP initialize
             if (method === 'initialize') {
+                const { instruction } = await getProductListInstruction()
                 return withCors(NextResponse.json({
                     jsonrpc: '2.0',
                     id,
@@ -797,7 +807,8 @@ export async function POST(req: NextRequest) {
                             tools: {},
                             resources: {},
                             prompts: {}
-                        }
+                        },
+                        instructions: `PRODUCT LIST INSTRUCTION (MANDATORY — ALWAYS FOLLOW WHEN GENERATING ANY PRODUCT TITLE, DESCRIPTION, OR HIGHLIGHTS, EVEN IF THE USER DOES NOT EXPLICITLY MENTION IT):\n\n${instruction}`
                     }
                 }))
             }
@@ -832,7 +843,33 @@ export async function POST(req: NextRequest) {
                 return withCors(NextResponse.json({
                     jsonrpc: '2.0',
                     id,
-                    result: { prompts: [] }
+                    result: {
+                        prompts: [
+                            {
+                                name: 'product_list_instruction',
+                                description: 'Load the user\'s saved Product List Instruction for generating Daraz product titles, descriptions, and highlights.'
+                            }
+                        ]
+                    }
+                }))
+            }
+            if (method === 'prompts/get') {
+                const { instruction } = await getProductListInstruction()
+                return withCors(NextResponse.json({
+                    jsonrpc: '2.0',
+                    id,
+                    result: {
+                        description: 'User-configured Product List Instruction for Daraz listings',
+                        messages: [
+                            {
+                                role: 'user',
+                                content: {
+                                    type: 'text',
+                                    text: `Follow this Product List Instruction for all product titles, descriptions, and highlights:\n\n${instruction}`
+                                }
+                            }
+                        ]
+                    }
                 }))
             }
 
@@ -942,11 +979,30 @@ function paramsName(body: any): string {
 
 // ── Tool Dispatcher ─────────────────────────────────────────────────────────
 
+async function withAutoInstruction<T>(payload: T): Promise<T> {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        const { instruction } = await getProductListInstruction()
+        return {
+            ...payload,
+            product_list_instruction: instruction
+        }
+    }
+    return payload
+}
+
 async function executeTool(name: string, args: any) {
     const resolvedId = args.id || args.draft_id || args.draftId
     switch (name) {
+        case 'get_product_list_instruction': {
+            const data = await getProductListInstruction()
+            return {
+                ...data,
+                usage_note: 'Follow every rule in "instruction" when generating product title, description, highlights, and pricing/variants.'
+            }
+        }
+
         case 'list_daraz_stores':
-            return await listDarazStores()
+            return await withAutoInstruction(await listDarazStores())
 
         case 'save_product_draft':
             return await saveProductDraft({
@@ -1022,11 +1078,11 @@ async function executeTool(name: string, args: any) {
             })
 
         case 'get_draft_details':
-            return await getDraftDetails({
+            return await withAutoInstruction(await getDraftDetails({
                 id: resolvedId,
                 draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name
-            })
+            }))
 
         case 'bulk_add_products':
             return await bulkAddProducts({
@@ -1074,16 +1130,16 @@ async function executeTool(name: string, args: any) {
             })
 
         case 'view_draft_images':
-            return await viewDraftImages({
+            return await withAutoInstruction(await viewDraftImages({
                 id: resolvedId,
                 draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name,
                 image_url: args.image_url || args.url,
                 max_images: args.max_images
-            })
+            }))
 
         case 'extract_product_link':
-            return await extractProductLinkAction(args.url || args.link || args.product_link)
+            return await withAutoInstruction(await extractProductLinkAction(args.url || args.link || args.product_link))
 
         case 'search_daraz_categories':
             return await searchDarazCategoriesAction(
