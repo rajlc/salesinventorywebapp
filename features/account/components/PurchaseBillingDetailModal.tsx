@@ -1,12 +1,15 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { X, Eye, AlertCircle } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { X, Eye, AlertCircle, CheckCircle2, FileCheck2, Loader2 } from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { getPurchaseBillingDetail } from '@/features/account/actions/purchase-billing-detail-actions'
+import { setBalanceConfirmationVerified } from '@/features/account/actions/balance-confirmation-actions'
 import { formatNepaliCurrency } from '@/lib/utils/date-converter'
 import { format } from 'date-fns'
 import { ViewPanVatBillModal } from './ViewPanVatBillModal'
+import { BalanceConfirmationModal } from './BalanceConfirmationModal'
 
 interface PurchaseBillingDetailModalProps {
     supplierCompanyId: string | null
@@ -15,6 +18,7 @@ interface PurchaseBillingDetailModalProps {
     buyerCompanyName: string | null
     fiscalYearId?: string | null
     fiscalYearName?: string
+    isFiscalYearActive?: boolean
     startDate?: string
     endDate?: string
     onClose: () => void
@@ -27,12 +31,15 @@ export function PurchaseBillingDetailModal({
     buyerCompanyName,
     fiscalYearId,
     fiscalYearName,
+    isFiscalYearActive = false,
     startDate,
     endDate,
     onClose,
 }: PurchaseBillingDetailModalProps) {
+    const queryClient = useQueryClient()
     const [selectedBillId, setSelectedBillId] = useState<string | null>(null)
-    const [showBalanceConfirmationMessage, setShowBalanceConfirmationMessage] = useState(false)
+    const [balanceConfirmationError, setBalanceConfirmationError] = useState<string | null>(null)
+    const [isBalanceConfirmationOpen, setIsBalanceConfirmationOpen] = useState(false)
     const [activePhotoUrl, setActivePhotoUrl] = useState<string | null>(null)
 
     // Fetch detailed billing data
@@ -48,15 +55,66 @@ export function PurchaseBillingDetailModal({
         }),
     })
 
-    const handleBalanceConfirmationClick = () => {
-        if (data && data.totalAmount < 100000) {
-            setShowBalanceConfirmationMessage(true)
-            setTimeout(() => setShowBalanceConfirmationMessage(false), 3000)
-        } else {
-            // TODO: Implement balance confirmation generation logic later
-            alert('Balance Confirmation feature will be implemented later.')
-        }
+    const todayStr = new Date().toISOString().split('T')[0]
+    const isPastFiscalYear = Boolean(
+        fiscalYearId && !isFiscalYearActive && (!endDate || endDate < todayStr)
+    )
+    const isAmountEligible = Boolean(data && data.totalAmount >= 100000)
+    const canGenerateConfirmation = isPastFiscalYear && isAmountEligible
+
+    const showValidationError = (msg: string) => {
+        setBalanceConfirmationError(msg)
+        setTimeout(() => setBalanceConfirmationError(null), 4000)
     }
+
+    const handleBalanceConfirmationClick = () => {
+        if (!fiscalYearId) {
+            showValidationError('Cannot Generate: Please select a specific past Fiscal Year')
+            return
+        }
+        if (!isPastFiscalYear) {
+            showValidationError('Cannot Generate: Only allowed for past Fiscal Years (not current running Fiscal Year)')
+            return
+        }
+        if (!data || data.totalAmount < 100000) {
+            showValidationError(
+                `Cannot Generate: Total Amount (${formatNepaliCurrency(data?.totalAmount || 0)}) must be greater than or equal to Rs. 1,00,000`
+            )
+            return
+        }
+        setBalanceConfirmationError(null)
+        setIsBalanceConfirmationOpen(true)
+    }
+
+    const verifyMutation = useMutation({
+        mutationFn: async (nextVerified: boolean) => {
+            if (!fiscalYearId || !data) throw new Error('Missing fiscal year or data')
+            return setBalanceConfirmationVerified({
+                supplierCompanyId,
+                buyerCompanyId,
+                fiscalYearId,
+                supplierCompanyName: data.supplierCompanyName || supplierCompanyName,
+                buyerCompanyName: data.buyerCompanyName || buyerCompanyName,
+                taxableAmount: data.totalTaxableAmount,
+                vatAmount: data.totalVatAmount,
+                totalBillAmount: data.totalAmount,
+                isVerified: nextVerified,
+            })
+        },
+        onSuccess: (saved) => {
+            queryClient.invalidateQueries({ queryKey: ['purchase-billing-detail'] })
+            queryClient.invalidateQueries({ queryKey: ['purchase-billing-report'] })
+            queryClient.invalidateQueries({ queryKey: ['balance-confirmation-context'] })
+            toast.success(
+                saved.is_verified
+                    ? 'Balance Confirmation marked as Verified!'
+                    : 'Balance Confirmation marked as Unverified'
+            )
+        },
+        onError: () => {
+            toast.error('Failed to update verification status')
+        },
+    })
 
     return (
         <>
@@ -80,18 +138,45 @@ export function PurchaseBillingDetailModal({
 
                     {/* Content */}
                     <div className="p-6">
-                        {/* Balance Confirmation Button */}
-                        <div className="mb-4 flex items-center gap-3">
+                        {/* Balance Confirmation Actions */}
+                        <div className="mb-4 flex flex-wrap items-center gap-3">
                             <button
                                 onClick={handleBalanceConfirmationClick}
                                 className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors text-sm font-medium"
                             >
+                                <FileCheck2 className="h-4 w-4" />
                                 Balance Confirmation
                             </button>
-                            {showBalanceConfirmationMessage && (
+
+                            {canGenerateConfirmation && data && (
+                                <button
+                                    onClick={() => verifyMutation.mutate(!data.isBalanceVerified)}
+                                    disabled={verifyMutation.isPending}
+                                    className={`flex items-center gap-1.5 px-3.5 py-2 rounded-md transition-colors text-sm font-medium disabled:opacity-50 ${
+                                        data.isBalanceVerified
+                                            ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                                            : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                    }`}
+                                >
+                                    {verifyMutation.isPending ? (
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                        <CheckCircle2 className="h-4 w-4" />
+                                    )}
+                                    {data.isBalanceVerified ? 'Verified (Confirmed from Party)' : 'Confirm from Party (Verify)'}
+                                </button>
+                            )}
+
+                            {!isLoading && data && (
+                                <span className="text-xs text-gray-500 dark:text-gray-400">
+                                    Taxable Amount: <strong className="text-gray-800 dark:text-gray-200">{formatNepaliCurrency(data.totalTaxableAmount)}</strong>
+                                </span>
+                            )}
+
+                            {balanceConfirmationError && (
                                 <div className="flex items-center gap-2 px-4 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-md border border-red-200 dark:border-red-800">
-                                    <AlertCircle className="h-4 w-4" />
-                                    <span className="text-sm font-medium">Cannot Generate : Amount Less than Rs 100000</span>
+                                    <AlertCircle className="h-4 w-4 shrink-0" />
+                                    <span className="text-sm font-medium">{balanceConfirmationError}</span>
                                 </div>
                             )}
                         </div>
@@ -265,6 +350,27 @@ export function PurchaseBillingDetailModal({
                 <ViewPanVatBillModal
                     billId={selectedBillId}
                     onClose={() => setSelectedBillId(null)}
+                />
+            )}
+
+            {/* Balance Confirmation Modal */}
+            {isBalanceConfirmationOpen && fiscalYearId && data && (
+                <BalanceConfirmationModal
+                    supplierCompanyId={supplierCompanyId}
+                    supplierCompanyName={data.supplierCompanyName || supplierCompanyName}
+                    buyerCompanyId={buyerCompanyId}
+                    buyerCompanyName={data.buyerCompanyName || buyerCompanyName}
+                    supplierPanVat={data.bills[0]?.supplier_pan_vat}
+                    buyerPanVat={data.bills[0]?.buyer_pan_vat}
+                    fiscalYearId={fiscalYearId}
+                    fiscalYearName={fiscalYearName}
+                    startDate={startDate}
+                    endDate={endDate}
+                    totalTaxableAmount={data.totalTaxableAmount}
+                    totalVatAmount={data.totalVatAmount}
+                    totalBillAmount={data.totalAmount}
+                    totalChequeAmount={data.totalChequeAmount}
+                    onClose={() => setIsBalanceConfirmationOpen(false)}
                 />
             )}
 

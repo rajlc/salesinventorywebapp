@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Search, X, Eye } from 'lucide-react'
+import { Search, X, Eye, CheckCircle2 } from 'lucide-react'
 import { Card } from '@/components/ui-shim'
 import { useQuery } from '@tanstack/react-query'
 import { getCompanyDetails } from '@/features/settings/actions/company-details-actions'
@@ -41,6 +41,7 @@ export function PurchaseBillingReport() {
         queryKey: ['purchase-billing-report', companyId, fiscalYearId, search, selectedFiscalYear?.start_date, selectedFiscalYear?.end_date],
         queryFn: () => getPurchaseBillingReport({
             companyId: companyId !== 'all' ? companyId : undefined,
+            fiscalYearId: fiscalYearId !== 'all' ? fiscalYearId : undefined,
             startDate: selectedFiscalYear?.start_date,
             endDate: selectedFiscalYear?.end_date,
             search: search || undefined,
@@ -161,7 +162,18 @@ export function PurchaseBillingReport() {
                                             {item.buyer_company_name}
                                         </td>
                                         <td className="px-3 py-2 text-[13px] text-right font-medium text-blue-600 dark:text-blue-400">
-                                            {formatNepaliCurrency(item.total_bill_amount)}
+                                            <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
+                                                <span>{formatNepaliCurrency(item.total_bill_amount)}</span>
+                                                {item.is_balance_verified && (
+                                                    <span
+                                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                                                        title={item.balance_verified_at ? `Verified on ${new Date(item.balance_verified_at).toLocaleDateString()}` : 'Balance Confirmed & Verified'}
+                                                    >
+                                                        <CheckCircle2 className="h-3 w-3" />
+                                                        Verified
+                                                    </span>
+                                                )}
+                                            </div>
                                         </td>
                                         <td className="px-3 py-2 text-[13px] text-right font-bold text-purple-700 dark:text-purple-400 bg-purple-50/30 dark:bg-purple-950/5">
                                             {formatNepaliCurrency(item.transaction_amount || 0)}
@@ -211,6 +223,7 @@ export function PurchaseBillingReport() {
                         buyerCompanyName={selectedReportItem.buyer_company_name}
                         fiscalYearId={fiscalYearId !== 'all' ? fiscalYearId : undefined}
                         fiscalYearName={selectedFiscalYear?.name}
+                        isFiscalYearActive={Boolean(selectedFiscalYear?.is_active)}
                         startDate={selectedFiscalYear?.start_date}
                         endDate={selectedFiscalYear?.end_date}
                         onClose={() => setSelectedReportItem(null)}
