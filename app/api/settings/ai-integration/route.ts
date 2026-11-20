@@ -66,9 +66,27 @@ export async function GET() {
             .maybeSingle()
 
         const currentModel = aiRow?.value?.model || 'gemini-3.5-flash'
-        const isGemini = currentModel.startsWith('gemini')
-        const geminiKey = aiRow?.value?.geminiApiKey || (isGemini ? aiRow?.value?.apiKey : '') || process.env.GEMINI_API_KEY || ''
+        const currentProvider = aiRow?.value?.provider || (currentModel.startsWith('gemini') ? 'gemini' : 'openai')
+        const isGemini = currentProvider === 'gemini'
+
+        // Build deduplicated Gemini API keys array (supports 1, 2, 3+ keys)
+        const rawGeminiKeys: string[] = []
+        if (Array.isArray(aiRow?.value?.geminiApiKeys)) {
+            for (const k of aiRow.value.geminiApiKeys) {
+                if (typeof k === 'string' && k.trim()) rawGeminiKeys.push(k.trim())
+            }
+        }
+        const legacyGeminiKey = aiRow?.value?.geminiApiKey || (isGemini ? aiRow?.value?.apiKey : '') || ''
+        if (legacyGeminiKey && !rawGeminiKeys.includes(legacyGeminiKey.trim())) {
+            rawGeminiKeys.unshift(legacyGeminiKey.trim())
+        }
+        if (rawGeminiKeys.length === 0 && process.env.GEMINI_API_KEY) {
+            rawGeminiKeys.push(process.env.GEMINI_API_KEY)
+        }
+
+        const geminiKey = rawGeminiKeys[0] || ''
         const openaiKey = aiRow?.value?.openaiApiKey || (!isGemini ? aiRow?.value?.apiKey : '') || process.env.OPENAI_API_KEY || ''
+        const autoAiEnabled = aiRow?.value?.autoAiEnabled !== false // default true
 
         const imageSettings = {
             provider: imgRow?.value?.provider || 'gemini-imagen',
@@ -83,11 +101,13 @@ export async function GET() {
         }
 
         return NextResponse.json({
-            provider: aiRow?.value?.provider || (isGemini ? 'gemini' : 'openai'),
+            provider: currentProvider,
             model: currentModel,
             apiKey: isGemini ? geminiKey : openaiKey,
             geminiApiKey: geminiKey,
+            geminiApiKeys: rawGeminiKeys,
             openaiApiKey: openaiKey,
+            autoAiEnabled,
             listingPrompt: promptRow?.value?.prompt || DEFAULT_PROMPT,
             imageSettings
         })
@@ -97,7 +117,9 @@ export async function GET() {
             model: 'gemini-3.5-flash',
             apiKey: '',
             geminiApiKey: '',
+            geminiApiKeys: [],
             openaiApiKey: '',
+            autoAiEnabled: true,
             listingPrompt: DEFAULT_PROMPT,
             imageSettings: {
                 provider: 'gemini-imagen',
@@ -114,14 +136,52 @@ export async function POST(request: Request) {
         const supabase = await createAdminClient()
         const body = await request.json()
 
-        // Save model + API key
-        if (body.model !== undefined || body.apiKey !== undefined || body.geminiApiKey !== undefined) {
-            const selectedModel = body.model || 'gemini-3.5-flash'
-            const selectedProvider = body.provider || (selectedModel.startsWith('gemini') ? 'gemini' : 'openai')
+        // Save model + API keys + autoAiEnabled (merge with existing so partial toggles don't wipe keys)
+        if (
+            body.model !== undefined ||
+            body.provider !== undefined ||
+            body.apiKey !== undefined ||
+            body.geminiApiKey !== undefined ||
+            body.geminiApiKeys !== undefined ||
+            body.openaiApiKey !== undefined ||
+            body.autoAiEnabled !== undefined
+        ) {
+            const { data: existingRow } = await supabase
+                .from('app_settings')
+                .select('value')
+                .eq('key', 'daraz_ai_settings')
+                .maybeSingle()
+
+            const prev = existingRow?.value || {}
+            const selectedModel = body.model ?? prev.model ?? 'gemini-3.5-flash'
+            const selectedProvider = body.provider ?? prev.provider ?? (selectedModel.startsWith('gemini') ? 'gemini' : 'openai')
             const isGemini = selectedProvider === 'gemini'
-            const geminiKey = body.geminiApiKey !== undefined ? body.geminiApiKey : (isGemini ? body.apiKey : '')
-            const openaiKey = body.openaiApiKey !== undefined ? body.openaiApiKey : (!isGemini ? body.apiKey : '')
-            const effectiveApiKey = isGemini ? geminiKey : openaiKey
+
+            // Normalize geminiApiKeys array
+            let geminiKeys: string[] = Array.isArray(prev.geminiApiKeys) ? prev.geminiApiKeys : []
+            if (Array.isArray(body.geminiApiKeys)) {
+                geminiKeys = Array.from(
+                    new Set(
+                        body.geminiApiKeys
+                            .map((k: unknown) => (typeof k === 'string' ? k.trim() : ''))
+                            .filter(Boolean)
+                    )
+                )
+            } else if (body.geminiApiKey !== undefined) {
+                const trimmed = String(body.geminiApiKey || '').trim()
+                geminiKeys = trimmed ? [trimmed, ...geminiKeys.filter(k => k !== trimmed)] : []
+            } else if (geminiKeys.length === 0 && prev.geminiApiKey) {
+                geminiKeys = [String(prev.geminiApiKey).trim()].filter(Boolean)
+            }
+
+            const primaryGeminiKey = geminiKeys[0] || ''
+            const openaiKey = body.openaiApiKey !== undefined
+                ? String(body.openaiApiKey || '').trim()
+                : (prev.openaiApiKey || (!isGemini && body.apiKey ? String(body.apiKey).trim() : ''))
+            const effectiveApiKey = isGemini ? primaryGeminiKey : openaiKey
+            const autoAiEnabled = body.autoAiEnabled !== undefined
+                ? Boolean(body.autoAiEnabled)
+                : (prev.autoAiEnabled !== false)
 
             const { error: aiError } = await supabase
                 .from('app_settings')
@@ -131,8 +191,10 @@ export async function POST(request: Request) {
                         provider: selectedProvider,
                         model: selectedModel,
                         apiKey: effectiveApiKey || '',
-                        geminiApiKey: geminiKey || '',
-                        openaiApiKey: openaiKey || ''
+                        geminiApiKey: primaryGeminiKey,
+                        geminiApiKeys: geminiKeys,
+                        openaiApiKey: openaiKey || '',
+                        autoAiEnabled,
                     },
                     updated_at: new Date().toISOString()
                 }, { onConflict: 'key' })

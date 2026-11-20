@@ -64,6 +64,8 @@ interface DraftListing {
     status: 'draft' | 'generating' | 'generated' | 'pushing' | 'pushed' | 'failed'
     error?: string
     created_at?: string
+    auto_ai_scheduled_at?: string | null
+    auto_ai_attempts?: number
 }
 
 interface BulkAddRow {
@@ -518,13 +520,69 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [aiModel, setAiModel] = useState('gemini-3.6-flash')
     const [generating, setGenerating] = useState(false)
     const [submitting, setSubmitting] = useState(false)
+    const [autoAiEnabled, setAutoAiEnabled] = useState(true)
+    const [autoAiToggling, setAutoAiToggling] = useState(false)
+    const [countdownNow, setCountdownNow] = useState(() => Date.now())
+
+    const hasQueuedAutoAiDrafts = useMemo(
+        () => autoAiEnabled && drafts.some(d => d.status === 'draft' && Boolean(d.auto_ai_scheduled_at)),
+        [autoAiEnabled, drafts]
+    )
+
+    useEffect(() => {
+        if (viewMode !== 'list' || !hasQueuedAutoAiDrafts) return
+        const interval = setInterval(() => setCountdownNow(Date.now()), 1000)
+        return () => clearInterval(interval)
+    }, [viewMode, hasQueuedAutoAiDrafts])
+
+    const handleToggleAutoAi = async () => {
+        const nextVal = !autoAiEnabled
+        setAutoAiToggling(true)
+        setAutoAiEnabled(nextVal)
+        try {
+            const res = await fetch('/api/settings/ai-integration', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ autoAiEnabled: nextVal }),
+            })
+            if (!res.ok) throw new Error('Failed to update Auto-AI setting')
+        } catch {
+            setAutoAiEnabled(!nextVal)
+        } finally {
+            setAutoAiToggling(false)
+        }
+    }
+
+    const handleCancelAutoAi = async (draftId: string) => {
+        setDrafts(prev => prev.map(d => d.id === draftId ? { ...d, auto_ai_scheduled_at: null } : d))
+        try {
+            await fetch('/api/daraz/drafts', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: draftId, auto_ai_scheduled_at: null }),
+            })
+        } catch {
+            fetchDrafts()
+        }
+    }
+
+    const formatAutoAiCountdown = (scheduledIso?: string | null): string | null => {
+        if (!scheduledIso) return null
+        const targetMs = new Date(scheduledIso).getTime()
+        if (!Number.isFinite(targetMs)) return null
+        const diffSec = Math.ceil((targetMs - countdownNow) / 1000)
+        if (diffSec <= 0) return 'Queued...'
+        const mins = Math.floor(diffSec / 60)
+        const secs = diffSec % 60
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    }
 
     // ── Load stores + drafts + suppliers + AI settings on mount ─────────────
     useEffect(() => {
         fetchStores()
         fetchDrafts()
         fetchSuppliers()
-        // Auto-load configured model from settings
+        // Auto-load configured model & Auto-AI toggle from settings
         fetch('/api/settings/ai-integration')
             .then(res => res.json())
             .then(data => {
@@ -533,6 +591,9 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         ? 'gemini-3.6-flash'
                         : data.model
                     setAiModel(normalized)
+                }
+                if (typeof data.autoAiEnabled === 'boolean') {
+                    setAutoAiEnabled(data.autoAiEnabled)
                 }
             })
             .catch(() => {})
@@ -2970,6 +3031,21 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
 
                         <button
                             type="button"
+                            onClick={handleToggleAutoAi}
+                            disabled={autoAiToggling}
+                            className={`h-9 px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                                autoAiEnabled
+                                    ? 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/30 dark:hover:bg-purple-950/50 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300'
+                                    : 'bg-white hover:bg-slate-100 dark:bg-zinc-900 dark:hover:bg-zinc-800 border-slate-200 dark:border-zinc-700 text-slate-500 dark:text-zinc-400'
+                            }`}
+                            title="Toggle automatic 5-minute background AI generation for new drafts"
+                        >
+                            <Clock size={13} className={autoAiEnabled ? 'text-purple-600 dark:text-purple-400' : 'text-slate-400'} />
+                            <span>Auto-AI: {autoAiEnabled ? 'ON' : 'OFF'}</span>
+                        </button>
+
+                        <button
+                            type="button"
                             onClick={() => fetchDrafts()}
                             disabled={draftsLoading}
                             className="h-9 px-3 hover:bg-slate-100 dark:hover:bg-zinc-800 rounded-lg border border-slate-200 dark:border-zinc-700 text-slate-600 dark:text-zinc-300 text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
@@ -3548,6 +3624,29 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                             )}
                                                             Generate AI
                                                         </button>
+                                                        {autoAiEnabled && draft.status === 'draft' && draft.auto_ai_scheduled_at && (() => {
+                                                            const label = formatAutoAiCountdown(draft.auto_ai_scheduled_at)
+                                                            if (!label) return null
+                                                            return (
+                                                                <div className="flex items-center justify-between gap-1 px-2 py-0.5 rounded bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 text-[10px] font-medium text-purple-700 dark:text-purple-300">
+                                                                    <span className="inline-flex items-center gap-1 truncate" title="Auto-AI will run automatically after timer">
+                                                                        <Clock size={10} className="shrink-0" />
+                                                                        {label}
+                                                                    </span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation()
+                                                                            handleCancelAutoAi(draft.id)
+                                                                        }}
+                                                                        className="hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
+                                                                        title="Cancel Auto-AI for this draft"
+                                                                    >
+                                                                        <X size={10} />
+                                                                    </button>
+                                                                </div>
+                                                            )
+                                                        })()}
                                                         <div className="relative w-full" data-dropdown-container>
                                                             <button
                                                                 type="button"

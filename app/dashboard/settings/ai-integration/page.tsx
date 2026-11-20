@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from '@/components/ui-shim'
 import { toast } from 'sonner'
-import { Save, Brain, Key, Cpu, ShieldCheck, FileText, RefreshCw, Info, Image as ImageIcon, Sparkles, Layers, Check } from 'lucide-react'
+import { Save, Brain, Key, Cpu, ShieldCheck, FileText, RefreshCw, Info, Image as ImageIcon, Sparkles, Layers, Check, Plus, Trash2, Clock } from 'lucide-react'
 
 const TEMPLATE_VARIABLES = [
     { key: '{productName}', desc: 'Raw product name entered by user' },
@@ -27,11 +27,12 @@ export default function AiIntegrationPage() {
     const [loading, setLoading] = useState(false)
     const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini')
     const [model, setModel] = useState('gemini-3.5-flash')
-    const [geminiApiKey, setGeminiApiKey] = useState('')
+    const [geminiApiKeys, setGeminiApiKeys] = useState<string[]>([''])
     const [openaiApiKey, setOpenaiApiKey] = useState('')
+    const [autoAiEnabled, setAutoAiEnabled] = useState(true)
     const [listingPrompt, setListingPrompt] = useState('')
     const [promptLoaded, setPromptLoaded] = useState(false)
-    const [testingKey, setTestingKey] = useState(false)
+    const [testingKeyIdx, setTestingKeyIdx] = useState<number | 'openai' | null>(null)
 
     // Image Generation Studio state
     const [imageProvider, setImageProvider] = useState<'gemini-imagen' | 'cloudflare' | 'zero-cost'>('gemini-imagen')
@@ -52,16 +53,28 @@ export default function AiIntegrationPage() {
         try {
             const res = await fetch('/api/settings/ai-integration')
             const data = await res.json()
+            if (data.provider === 'gemini' || data.provider === 'openai') {
+                setProvider(data.provider)
+            }
             if (data.model) {
                 // Normalize legacy model names
                 const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(data.model)
                     ? 'gemini-3.5-flash'
                     : data.model
                 setModel(normalized)
-                setProvider(normalized.startsWith('gemini') ? 'gemini' : 'openai')
+                if (!data.provider) {
+                    setProvider(normalized.startsWith('gemini') ? 'gemini' : 'openai')
+                }
             }
-            if (data.geminiApiKey) setGeminiApiKey(data.geminiApiKey)
+            if (Array.isArray(data.geminiApiKeys) && data.geminiApiKeys.length > 0) {
+                setGeminiApiKeys(data.geminiApiKeys)
+            } else if (data.geminiApiKey) {
+                setGeminiApiKeys([data.geminiApiKey])
+            } else {
+                setGeminiApiKeys([''])
+            }
             if (data.openaiApiKey) setOpenaiApiKey(data.openaiApiKey)
+            if (typeof data.autoAiEnabled === 'boolean') setAutoAiEnabled(data.autoAiEnabled)
             if (data.listingPrompt) {
                 setListingPrompt(data.listingPrompt)
                 setPromptLoaded(true)
@@ -87,14 +100,19 @@ export default function AiIntegrationPage() {
     const handleSave = async () => {
         setLoading(true)
         try {
+            const cleanedGeminiKeys = geminiApiKeys.map(k => k.trim()).filter(Boolean)
+            const primaryGeminiKey = cleanedGeminiKeys[0] || ''
+
             const res = await fetch('/api/settings/ai-integration', {
                 method: 'POST',
                 body: JSON.stringify({
                     provider,
                     model,
-                    geminiApiKey,
+                    geminiApiKey: primaryGeminiKey,
+                    geminiApiKeys: cleanedGeminiKeys,
                     openaiApiKey,
-                    apiKey: provider === 'gemini' ? geminiApiKey : openaiApiKey,
+                    apiKey: provider === 'gemini' ? primaryGeminiKey : openaiApiKey,
+                    autoAiEnabled,
                     listingPrompt,
                     imageSettings: {
                         provider: imageProvider,
@@ -107,6 +125,9 @@ export default function AiIntegrationPage() {
             })
 
             if (!res.ok) throw new Error('Failed to save settings')
+            if (cleanedGeminiKeys.length > 0) {
+                setGeminiApiKeys(cleanedGeminiKeys)
+            }
             toast.success('AI Integration and Image Studio settings saved successfully')
         } catch (error) {
             toast.error('Failed to save settings')
@@ -115,47 +136,58 @@ export default function AiIntegrationPage() {
         }
     }
 
-    const handleTestKey = async () => {
-        const keyToTest = provider === 'gemini' ? geminiApiKey : openaiApiKey
-        if (!keyToTest.trim()) {
-            return toast.error(`Please enter your ${provider === 'gemini' ? 'Google Gemini' : 'OpenAI'} API key first`)
+    const handleTestGeminiKey = async (idx: number) => {
+        const keyToTest = (geminiApiKeys[idx] || '').trim()
+        if (!keyToTest) {
+            return toast.error(`Please enter Gemini API Key #${idx + 1} first`)
         }
-        setTestingKey(true)
+        setTestingKeyIdx(idx)
         try {
-            if (provider === 'gemini') {
-                const targetModel = model.startsWith('gemini') && !model.includes('1.5') ? model : 'gemini-3.5-flash'
-                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`, {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'x-goog-api-key': keyToTest.trim()
-                    },
-                    body: JSON.stringify({
-                        contents: [{ role: 'user', parts: [{ text: 'Reply with JSON: {"status":"connected","provider":"gemini"}' }] }],
-                        generationConfig: { responseMimeType: 'application/json' }
-                    })
+            const targetModel = model.startsWith('gemini') && !model.includes('1.5') ? model : 'gemini-3.5-flash'
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': keyToTest
+                },
+                body: JSON.stringify({
+                    contents: [{ role: 'user', parts: [{ text: 'Reply with JSON: {"status":"connected","provider":"gemini"}' }] }],
+                    generationConfig: { responseMimeType: 'application/json' }
                 })
-                const json = await res.json()
-                if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
-                    toast.success('✅ Google Gemini API Key verified successfully! Connection is working.')
-                } else {
-                    throw new Error(json.error?.message || 'Invalid Gemini API response')
-                }
+            })
+            const json = await res.json()
+            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+                toast.success(`✅ Gemini API Key #${idx + 1} verified successfully!`)
             } else {
-                const res = await fetch('https://api.openai.com/v1/models', {
-                    headers: { 'Authorization': `Bearer ${keyToTest.trim()}` }
-                })
-                if (res.ok) {
-                    toast.success('✅ OpenAI API Key verified successfully!')
-                } else {
-                    const err = await res.json()
-                    throw new Error(err.error?.message || 'OpenAI authentication failed')
-                }
+                throw new Error(json.error?.message || 'Invalid Gemini API response')
+            }
+        } catch (err: any) {
+            toast.error(`❌ Key #${idx + 1} verification failed: ${err.message}`)
+        } finally {
+            setTestingKeyIdx(null)
+        }
+    }
+
+    const handleTestOpenAiKey = async () => {
+        const keyToTest = openaiApiKey.trim()
+        if (!keyToTest) {
+            return toast.error('Please enter your OpenAI API key first')
+        }
+        setTestingKeyIdx('openai')
+        try {
+            const res = await fetch('https://api.openai.com/v1/models', {
+                headers: { 'Authorization': `Bearer ${keyToTest}` }
+            })
+            if (res.ok) {
+                toast.success('✅ OpenAI API Key verified successfully!')
+            } else {
+                const err = await res.json()
+                throw new Error(err.error?.message || 'OpenAI authentication failed')
             }
         } catch (err: any) {
             toast.error(`❌ Verification failed: ${err.message}`)
         } finally {
-            setTestingKey(false)
+            setTestingKeyIdx(null)
         }
     }
 
@@ -244,65 +276,161 @@ export default function AiIntegrationPage() {
                 </CardContent>
             </Card>
 
-            {/* API Key */}
+            {/* API Key(s) */}
             <Card>
                 <CardHeader className="flex flex-row items-center gap-2 pb-2">
                     <Key className="text-orange-500" size={20} />
                     <CardTitle className="text-base">
-                        {provider === 'gemini' ? 'Google Gemini API Key' : 'OpenAI API Key'}
+                        {provider === 'gemini' ? 'Google Gemini API Keys (Auto-Fallback)' : 'OpenAI API Key'}
                     </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     {provider === 'gemini' ? (
-                        <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-zinc-800 rounded-lg p-3 text-xs text-emerald-800 dark:text-emerald-400 space-y-1.5">
-                            <p className="font-semibold flex items-center gap-1.5">
-                                <ShieldCheck size={14} className="text-emerald-600" />
-                                Google Gemini is 100% Free (No Credit Card Required)
-                            </p>
-                            <p>
-                                Google AI Studio provides 15 requests/minute and 1,500 requests/day for free. You can generate a free key with your regular Google account in 10 seconds.
-                            </p>
-                            <a
-                                href="https://aistudio.google.com/app/apikey"
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 font-semibold underline text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 mt-1"
-                            >
-                                👉 Click here to get your Free Gemini API Key at Google AI Studio &rarr;
-                            </a>
-                        </div>
-                    ) : (
-                        <div className="text-xs text-gray-500 mb-2">
-                            Enter your OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="underline">platform.openai.com</a>.
-                        </div>
-                    )}
+                        <>
+                            <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-zinc-800 rounded-lg p-3 text-xs text-emerald-800 dark:text-emerald-400 space-y-1.5">
+                                <p className="font-semibold flex items-center gap-1.5">
+                                    <ShieldCheck size={14} className="text-emerald-600" />
+                                    Google Gemini Free Tier — Multi-Key Failover Supported
+                                </p>
+                                <p>
+                                    Add 2 or more free Gemini API keys from different Google accounts. If Key #1 hits its rate limit (429) or daily quota during bulk generation, the system automatically switches to Key #2, Key #3, etc.
+                                </p>
+                                <a
+                                    href="https://aistudio.google.com/app/apikey"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 font-semibold underline text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 mt-1"
+                                >
+                                    👉 Click here to get your Free Gemini API Key at Google AI Studio &rarr;
+                                </a>
+                            </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-medium">
-                            {provider === 'gemini' ? 'Gemini API Key' : 'OpenAI Secret Key'}
-                        </label>
-                        <div className="flex flex-col sm:flex-row gap-2">
-                            <Input
-                                type="password"
-                                placeholder={provider === 'gemini' ? 'AIzaSy...' : 'sk-...'}
-                                value={provider === 'gemini' ? geminiApiKey : openaiApiKey}
-                                onChange={(e) => {
-                                    if (provider === 'gemini') setGeminiApiKey(e.target.value)
-                                    else setOpenaiApiKey(e.target.value)
-                                }}
-                                className="w-full sm:w-[450px]"
-                            />
-                            <Button
-                                type="button"
-                                variant="outline"
-                                onClick={handleTestKey}
-                                disabled={testingKey}
-                                className="text-xs whitespace-nowrap"
-                            >
-                                {testingKey ? 'Testing...' : 'Test Key ⚡'}
-                            </Button>
+                            <div className="space-y-3">
+                                {geminiApiKeys.map((keyVal, idx) => (
+                                    <div key={idx} className="space-y-1">
+                                        <label className="text-xs font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                                            <span>Gemini API Key #{idx + 1}</span>
+                                            {idx === 0 ? (
+                                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                                                    Primary
+                                                </span>
+                                            ) : (
+                                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                                                    Fallback #{idx}
+                                                </span>
+                                            )}
+                                        </label>
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <Input
+                                                type="password"
+                                                placeholder="AIzaSy..."
+                                                value={keyVal}
+                                                onChange={(e) => {
+                                                    const next = [...geminiApiKeys]
+                                                    next[idx] = e.target.value
+                                                    setGeminiApiKeys(next)
+                                                }}
+                                                className="w-full sm:w-[450px]"
+                                            />
+                                            <div className="flex items-center gap-2">
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    onClick={() => handleTestGeminiKey(idx)}
+                                                    disabled={testingKeyIdx !== null}
+                                                    className="text-xs whitespace-nowrap"
+                                                >
+                                                    {testingKeyIdx === idx ? 'Testing...' : 'Test Key ⚡'}
+                                                </Button>
+                                                {geminiApiKeys.length > 1 && (
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        onClick={() => setGeminiApiKeys(prev => prev.filter((_, i) => i !== idx))}
+                                                        className="text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 px-2.5"
+                                                        title="Remove this key"
+                                                    >
+                                                        <Trash2 size={14} />
+                                                    </Button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => setGeminiApiKeys(prev => [...prev, ''])}
+                                    className="text-xs inline-flex items-center gap-1.5 border-dashed border-emerald-400 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                                >
+                                    <Plus size={14} />
+                                    Add Another Gemini API Key
+                                </Button>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <div className="text-xs text-gray-500 mb-2">
+                                Enter your OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="underline">platform.openai.com</a>. When OpenAI is selected, Google Gemini API is never called.
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">OpenAI Secret Key</label>
+                                <div className="flex flex-col sm:flex-row gap-2">
+                                    <Input
+                                        type="password"
+                                        placeholder="sk-..."
+                                        value={openaiApiKey}
+                                        onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                        className="w-full sm:w-[450px]"
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        onClick={handleTestOpenAiKey}
+                                        disabled={testingKeyIdx !== null}
+                                        className="text-xs whitespace-nowrap"
+                                    >
+                                        {testingKeyIdx === 'openai' ? 'Testing...' : 'Test Key ⚡'}
+                                    </Button>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </CardContent>
+            </Card>
+
+            {/* Global Auto-AI Background Generation Toggle */}
+            <Card>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+                    <div className="flex items-center gap-2">
+                        <Clock className="text-purple-600" size={18} />
+                        <div>
+                            <CardTitle className="text-base">Auto-AI Draft Generation (5-Min Queue)</CardTitle>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                Automatically generates Title, Description, Highlights &amp; Category 5 minutes after adding any product (Mobile App, Web Single, or Web Bulk).
+                            </p>
                         </div>
                     </div>
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoAiEnabled}
+                        onClick={() => setAutoAiEnabled(prev => !prev)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                            autoAiEnabled ? 'bg-emerald-600' : 'bg-gray-300 dark:bg-zinc-700'
+                        }`}
+                    >
+                        <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                                autoAiEnabled ? 'translate-x-5' : 'translate-x-0'
+                            }`}
+                        />
+                    </button>
+                </CardHeader>
+                <CardContent className="text-xs text-gray-500 pt-1">
+                    Status: <strong className={autoAiEnabled ? 'text-emerald-600' : 'text-gray-500'}>{autoAiEnabled ? 'ON — Running in background via Cron' : 'OFF — Manual Generate AI only'}</strong>
+                    {' • '}Cron endpoint: <code className="px-1.5 py-0.5 bg-gray-100 dark:bg-zinc-800 rounded text-[11px]">/api/cron/auto-generate-drafts</code>
                 </CardContent>
             </Card>
 

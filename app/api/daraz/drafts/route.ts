@@ -154,6 +154,13 @@ export async function POST(req: NextRequest) {
             ...(mrpPrice !== null ? { mrp_price: mrpPrice } : {})
         }
 
+        const initialStatus = body.status || (draftType === 'ready' ? 'generated' : 'draft')
+        const shouldScheduleAutoAi =
+            initialStatus === 'draft' &&
+            draftType !== 'ready' &&
+            draftType !== 'pushed' &&
+            (images.length > 0 || (rawName && !rawName.startsWith('[Link') && rawName !== 'Untitled Draft'))
+
         const insertRow: Record<string, any> = {
             raw_name: rawName,
             title: body.title || null,
@@ -175,7 +182,10 @@ export async function POST(req: NextRequest) {
             pkg_height: body.pkg_height ?? 1,
             supplier_id: body.supplier_id || null,
             wholesale_price: body.wholesale_price || null,
-            status: body.status || (draftType === 'ready' ? 'generated' : 'draft')
+            status: initialStatus,
+            auto_ai_scheduled_at: shouldScheduleAutoAi
+                ? new Date(Date.now() + 5 * 60 * 1000).toISOString()
+                : null,
         }
 
         if (campaignPrice !== null) {
@@ -248,6 +258,8 @@ const VALID_DRAFT_COLUMNS = new Set([
     'status',
     'error',
     'supplier_id',
+    'auto_ai_scheduled_at',
+    'auto_ai_attempts',
     'wholesale_price',
     'updated_at'
 ])
