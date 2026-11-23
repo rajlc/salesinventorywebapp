@@ -380,6 +380,38 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
     const [deleteConfirmDraft, setDeleteConfirmDraft] = useState<DraftListing | null>(null)
     const [isDeletingDraft, setIsDeletingDraft] = useState(false)
 
+    // ── Auto Sales Price Helper (only during AI Generate / Generate Content) ─
+    // Formula: Sales Price = (Wholesale Price * 1.2) / (1 - Total Commission %)
+    const computeAutoSalesPriceForAi = useCallback(async (
+        wholesale?: number | null,
+        catPath?: string | null
+    ): Promise<number | null> => {
+        if (!wholesale || Number(wholesale) <= 0) return null
+        const cleanPath = (catPath || '').trim()
+        if (!cleanPath) return null
+
+        try {
+            const commRes = await fetch(`/api/daraz/profit/category-commission?path=${encodeURIComponent(cleanPath)}`)
+            const commJson = await commRes.json()
+            if (!commJson.success) return null
+
+            const totalCommPct = Number(commJson.totalCommissionPercent)
+            if (!Number.isFinite(totalCommPct) || totalCommPct < 0 || totalCommPct >= 95) return null
+
+            if (commJson.commissionRate !== undefined) {
+                setCategoryCommissions(prev => ({ ...prev, [cleanPath]: commJson.commissionRate }))
+            }
+            if (commJson.otherFees) {
+                setActiveOtherFees(commJson.otherFees)
+            }
+
+            const calculated = Math.round((Number(wholesale) * 1.2) / (1 - totalCommPct / 100))
+            return calculated > 0 ? calculated : null
+        } catch {
+            return null
+        }
+    }, [])
+
     // ── Compute Real-time Profit / Receivable Helper ────────────────────────
     const computeProfitInfo = useCallback((
         path?: string | null,
@@ -392,11 +424,19 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             ?? categoryCommissions[path.toLowerCase().trim()] 
             ?? 12.0 // average Daraz commission rate fallback
 
+        const effectiveOtherFees = activeOtherFees.length > 0 ? activeOtherFees : DEFAULT_OTHER_FEES
         const breakdown = calculateDarazFeeBreakdown({
             salesPrice: Number(selling),
             categoryCommissionRate: commRate,
-            otherFees: activeOtherFees.length > 0 ? activeOtherFees : DEFAULT_OTHER_FEES
+            otherFees: effectiveOtherFees
         })
+
+        // Exact Total Commission (%) matching /dashboard/settings/daraz-commission
+        const commWithVat = commRate * 1.13
+        const otherFeesPct = effectiveOtherFees
+            .filter(f => f.is_active && f.type === 'percentage')
+            .reduce((sum, f) => sum + (f.apply_vat ? f.rate * 1.13 : f.rate), 0)
+        const totalCommRate = parseFloat((commWithVat + otherFeesPct).toFixed(2))
 
         const netPayout = breakdown.netPayout
 
@@ -408,6 +448,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                 isPositive: profit >= 0,
                 receivableAmount: parseFloat(netPayout.toFixed(2)),
                 commRate,
+                totalCommRate,
                 breakdown
             }
         }
@@ -418,6 +459,7 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             isPositive: true,
             receivableAmount: parseFloat(netPayout.toFixed(2)),
             commRate,
+            totalCommRate,
             breakdown
         }
     }, [categoryCommissions, activeOtherFees])
@@ -587,8 +629,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             .then(res => res.json())
             .then(data => {
                 if (data.model) {
-                    const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(data.model)
-                        ? 'gemini-3.6-flash'
+                    const normalized = ['gemini-1.5-flash', 'gemini-2.0-flash'].includes(data.model)
+                        ? 'gemini-3.5-flash'
                         : data.model
                     setAiModel(normalized)
                 }
@@ -1852,12 +1894,26 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
             }
 
             // 5. Auto-select category from AI suggestion
+            const resolvedCatPath = data.category_suggestion || categoryPath
             if (data.category_suggestion) {
                 setAiCategorySuggestion(data.category_suggestion)
                 setCategoryPath(data.category_suggestion)
             }
             if (data.category_id) {
                 setCategoryId(data.category_id)
+            }
+
+            // 6. Auto-calculate Sales Price if wholesale price & category exist
+            // Formula: (Wholesale * 1.2) / (1 - Total Commission %)
+            const autoSalesPrice = await computeAutoSalesPriceForAi(wholesalePrice, resolvedCatPath)
+            const nextListedPrice = autoSalesPrice
+                ? ((!sellingPrice || sellingPrice < autoSalesPrice) ? Math.round(autoSalesPrice * 1.25) : sellingPrice)
+                : sellingPrice
+            if (autoSalesPrice) {
+                setSpecialPrice(autoSalesPrice)
+                if (nextListedPrice && nextListedPrice !== sellingPrice) {
+                    setSellingPrice(nextListedPrice)
+                }
             }
 
             // ── Save generated content to DB ──────────────────────────────────
@@ -1873,7 +1929,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         highlights_per_store: newHighlightsPerStore
                     },
                     category_id: data.category_id || null,
-                    category_path: data.category_suggestion || categoryPath,
+                    category_path: resolvedCatPath,
+                    ...(autoSalesPrice ? { special_price: autoSalesPrice, price: nextListedPrice } : {}),
                     status: 'generated'
                 })
                 fetchDrafts()
@@ -1967,6 +2024,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                     }
                 }
 
+                const finalCatPath = resolvedCatPath || draft.category_path || ''
+                const autoSalesPrice = await computeAutoSalesPriceForAi(draft.wholesale_price, finalCatPath)
+                const nextListedPrice = autoSalesPrice
+                    ? ((!draft.price || draft.price < autoSalesPrice) ? Math.round(autoSalesPrice * 1.25) : draft.price)
+                    : draft.price
+
                 await fetch('/api/daraz/drafts', {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -1985,8 +2048,11 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             highlights_per_store: newHighlightsPerStore
                         },
                         category_id: resolvedCatId,
-                        category_path: resolvedCatPath,
-                        status: 'generated'
+                        category_path: finalCatPath,
+                        ...(autoSalesPrice ? { special_price: autoSalesPrice, price: nextListedPrice } : {}),
+                        status: 'generated',
+                        auto_ai_scheduled_at: null,
+                        error: null
                     })
                 })
                 
@@ -2195,23 +2261,25 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         if (toGen.length === 0) return alert('No selected drafts need AI generation (already ready or pushed)')
         setBulkGenerating(true)
 
-        // Mark all as generating
-        await Promise.all(toGen.map(d =>
-            fetch('/api/daraz/drafts', {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: d.id, status: 'generating' })
-            })
-        ))
-        setDrafts(prev => prev.map(d => selectedDraftIds.has(d.id) ? { ...d, status: 'generating' } : d))
+        let successCount = 0
+        let failCount = 0
 
-        // Generate one by one
-        for (const item of toGen) {
+        // Generate one by one (only mark current item as generating so others never get stuck)
+        for (let idx = 0; idx < toGen.length; idx++) {
+            const item = toGen[idx]
             try {
                 const hasImage = item.images && item.images.length > 0
                 const isImageOnly = !item.raw_name?.trim() || item.raw_name.startsWith('[Image Only]')
                 const effectiveName = !isImageOnly ? item.raw_name!.trim() : (hasImage ? 'Product from uploaded image' : '')
                 if (!effectiveName && !hasImage) continue
+
+                // Mark ONLY this item as generating right before calling AI
+                await fetch('/api/daraz/drafts', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: item.id, status: 'generating', error: null })
+                })
+                setDrafts(prev => prev.map(d => d.id === item.id ? { ...d, status: 'generating', error: undefined } : d))
 
                 let targetStores = item.target_stores
                 if (!targetStores || targetStores.length === 0) {
@@ -2244,70 +2312,96 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                         model: aiModel
                     })
                 })
-                const data = await res.json()
+                const data = await res.json().catch(() => ({}))
 
-                if (data.success) {
-                    const { newTitles: newTitlesPerStore, newDescriptions: newDescriptionsPerStore, newHighlights: newHighlightsPerStore } =
-                        mapAiPerStoreFields(data, targetStores, effectiveName)
-
-                    const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
-
-                    let resolvedCatId = data.category_id || null
-                    let resolvedCatPath = data.category_suggestion || ''
-
-                    if ((!resolvedCatId || !resolvedCatPath) && finalTitle) {
-                        try {
-                            const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(finalTitle)}`)
-                            const catJson = await catRes.json()
-                            if (catJson.success && catJson.suggestions?.length > 0) {
-                                resolvedCatId = catJson.suggestions[0].id
-                                resolvedCatPath = catJson.suggestions[0].path
-                            }
-                        } catch (e) {
-                            console.warn('Fallback category fetch failed in bulk generate:', e)
-                        }
-                    }
-
-                    await fetch('/api/daraz/drafts', {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            id: item.id,
-                            title: finalTitle,
-                            raw_name: isImageOnly ? finalTitle : item.raw_name,
-                            target_stores: targetStores,
-                            titles_per_store: newTitlesPerStore,
-                            description: data.description || '',
-                            highlights: data.highlights || [],
-                            attributes: {
-                                ...(data.attributes || {}),
-                                brand: 'No Brand',
-                                descriptions_per_store: newDescriptionsPerStore,
-                                highlights_per_store: newHighlightsPerStore
-                            },
-                            category_id: resolvedCatId,
-                            category_path: resolvedCatPath,
-                            status: 'generated'
-                        })
-                    })
-
-                    setDrafts(prev => prev.map(d => d.id === item.id ? {
-                        ...d,
-                        title: finalTitle,
-                        titles_per_store: newTitlesPerStore,
-                        category_id: resolvedCatId || undefined,
-                        category_path: resolvedCatPath || undefined,
-                        status: 'generated'
-                    } : d))
+                if (!res.ok || !data.success) {
+                    throw new Error(data.error || `AI generation failed (${res.status})`)
                 }
-            } catch (err: any) {
+
+                const { newTitles: newTitlesPerStore, newDescriptions: newDescriptionsPerStore, newHighlights: newHighlightsPerStore } =
+                    mapAiPerStoreFields(data, targetStores, effectiveName)
+
+                const finalTitle = Object.values(newTitlesPerStore)[0] || effectiveName
+
+                let resolvedCatId = data.category_id || null
+                let resolvedCatPath = data.category_suggestion || ''
+
+                if ((!resolvedCatId || !resolvedCatPath) && finalTitle) {
+                    try {
+                        const catRes = await fetch(`/api/daraz/categories/suggestion?productName=${encodeURIComponent(finalTitle)}`)
+                        const catJson = await catRes.json()
+                        if (catJson.success && catJson.suggestions?.length > 0) {
+                            resolvedCatId = catJson.suggestions[0].id
+                            resolvedCatPath = catJson.suggestions[0].path
+                        }
+                    } catch (e) {
+                        console.warn('Fallback category fetch failed in bulk generate:', e)
+                    }
+                }
+
+                const finalCatPath = resolvedCatPath || item.category_path || ''
+                const autoSalesPrice = await computeAutoSalesPriceForAi(item.wholesale_price, finalCatPath)
+                const nextListedPrice = autoSalesPrice
+                    ? ((!item.price || item.price < autoSalesPrice) ? Math.round(autoSalesPrice * 1.25) : item.price)
+                    : item.price
+
                 await fetch('/api/daraz/drafts', {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: item.id, status: 'failed', error: err.message })
+                    body: JSON.stringify({
+                        id: item.id,
+                        title: finalTitle,
+                        raw_name: isImageOnly ? finalTitle : item.raw_name,
+                        target_stores: targetStores,
+                        titles_per_store: newTitlesPerStore,
+                        description: data.description || '',
+                        highlights: data.highlights || [],
+                        attributes: {
+                            ...(data.attributes || {}),
+                            brand: 'No Brand',
+                            descriptions_per_store: newDescriptionsPerStore,
+                            highlights_per_store: newHighlightsPerStore
+                        },
+                        category_id: resolvedCatId,
+                        category_path: finalCatPath,
+                        ...(autoSalesPrice ? { special_price: autoSalesPrice, price: nextListedPrice } : {}),
+                        status: 'generated',
+                        auto_ai_scheduled_at: null,
+                        error: null
+                    })
                 })
-                setDrafts(prev => prev.map(d => d.id === item.id ? { ...d, status: 'failed' } : d))
+
+                setDrafts(prev => prev.map(d => d.id === item.id ? {
+                    ...d,
+                    title: finalTitle,
+                    titles_per_store: newTitlesPerStore,
+                    category_id: resolvedCatId || undefined,
+                    category_path: finalCatPath || undefined,
+                    ...(autoSalesPrice ? { special_price: autoSalesPrice, price: nextListedPrice } : {}),
+                    status: 'generated',
+                    auto_ai_scheduled_at: null,
+                    error: undefined
+                } : d))
+                successCount++
+            } catch (err: any) {
+                failCount++
+                const errMsg = err?.message || 'AI generation failed'
+                await fetch('/api/daraz/drafts', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: item.id, status: 'failed', error: errMsg })
+                })
+                setDrafts(prev => prev.map(d => d.id === item.id ? { ...d, status: 'failed', error: errMsg } : d))
             }
+
+            // Small cooldown between bulk items to avoid free-tier Gemini RPM bursts
+            if (idx < toGen.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 4000))
+            }
+        }
+
+        if (failCount > 0) {
+            alert(`Bulk AI Generation finished: ${successCount} succeeded, ${failCount} failed.`)
         }
 
         setSelectedDraftIds(new Set())
@@ -2353,8 +2447,31 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         setCampaignPrice(draft.campaign_price || (draft as any).attributes?.campaign_price || undefined)
         setMrpPrice(draft.mrp_price || (draft as any).attributes?.mrp_price || undefined)
         
+        // Helper to normalize per-store maps that may be keyed by store name instead of store UUID
+        const normalizePerStoreMap = <T,>(rawMap?: Record<string, T> | null): Record<string, T> => {
+            const out: Record<string, T> = {}
+            if (!rawMap || typeof rawMap !== 'object') return out
+            for (const [k, v] of Object.entries(rawMap)) {
+                if (v === undefined || v === null) continue
+                const byId = stores.find(s => s.id === k)
+                if (byId) {
+                    out[byId.id] = v
+                    continue
+                }
+                const kLower = k.trim().toLowerCase()
+                const byName = stores.find(s => (s.seller_account || '').trim().toLowerCase() === kLower)
+                    || stores.find(s => (s.seller_account || '').trim().toLowerCase().includes(kLower) || kLower.includes((s.seller_account || '').trim().toLowerCase()))
+                if (byName) {
+                    if (out[byName.id] === undefined) out[byName.id] = v
+                } else {
+                    out[k] = v
+                }
+            }
+            return out
+        }
+
         // Populate titles per store from draft.titles_per_store and draft.title fallback
-        const initialTitles: Record<string, string> = { ...(draft.titles_per_store || {}) }
+        const initialTitles: Record<string, string> = normalizePerStoreMap(draft.titles_per_store)
         const targetStores = draft.target_stores && draft.target_stores.length > 0
             ? draft.target_stores
             : (stores.length > 0 ? [stores[0].id] : [])
@@ -2367,8 +2484,8 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
         }
 
         setTitlesPerStore(initialTitles)
-        setDescriptionsPerStore(draft.attributes?.descriptions_per_store || {})
-        setHighlightsPerStore(draft.attributes?.highlights_per_store || {})
+        setDescriptionsPerStore(normalizePerStoreMap(draft.attributes?.descriptions_per_store))
+        setHighlightsPerStore(normalizePerStoreMap(draft.attributes?.highlights_per_store))
         setActiveTitleStoreId(targetStores[0] || '')
         setSelectedStores(targetStores)
         setCategoryId(draft.category_id || null)
@@ -5882,7 +5999,12 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                                                 }`}>
                                                     <span>{profitInfo.isPositive ? 'Profit:' : 'Loss:'}</span>
                                                     <span>{profitInfo.isPositive ? '+' : ''}NPR {profitInfo.profit}</span>
-                                                    <span className="text-[10px] text-gray-400 font-normal">({profitInfo.commRate}% comm)</span>
+                                                    <span
+                                                        className="text-[10px] text-gray-400 font-normal"
+                                                        title={`Raw Category Comm: ${profitInfo.commRate.toFixed(2)}% (+13% VAT: ${(profitInfo.commRate * 1.13).toFixed(2)}%) + Other Active Fees = ${profitInfo.totalCommRate.toFixed(2)}% Total Comm`}
+                                                    >
+                                                        ({profitInfo.totalCommRate.toFixed(2)}% comm)
+                                                    </span>
                                                 </div>
                                             ) : (
                                                 <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-1">
@@ -6142,14 +6264,19 @@ export default function NewListingTab({ prefilledData, onClearPrefilled }: NewLi
                             })()}
                         </div>
 
-                        {/* Category Picker with auto-select */}
+                        {/* Category Picker with auto-select — always uses stable product-level name, never changes when switching store title tabs */}
                         <CategoryPicker
                             productName={(() => {
-                                const activeStoreId = activeTitleStoreId || selectedStores[0]
-                                const activeVal = (activeStoreId && titlesPerStore[activeStoreId])
-                                    ? titlesPerStore[activeStoreId]
-                                    : (titlesPerStore['__manual__'] || Object.values(titlesPerStore).find(t => t && t.trim() !== '') || '')
-                                return activeVal || rawName || ''
+                                const cleanRaw = (rawName || '').trim()
+                                if (cleanRaw && !cleanRaw.startsWith('[Image Only]') && !cleanRaw.startsWith('[Link')) {
+                                    return cleanRaw
+                                }
+                                const primaryStoreId = selectedStores[0]
+                                const primaryTitle = (primaryStoreId && titlesPerStore[primaryStoreId])
+                                    || titlesPerStore['__manual__']
+                                    || Object.values(titlesPerStore).find(t => t && t.trim() !== '')
+                                    || ''
+                                return primaryTitle || cleanRaw
                             })()}
                             selectedCategoryId={categoryId}
                             selectedCategoryPath={categoryPath}

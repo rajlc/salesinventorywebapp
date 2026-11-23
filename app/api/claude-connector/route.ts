@@ -53,7 +53,7 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'save_product_draft',
-        description: 'Save a single product draft into the webapp database. CRITICAL RULES: 0) ALWAYS follow the user\'s "Product List Instruction" (call get_product_list_instruction first if you have not read it in this chat) when writing title, description, and highlights. 1) PRICING RULE: When the user specifies a price (e.g. "Rs 450"), that price is the Special Price (discounted selling price). Regular MRP is automatically marked up with a discount. 2) VARIANTS: If user specifies variations (e.g. "Black" and "Red"), pass them in "variants". Stock will automatically be 100 for each variation and Seller SKU is automatically generated. 3) STORE TARGETING: Make ONLY ONE tool call even if multiple stores are requested (pass store_accounts: ["Balaju Shop", "Bagmati Traders"]). 4) Always generate the full SEO title, formatted description, and bullet-point highlights (each starting with "• "). 5) The status is saved as "draft".',
+        description: 'Save a single product draft into the webapp database. CRITICAL RULES: 0) ALWAYS follow the user\'s "Product List Instruction" (call get_product_list_instruction first if you have not read it in this chat) when writing title, description, and highlights. 1) PRICING RULE: When the user specifies a price (e.g. "Rs 450"), that price is the Special Price (discounted selling price). Regular MRP is automatically marked up with a discount. 2) VARIANTS: If user specifies variations (e.g. "Black" and "Red"), pass them in "variants". Stock will automatically be 100 for each variation and Seller SKU is automatically generated. 3) STORE TARGETING & MULTI-STORE UNIQUE CONTENT: Make ONLY ONE tool call even if multiple stores are requested (pass store_accounts: ["Balaju Shop", "Bagmati Traders"]). When multiple stores are requested, you CAN and SHOULD pass separate per-store content using "titles_per_store", "descriptions_per_store", AND "highlights_per_store" keyed by each store name! 4) Always generate the full SEO title, formatted description, and bullet-point highlights (each starting with "• "). 5) The status is saved as "draft".',
         inputSchema: {
             type: 'object',
             properties: {
@@ -386,7 +386,7 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'get_draft_details',
-        description: 'Get full complete details of a specific product draft by "id" or "raw_name", including all variants, attributes, full description, highlights, pricing, and assigned stores.',
+        description: 'Get full complete details of a specific product draft by "id" or "raw_name", including all variants, attributes, full description, highlights, pricing, assigned stores, exact Daraz category commission percent (daraz_commission_rate_percent), and live profit/breakeven summary.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -433,7 +433,7 @@ const CLAUDE_TOOLS = [
     },
     {
         name: 'push_product_to_daraz',
-        description: 'Push a product or existing draft directly to one or multiple Daraz seller accounts (e.g. ["Bagmati Traders", "Balaju Shop"]). Automatically generates a UNIQUE Seller SKU per store (e.g. BT-... for Bagmati Traders and BS-... for Balaju Shop) so SKUs never collide across accounts, and syncs pricing/supplier/SKUs to the inventory database. Can push an existing draft by passing "id" ("draft_id") or "product_name".',
+        description: 'Push a product or existing draft directly to one or multiple Daraz seller accounts (e.g. ["Bagmati Traders", "Balaju Shop"]). Supports unique per-store content via "titles_per_store", "descriptions_per_store", AND "highlights_per_store" keyed by store name. Automatically generates a UNIQUE Seller SKU per store (e.g. BT-... for Bagmati Traders and BS-... for Balaju Shop) so SKUs never collide across accounts, and syncs pricing/supplier/SKUs to the inventory database. Can push an existing draft by passing "id" ("draft_id") or "product_name".',
         inputSchema: {
             type: 'object',
             properties: {
@@ -455,7 +455,15 @@ const CLAUDE_TOOLS = [
                 },
                 titles_per_store: {
                     type: 'object',
-                    description: 'Optional unique SEO titles per store account'
+                    description: 'Optional unique SEO titles per store account: {"Balaju Shop": "Title 1...", "Bagmati Traders": "Title 2..."}'
+                },
+                descriptions_per_store: {
+                    type: 'object',
+                    description: 'Optional unique HTML/Markdown descriptions per store account: {"Balaju Shop": "<p>...</p>", "Bagmati Traders": "<p>...</p>"}'
+                },
+                highlights_per_store: {
+                    type: 'object',
+                    description: 'Optional unique highlight bullet arrays per store account: {"Balaju Shop": ["• Point 1", ...], "Bagmati Traders": ["• Point 1", ...]}'
                 },
                 price: {
                     type: 'number',
@@ -1040,11 +1048,11 @@ async function executeTool(name: string, args: any) {
             return await saveProductDraft({
                 raw_name: args.raw_name || args.product_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
-                titles_per_store: args.titles_per_store,
+                titles_per_store: args.titles_per_store || args.title_per_store || args.store_titles,
                 description: args.description || args.product_description || args.desc || args.body || args.content || args.details || args.main_description,
-                descriptions_per_store: args.descriptions_per_store,
+                descriptions_per_store: args.descriptions_per_store || args.description_per_store || args.store_descriptions,
                 highlights: args.highlights || args.bullet_points || args.bullets || args.key_features || args.features || args.highlight_points || args.specs || args.specifications,
-                highlights_per_store: args.highlights_per_store,
+                highlights_per_store: args.highlights_per_store || args.highlight_per_store || args.store_highlights,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
@@ -1076,13 +1084,13 @@ async function executeTool(name: string, args: any) {
                 draft_id: resolvedId,
                 raw_name: args.raw_name || args.product_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
-                titles_per_store: args.titles_per_store,
+                titles_per_store: args.titles_per_store || args.title_per_store || args.store_titles,
                 description: args.description || args.product_description || args.desc,
-                descriptions_per_store: args.descriptions_per_store,
+                descriptions_per_store: args.descriptions_per_store || args.description_per_store || args.store_descriptions,
                 include_image_in_description: args.include_image_in_description,
                 description_image_url: args.description_image_url,
                 highlights: args.highlights || args.bullet_points || args.bullets,
-                highlights_per_store: args.highlights_per_store,
+                highlights_per_store: args.highlights_per_store || args.highlight_per_store || args.store_highlights,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,
@@ -1137,9 +1145,9 @@ async function executeTool(name: string, args: any) {
                 draft_id: resolvedId,
                 product_name: args.product_name || args.raw_name || args.name,
                 title: args.title || args.daraz_title || args.product_title,
-                titles_per_store: args.titles_per_store,
-                descriptions_per_store: args.descriptions_per_store,
-                highlights_per_store: args.highlights_per_store,
+                titles_per_store: args.titles_per_store || args.title_per_store || args.store_titles,
+                descriptions_per_store: args.descriptions_per_store || args.description_per_store || args.store_descriptions,
+                highlights_per_store: args.highlights_per_store || args.highlight_per_store || args.store_highlights,
                 price: args.price,
                 special_price: args.special_price,
                 wholesale_price: args.wholesale_price ?? args.purchase_cost ?? args.cost_price,

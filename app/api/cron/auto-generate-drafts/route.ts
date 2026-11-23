@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { generateDarazListingContent, AiGenerationError } from '@/lib/daraz/ai-generate-service'
+import { lookupExactDarazCommission } from '@/lib/daraz/category-commission-service'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -241,6 +242,29 @@ export async function GET(request: NextRequest) {
                 const resolvedCategoryId = aiResult.category_id || claimed.category_id || null
                 const resolvedCategoryPath = aiResult.category_suggestion || claimed.category_path || null
 
+                // Auto-calculate Sales Price if wholesale_price & category exist:
+                // Formula: Sales Price = (Wholesale * 1.2) / (1 - Total Commission %)
+                let autoSalesPrice: number | null = null
+                let nextListedPrice: number | null = claimed.price ?? null
+                const wholesaleNum = Number(claimed.wholesale_price || 0)
+                if (wholesaleNum > 0 && resolvedCategoryPath) {
+                    try {
+                        const commInfo = await lookupExactDarazCommission(supabase, resolvedCategoryPath)
+                        const totalCommPct = commInfo.totalCommissionPercent
+                        if (Number.isFinite(totalCommPct) && totalCommPct >= 0 && totalCommPct < 95) {
+                            const computed = Math.round((wholesaleNum * 1.2) / (1 - totalCommPct / 100))
+                            if (computed > 0) {
+                                autoSalesPrice = computed
+                                if (!nextListedPrice || nextListedPrice < computed) {
+                                    nextListedPrice = Math.round(computed * 1.25)
+                                }
+                            }
+                        }
+                    } catch {
+                        // non-critical
+                    }
+                }
+
                 const mergedAttributes = {
                     ...(claimed.attributes || {}),
                     ...(aiResult.attributes || {}),
@@ -263,6 +287,7 @@ export async function GET(request: NextRequest) {
                         category_path: resolvedCategoryPath,
                         attributes: mergedAttributes,
                         target_stores: targetStores,
+                        ...(autoSalesPrice ? { special_price: autoSalesPrice, price: nextListedPrice } : {}),
                         status: 'generated',
                         error: null,
                         auto_ai_scheduled_at: null,

@@ -17,8 +17,8 @@ export async function GET(req: NextRequest) {
         openapi: '3.0.0',
         info: {
             title: 'Inventory Webapp Daraz Connector',
-            version: '1.0.0',
-            description: 'AI Custom Connector for Daraz Product Management and Inventory. MANDATORY: At the start of any new chat or before generating any product title, description, or highlights (even if the user does not mention it), ALWAYS call action "get_product_list_instruction" first and follow every rule returned.'
+            version: '1.1.0',
+            description: 'AI Custom Connector for Daraz Product Management and Inventory. MANDATORY: At the start of any new chat or before generating any product title, description, or highlights (even if the user does not mention it), ALWAYS call action "get_product_list_instruction" first and follow every rule returned. MULTI-STORE SUPPORT: For save_product_draft, update_product_draft, and push_product_to_daraz, you CAN pass unique store-wise titles, descriptions, AND highlights using titles_per_store, descriptions_per_store, and highlights_per_store keyed by each store name.'
         },
         servers: [
             {

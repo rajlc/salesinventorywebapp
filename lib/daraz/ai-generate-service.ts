@@ -134,34 +134,38 @@ INSTRUCTIONS:
 
     try {
         if (isGemini) {
-            const resolvedModel = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'].includes(model)
-                ? 'gemini-3.6-flash'
-                : (model.startsWith('gemini') ? model : 'gemini-3.6-flash')
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent`
+            const attrModels = Array.from(new Set([
+                'gemini-3.5-flash-lite',
+                'gemini-2.5-flash-lite',
+                model.startsWith('gemini') ? model : 'gemini-3.5-flash',
+            ]))
 
-            for (const apiKey of apiKeys) {
-                try {
-                    const res = await fetch(geminiUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'x-goog-api-key': apiKey
-                        },
-                        body: JSON.stringify({
-                            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                            generationConfig: {
-                                temperature: 0.1,
-                                responseMimeType: 'application/json'
-                            }
+            for (const candModel of attrModels) {
+                const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${candModel}:generateContent`
+                for (const apiKey of apiKeys) {
+                    try {
+                        const res = await fetch(geminiUrl, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'x-goog-api-key': apiKey
+                            },
+                            body: JSON.stringify({
+                                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                                generationConfig: {
+                                    temperature: 0.1,
+                                    responseMimeType: 'application/json'
+                                }
+                            })
                         })
-                    })
-                    if (res.ok) {
-                        const result = await res.json()
-                        const rawContent = result.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
-                        return JSON.parse(rawContent)
+                        if (res.ok) {
+                            const result = await res.json()
+                            const rawContent = result.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
+                            return JSON.parse(rawContent)
+                        }
+                    } catch {
+                        // try next key/model
                     }
-                } catch {
-                    // try next key
                 }
             }
         } else {
@@ -400,10 +404,11 @@ Keep "description" and "highlights" populated with the first store's content as 
 
         const candidateModels = Array.from(new Set([
             preferredModel,
-            'gemini-3.5-flash',
             'gemini-3.5-flash-lite',
+            'gemini-3.5-flash',
+            'gemini-2.5-flash-lite',
+            'gemini-2.5-flash',
             'gemini-3.1-flash-lite',
-            'gemini-3-flash-preview',
             'gemini-3.6-flash',
             'gemini-3.7-flash',
             'gemini-flash-latest'
@@ -412,12 +417,20 @@ Keep "description" and "highlights" populated with the first store's content as 
         let success = false
         let lastError = ''
         let sawRateLimit = false
+        const invalidKeyIndices = new Set<number>()
 
-        // Outer loop: rotate across configured Gemini API keys!
-        for (let kIdx = 0; kIdx < geminiKeys.length && !success; kIdx++) {
-            const currentKey = geminiKeys[kIdx]
+        // Outer loop over models, inner loop over keys:
+        // 1) Try preferredModel across ALL configured Gemini keys first (Key #1 -> Key #2 -> Key #3).
+        // 2) If all keys hit 429 (daily/RPM quota) on that model, automatically fall back to the
+        //    next Gemini model (each model has its own separate Free Tier RPD quota bucket!).
+        // 3) If a key returns 401/403 (invalid/revoked), mark it dead so we skip it on remaining models.
+        for (const candModel of candidateModels) {
+            if (success) break
 
-            for (const candModel of candidateModels) {
+            for (let kIdx = 0; kIdx < geminiKeys.length && !success; kIdx++) {
+                if (invalidKeyIndices.has(kIdx)) continue
+                const currentKey = geminiKeys[kIdx]
+
                 try {
                     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${candModel}:generateContent`
                     const geminiRes = await fetch(geminiUrl, {
@@ -450,16 +463,18 @@ Keep "description" and "highlights" populated with the first store's content as 
                         const msg = errData.error?.message || `Google Gemini error (${geminiRes.status})`
                         lastError = msg
 
-                        // If rate-limited (429) or auth/quota error (401/403), immediately jump to the NEXT Gemini API key
-                        if (geminiRes.status === 429 || geminiRes.status === 401 || geminiRes.status === 403) {
-                            if (geminiRes.status === 429 || /quota|rate|limit/i.test(msg)) {
-                                sawRateLimit = true
-                            }
-                            console.warn(`[Gemini] Key #${kIdx + 1} failed (${geminiRes.status}: ${msg}). Switching to next Gemini API key...`)
-                            break
+                        if (geminiRes.status === 401 || geminiRes.status === 403) {
+                            invalidKeyIndices.add(kIdx)
+                            console.warn(`[Gemini] Key #${kIdx + 1} auth error (${geminiRes.status}). Skipping this key.`)
+                        } else if (geminiRes.status === 429 || /quota|rate|limit/i.test(msg)) {
+                            sawRateLimit = true
+                            console.warn(`[Gemini] Key #${kIdx + 1} hit quota on ${candModel} (429). Trying next key/model...`)
+                        } else if (geminiRes.status === 404) {
+                            console.warn(`[Gemini] Model ${candModel} not available (404). Trying next model...`)
+                            break // Same model won't exist on other keys either
+                        } else {
+                            console.warn(`[Gemini] Key #${kIdx + 1} model ${candModel} returned ${geminiRes.status}. Trying next...`)
                         }
-
-                        console.warn(`[Gemini] Key #${kIdx + 1} model ${candModel} returned ${geminiRes.status}. Trying next fallback model...`)
                     }
                 } catch (candErr: unknown) {
                     lastError = candErr instanceof Error ? candErr.message : String(candErr)

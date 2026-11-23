@@ -146,13 +146,11 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
                     }))
                     setSuggestions(darazSuggestions)
 
-                    // Auto-select the top matching category if nothing is selected OR if product title changed
-                    if (darazSuggestions.length > 0) {
-                        const isNewTitle = lastAutoSelectedTitleRef.current !== cleanName
-                        if (!selectedCategoryId || isNewTitle) {
-                            lastAutoSelectedTitleRef.current = cleanName
-                            onSelectCategory(darazSuggestions[0].id, darazSuggestions[0].path)
-                        }
+                    // Auto-select the top matching category ONLY when no category is selected yet
+                    // (Never overwrite an existing category when editing store-wise titles or switching tabs)
+                    if (darazSuggestions.length > 0 && !selectedCategoryId) {
+                        lastAutoSelectedTitleRef.current = cleanName
+                        onSelectCategory(darazSuggestions[0].id, darazSuggestions[0].path)
                     }
                 } else if (categories.length > 0) {
                     // Fallback to client-side match
@@ -160,12 +158,9 @@ export default function CategoryPicker({ productName, selectedCategoryId, select
                     const candidates = findBestMatches(enrichedSearch, 4)
                     const mapped = candidates.map(c => ({ id: c.id, path: c.path }))
                     setSuggestions(mapped)
-                    if (mapped.length > 0) {
-                        const isNewTitle = lastAutoSelectedTitleRef.current !== cleanName
-                        if (!selectedCategoryId || isNewTitle) {
-                            lastAutoSelectedTitleRef.current = cleanName
-                            onSelectCategory(mapped[0].id, mapped[0].path)
-                        }
+                    if (mapped.length > 0 && !selectedCategoryId) {
+                        lastAutoSelectedTitleRef.current = cleanName
+                        onSelectCategory(mapped[0].id, mapped[0].path)
                     }
                 }
             } catch (err) {

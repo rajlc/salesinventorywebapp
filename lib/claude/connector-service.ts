@@ -2,6 +2,7 @@
 import { createAdminClient } from '@/lib/supabase/server'
 import { cleanImageUrl } from '@/lib/daraz/image-migrate'
 import { resolveBestCategory, searchDarazCategories, getDarazLeafCategories } from '@/lib/daraz/category-service'
+import { lookupExactDarazCommission, calculateTotalCommissionPercent } from '@/lib/daraz/category-commission-service'
 import { extractCompetitorProduct } from '@/lib/daraz/link-extractor'
 import { fetchAndOptimizeImage, OptimizedImage } from './image-helper'
 import {
@@ -808,6 +809,15 @@ async function syncPricingAndSupplierToInventoryTables(params: {
     }
 }
 
+// ── Shared Helper: Exact Daraz Category Commission & Other Fees Lookup ──────
+// Uses paginated full-table loader (5,200+ categories) matching /dashboard/settings/daraz-commission.
+async function lookupDarazCommissionAndFees(
+    supabase: Awaited<ReturnType<typeof createAdminClient>>,
+    categoryPath?: string | null
+) {
+    return lookupExactDarazCommission(supabase, categoryPath)
+}
+
 export async function calculateDarazProfitAction(input: CalculateDarazProfitInput) {
     const supabase = await createAdminClient()
     let categoryPath = (input.category_path || '').trim()
@@ -828,6 +838,21 @@ export async function calculateDarazProfitAction(input: CalculateDarazProfitInpu
             if (!sellingPrice && (draftRow.special_price || draftRow.price)) sellingPrice = Number(draftRow.special_price || draftRow.price)
             if (!productName) productName = draftRow.raw_name || draftRow.title || ''
         }
+    } else if (!categoryPath && productName) {
+        // Also try matching an existing draft by raw_name/title if draft_id was omitted
+        const { data: matchedDraft } = await supabase
+            .from('daraz_draft_listings')
+            .select('raw_name, title, category_path, price, special_price, wholesale_price, target_stores, attributes')
+            .or(`raw_name.ilike.%${productName.trim()}%,title.ilike.%${productName.trim()}%`)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        const scope = getConnectorScope()
+        if (matchedDraft && (!scope || isDraftVisible(scope, matchedDraft))) {
+            if (!categoryPath && matchedDraft.category_path) categoryPath = matchedDraft.category_path
+            if (!wholesale && matchedDraft.wholesale_price) wholesale = Number(matchedDraft.wholesale_price)
+            if (!sellingPrice && (matchedDraft.special_price || matchedDraft.price)) sellingPrice = Number(matchedDraft.special_price || matchedDraft.price)
+        }
     }
 
     if (!categoryPath && productName) {
@@ -837,29 +862,14 @@ export async function calculateDarazProfitAction(input: CalculateDarazProfitInpu
         } catch { }
     }
 
-    let commissionRate = input.commission_rate
-    if (commissionRate === undefined || commissionRate === null) {
-        commissionRate = 12.0 // default fallback
-        if (categoryPath) {
-            const leaf = categoryPath.split('>').pop()?.trim() || categoryPath
-            const { data: commRow } = await supabase
-                .from('daraz_category_commissions')
-                .select('commission_rate, category_path, leaf_category')
-                .or(`category_path.ilike.%${leaf}%,leaf_category.ilike.%${leaf}%`)
-                .limit(1)
-                .maybeSingle()
-            if (commRow && commRow.commission_rate !== undefined && commRow.commission_rate !== null) {
-                commissionRate = Number(commRow.commission_rate)
-            }
-        }
-    }
-
-    const { data: feeRows } = await supabase
-        .from('daraz_other_fees')
-        .select('*')
-        .eq('is_active', true)
-
-    const otherFees: OtherFeeItem[] = (feeRows && feeRows.length > 0) ? (feeRows as OtherFeeItem[]) : DEFAULT_OTHER_FEES
+    const lookedUp = await lookupDarazCommissionAndFees(supabase, categoryPath)
+    const commissionRate = (input.commission_rate !== undefined && input.commission_rate !== null)
+        ? Number(input.commission_rate)
+        : lookedUp.commissionRate
+    const commissionIsMatched = (input.commission_rate !== undefined && input.commission_rate !== null)
+        ? true
+        : lookedUp.isMatched
+    const otherFees = lookedUp.otherFees
 
     const packaging = Number(input.packaging_cost || 0)
     const totalCost = wholesale + packaging
@@ -901,12 +911,17 @@ export async function calculateDarazProfitAction(input: CalculateDarazProfitInpu
         : null
 
     const recommendedPricing = effectiveEvalPrice > 0 ? resolvePricing(input.mrp_price, effectiveEvalPrice) : null
+    const commTotals = calculateTotalCommissionPercent(commissionRate, otherFees)
 
     return {
         success: true,
         category_path: categoryPath || 'General (Default 12% Commission)',
         commission_rate_percent: commissionRate,
-        effective_commission_with_vat_percent: parseFloat((commissionRate * 1.13).toFixed(2)),
+        raw_commission_rate_percent: commTotals.rawCommissionRate,
+        commission_is_matched: commissionIsMatched,
+        effective_commission_with_vat_percent: commTotals.commissionWithVat,
+        other_fees_percent: commTotals.otherFeesPct,
+        total_commission_percent: commTotals.totalCommissionPercent,
         wholesale_price: wholesale || null,
         evaluated_selling_price: effectiveEvalPrice || null,
         breakeven_minimum_safe_price: breakevenPrice,
@@ -1857,7 +1872,6 @@ export async function updateProductDraft(input: UpdateDraftInput) {
 
     if (input.raw_name) updates.raw_name = input.raw_name.trim()
     if (input.title) updates.title = input.title.trim()
-    if (input.titles_per_store) updates.titles_per_store = input.titles_per_store
     if (input.highlights) updates.highlights = formatHighlights(input.highlights)
 
     // Category add / edit with auto-lookup & multi-match disambiguation
@@ -1961,8 +1975,23 @@ export async function updateProductDraft(input: UpdateDraftInput) {
     }
 
     let existingAttributes = { ...(existingDraft.attributes || {}) }
-    if (input.descriptions_per_store || input.highlights_per_store) {
+    if (input.titles_per_store || input.descriptions_per_store || input.highlights_per_store) {
         const allStores = await listDarazStores()
+        if (input.titles_per_store && typeof input.titles_per_store === 'object') {
+            const existingMappedTitles = existingDraft.titles_per_store
+                ? resolvePerStoreMap(existingDraft.titles_per_store, allStores, (val) => String(val).trim())
+                : {}
+            const mappedTitles = resolvePerStoreMap(
+                input.titles_per_store,
+                allStores,
+                (val) => String(val).trim()
+            )
+            const mergedTitles = { ...existingMappedTitles, ...mappedTitles }
+            updates.titles_per_store = mergedTitles
+            if (!updates.title && Object.values(mappedTitles)[0]) {
+                updates.title = Object.values(mappedTitles)[0]
+            }
+        }
         if (input.descriptions_per_store) {
             const mappedDescs = resolvePerStoreMap(
                 input.descriptions_per_store,
@@ -2346,6 +2375,38 @@ export async function getDraftDetails(input: GetDraftDetailsInput) {
     const directImages: string[] = Array.isArray(draft.images) ? draft.images : []
     const primaryImageUrl = directImages[0] || null
 
+    // Look up exact Daraz category commission & compute live profit preview (matches Web UI)
+    const {
+        commissionRate,
+        isMatched: commissionIsMatched,
+        otherFees,
+        commissionWithVat,
+        otherFeesPct,
+        totalCommissionPercent,
+    } = await lookupDarazCommissionAndFees(
+        supabase,
+        draft.category_path
+    )
+    const draftWholesale = Number(draft.wholesale_price || 0)
+    const draftSellingPrice = Number(draft.special_price || draft.price || 0)
+    const draftBreakdown = draftSellingPrice > 0
+        ? calculateDarazFeeBreakdown({
+            salesPrice: draftSellingPrice,
+            categoryCommissionRate: commissionRate,
+            otherFees
+        })
+        : null
+    const draftNetProfit = (draftBreakdown && draftWholesale > 0)
+        ? parseFloat((draftBreakdown.netPayout - draftWholesale).toFixed(2))
+        : null
+    const draftBreakevenPrice = draftWholesale > 0
+        ? calculateExactBreakevenPrice({
+            purchasingPrice: draftWholesale,
+            categoryCommissionRate: commissionRate,
+            otherFees
+        })
+        : null
+
     return {
         success: true,
         _images: optimizedImages,
@@ -2364,6 +2425,20 @@ export async function getDraftDetails(input: GetDraftDetailsInput) {
             campaign_price: draft.attributes?.campaign_price || null,
             category_id: draft.category_id,
             category_path: draft.category_path,
+            daraz_commission_rate_percent: commissionRate,
+            daraz_commission_with_vat_percent: commissionWithVat,
+            daraz_other_fees_percent: otherFeesPct,
+            daraz_total_commission_percent: totalCommissionPercent,
+            daraz_commission_is_matched: commissionIsMatched,
+            profit_summary: {
+                wholesale_price: draftWholesale || null,
+                selling_price: draftSellingPrice || null,
+                breakeven_price: draftBreakevenPrice,
+                net_payout: draftBreakdown ? parseFloat(draftBreakdown.netPayout.toFixed(2)) : null,
+                total_daraz_deduction: draftBreakdown ? parseFloat(draftBreakdown.totalDeduction.toFixed(2)) : null,
+                net_profit: draftNetProfit,
+                is_profitable: draftNetProfit !== null ? draftNetProfit > 0 : null,
+            },
             attributes: draft.attributes,
             variants: draft.attributes?.sku_rows || [],
             has_variants: !!draft.attributes?.has_variants,
