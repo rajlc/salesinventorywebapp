@@ -41,6 +41,7 @@ export interface CreatePurchaseData {
     purchase_type?: string
     purchase_name?: string
     remarks?: string
+    account_id?: string | null
 }
 
 // ============================================================================
@@ -206,6 +207,7 @@ export async function createPurchase(data: CreatePurchaseData) {
             purchase_type: data.purchase_type,
             purchase_name: data.purchase_name,
             remarks: data.remarks,
+            ...(data.account_id ? { account_id: data.account_id } : {}),
             created_by: user.id,
             updated_by: user.id
         })
@@ -213,6 +215,29 @@ export async function createPurchase(data: CreatePurchaseData) {
         .single()
 
     if (error) throw error
+
+    // Auto-sync Cash/Online purchases (never Credit/Due) to CashFlow & Bank Statement
+    if (data.account_id && purchase?.id && (data.payment_type || '').toLowerCase() !== 'due') {
+        try {
+            const isSell = (data.purchase_type || 'Buy').toLowerCase() === 'sell'
+            await supabase.from('cash_transactions').insert({
+                transaction_date: data.purchase_date || new Date().toISOString().split('T')[0],
+                account_id: data.account_id,
+                direction: isSell ? 'in' : 'out',
+                scope: 'business',
+                category: isSell ? 'Supplier Refund' : 'Cash / Online Purchase',
+                amount: Number(data.total_amount),
+                party_or_particular: data.purchase_name || 'Stock Purchase',
+                source_type: 'purchase',
+                source_id: purchase.id,
+                notes: data.remarks || null,
+                created_by: user.id,
+            })
+            revalidatePath('/dashboard/account/transaction')
+        } catch (syncErr) {
+            console.error('Purchase CashFlow auto-sync skipped:', syncErr)
+        }
+    }
 
     // Auto-complete any pending plans for this product
     await completePlanForProduct(data.product_id)

@@ -35,6 +35,7 @@ export interface CreateSupplierTransactionData {
     cheque_name?: string | null
     cheque_image_url?: string | null
     remarks?: string | null
+    account_id?: string | null
 }
 
 export async function getSupplierTransactions({
@@ -98,14 +99,44 @@ export async function getSupplierTransactions({
 
 export async function createSupplierTransaction(data: CreateSupplierTransactionData) {
     const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
 
-    const { error } = await supabase
+    const { data: inserted, error } = await supabase
         .from('supplier_transactions')
         .insert([data])
+        .select('id')
+        .single()
 
     if (error) {
         console.error('Error creating supplier transaction:', error)
         throw new Error('Failed to create transaction')
+    }
+
+    // Auto-sync non-cheque supplier payments/receipts to CashFlow & Bank Statement
+    // (Cheques appear as Pending in Bank Statement and deduct only when Marked Cleared)
+    const isCheque =
+        (data.transaction_mode || '').toLowerCase() === 'cheque' ||
+        (data.payment_method || '').toLowerCase().includes('cheque')
+    if (data.account_id && inserted?.id && !isCheque) {
+        try {
+            const isReceived = (data.transaction_type || '').toLowerCase() === 'received'
+            await supabase.from('cash_transactions').insert({
+                transaction_date: data.transaction_date || new Date().toISOString().split('T')[0],
+                account_id: data.account_id,
+                direction: isReceived ? 'in' : 'out',
+                scope: 'business',
+                category: isReceived ? 'Supplier Refund' : 'Party Due Payment',
+                amount: Number(data.amount),
+                party_or_particular: `Supplier ${isReceived ? 'Receipt' : 'Payment'} (${data.payment_method})`,
+                source_type: 'supplier_transaction',
+                source_id: inserted.id,
+                notes: data.remarks || null,
+                created_by: user?.id || null,
+            })
+            revalidatePath('/dashboard/account/transaction')
+        } catch (syncErr) {
+            console.error('Supplier transaction CashFlow auto-sync skipped:', syncErr)
+        }
     }
 
     revalidatePath('/dashboard/suppliers/suppliers-transaction')

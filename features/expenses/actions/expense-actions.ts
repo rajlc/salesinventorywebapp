@@ -7,7 +7,15 @@ import { revalidatePath } from 'next/cache'
 // TYPES
 // ============================================================================
 
-export type ExpenseCategory = 'Vehicle Expenses' | 'Office Expenses' | 'Rent' | 'Personal Expenses' | 'Others'
+export type ExpenseCategory =
+    | 'Vehicles'
+    | 'Accessories'
+    | 'Packaging Materials'
+    | 'Personal Expenses'
+    | 'Others'
+    | 'Vehicle Expenses'
+    | 'Office Expenses'
+    | 'Rent'
 
 export interface Expense {
     id: string
@@ -33,6 +41,7 @@ export interface CreateExpenseData {
     expense_item: string
     amount: number
     remarks?: string
+    account_id?: string | null
 }
 
 // ============================================================================
@@ -171,6 +180,7 @@ export async function createExpense(data: CreateExpenseData) {
             expense_item: data.expense_item,
             amount: data.amount,
             remarks: data.remarks || null,
+            ...(data.account_id ? { account_id: data.account_id } : {}),
             created_by: user.id,
             updated_by: user.id
         })
@@ -178,6 +188,28 @@ export async function createExpense(data: CreateExpenseData) {
         .single()
 
     if (error) throw new Error(error.message)
+
+    // Auto-sync to CashFlow & Bank Statement when account_id is provided
+    if (data.account_id && expense?.id) {
+        try {
+            await supabase.from('cash_transactions').insert({
+                transaction_date: data.date,
+                account_id: data.account_id,
+                direction: 'out',
+                scope: data.category === 'Personal Expenses' ? 'personal' : 'business',
+                category: data.category === 'Personal Expenses' ? 'Personal Expense' : data.category,
+                amount: Number(data.amount),
+                party_or_particular: data.expense_item,
+                source_type: 'expense',
+                source_id: expense.id,
+                notes: data.remarks || null,
+                created_by: user.id,
+            })
+            revalidatePath('/dashboard/account/transaction')
+        } catch (syncErr) {
+            console.error('Expense CashFlow auto-sync skipped:', syncErr)
+        }
+    }
 
     revalidatePath('/dashboard/profile')
     return expense as Expense

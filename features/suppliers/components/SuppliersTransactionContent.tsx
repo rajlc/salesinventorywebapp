@@ -11,6 +11,8 @@ import AsyncSelect from 'react-select/async'
 import { toast } from 'sonner'
 
 import { getPanVatCompanies } from '@/features/account/actions/pan-vat-company-actions'
+import { getFinancialAccounts, getCurrentUserProfile } from '@/features/transaction/actions/account-actions'
+import type { FinancialAccount } from '@/features/transaction/types'
 
 interface SuppliersTransactionContentProps {
     isEmbedded?: boolean
@@ -35,7 +37,38 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
     })
     const panVatCompanies = companiesData || []
 
+    const { data: financialAccounts = [] } = useQuery<FinancialAccount[]>({
+        queryKey: ['financial-accounts'],
+        queryFn: getFinancialAccounts
+    })
+
+    const { data: currentUser } = useQuery({
+        queryKey: ['current-user-profile'],
+        queryFn: getCurrentUserProfile
+    })
+
     const transactions = data?.transactions || []
+
+    // Filter accounts dynamically by logged-in user and Transaction Mode
+    const getAccountsForMode = (mode: string): FinancialAccount[] => {
+        const uid = currentUser?.id
+        if (mode === 'Cash') {
+            const myCash = financialAccounts.filter((a) => a.account_type === 'cash' && a.owner_user_id === uid)
+            if (myCash.length > 0) return myCash
+            return financialAccounts.filter((a) => a.account_type === 'cash')
+        }
+        if (mode === 'Cheque') {
+            return financialAccounts.filter((a) => a.owner_scope === 'business')
+        }
+        if (mode === 'Online Payment') {
+            const myPersonal = financialAccounts.filter(
+                (a) => a.owner_scope === 'personal' && a.account_type !== 'cash' && a.owner_user_id === uid
+            )
+            if (myPersonal.length > 0) return myPersonal
+            return financialAccounts.filter((a) => a.owner_scope === 'personal' && a.account_type !== 'cash')
+        }
+        return []
+    }
 
     // --- Modal State & Logic ---
     const [formData, setFormData] = useState({
@@ -46,6 +79,7 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
         transaction_type: 'Paid',
         amount: '',
         payment_method: 'Cash',
+        account_id: '',
         cheque_date: '',
         cheque_type: 'Personal',
         cheque_name: '',
@@ -58,6 +92,8 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
 
     // Reset form
     const resetForm = () => {
+        const cashAccounts = getAccountsForMode('Cash')
+        const firstCash = cashAccounts[0]
         setFormData({
             transaction_date: new Date().toISOString().split('T')[0],
             supplier_id: '',
@@ -65,7 +101,8 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
             transaction_mode: 'Cash',
             transaction_type: 'Paid',
             amount: '',
-            payment_method: 'Cash',
+            payment_method: firstCash ? firstCash.name : 'Cash',
+            account_id: firstCash ? firstCash.id : '',
             cheque_date: '',
             cheque_type: 'Personal',
             cheque_name: '',
@@ -86,6 +123,7 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
             transaction_type: transaction.transaction_type,
             amount: transaction.amount.toString(),
             payment_method: transaction.payment_method,
+            account_id: transaction.account_id || '',
             cheque_date: transaction.cheque_date || '',
             cheque_type: transaction.cheque_type || 'Personal',
             cheque_name: transaction.cheque_name || '',
@@ -96,17 +134,20 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
         setIsAddModalOpen(true)
     }
 
-    // Handle Payment Method Logic based on Transaction Type
+    // Handle Payment Method Logic based on Transaction Mode & Logged-In User
     const handleTransactionModeChange = (mode: string) => {
-        let defaultMethod = 'Cash'
-        if (mode === 'Cheque') defaultMethod = 'BTAS Global'
-        if (mode === 'Online Payment') defaultMethod = 'Bank Transfer'
+        const modeAccounts = getAccountsForMode(mode)
+        const firstAcc = modeAccounts[0]
+        let defaultMethod = firstAcc ? firstAcc.name : 'Cash'
+        if (!firstAcc && mode === 'Cheque') defaultMethod = 'BTAS Global'
+        if (!firstAcc && mode === 'Online Payment') defaultMethod = 'Bank Transfer'
 
         setFormData(prev => ({
             ...prev,
             transaction_mode: mode,
             payment_method: defaultMethod,
-            cheque_date: mode === 'Cheque' ? prev.cheque_date : '' // Clear cheque date if not cheque
+            account_id: firstAcc ? firstAcc.id : '',
+            cheque_date: mode === 'Cheque' ? (prev.cheque_date || new Date().toISOString().split('T')[0]) : ''
         }))
     }
 
@@ -182,13 +223,21 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
 
         setIsSubmitting(true)
 
+        // Resolve account_id automatically if not explicitly set
+        const modeAccounts = getAccountsForMode(formData.transaction_mode)
+        const matchedAcc =
+            modeAccounts.find((a) => a.id === formData.account_id) ||
+            modeAccounts.find((a) => a.name === formData.payment_method) ||
+            modeAccounts[0]
+
         const payload = {
             transaction_date: formData.transaction_date,
             supplier_id: formData.supplier_id,
             transaction_mode: formData.transaction_mode,
             transaction_type: formData.transaction_type,
             amount: parseFloat(formData.amount),
-            payment_method: formData.payment_method,
+            payment_method: matchedAcc ? matchedAcc.name : formData.payment_method,
+            account_id: matchedAcc ? matchedAcc.id : (formData.account_id || null),
             cheque_date: formData.transaction_mode === 'Cheque' ? formData.cheque_date : null,
             cheque_type: formData.transaction_mode === 'Cheque' ? formData.cheque_type : null,
             cheque_name: formData.transaction_mode === 'Cheque' ? formData.cheque_name : null,
@@ -555,33 +604,87 @@ export default function SuppliersTransactionContent({ isEmbedded = false }: Supp
                                     />
                                 </div>
 
-                                {/* Payment Method */}
+                                {/* Payment Method (User-Scoped Bank / Cash / Wallet) */}
                                 <div>
-                                    <label className="block text-xs font-medium mb-1">Payment Method <span className="text-red-500">*</span></label>
-                                    <select
-                                        value={formData.payment_method}
-                                        onChange={(e) => setFormData({ ...formData, payment_method: e.target.value })}
-                                        className="w-full px-3 py-2 text-sm border-2 border-gray-500 dark:border-gray-400 rounded-md bg-white dark:bg-zinc-900"
-                                    >
-                                        {formData.transaction_mode === 'Cash' && <option value="Cash">Cash</option>}
-
-                                        {formData.transaction_mode === 'Cheque' && (
-                                            <>
-                                                <option value="BTAS Global">BTAS Global</option>
-                                                <option value="BTAS NBL">BTAS NBL</option>
-                                                <option value="Others">Others</option>
-                                            </>
+                                    <label className="block text-xs font-medium mb-1">
+                                        Payment Method <span className="text-red-500">*</span>
+                                        {currentUser?.full_name && (
+                                            <span className="ml-1.5 text-[11px] text-emerald-600 font-semibold">
+                                                ({currentUser.full_name})
+                                            </span>
                                         )}
-
-                                        {formData.transaction_mode === 'Online Payment' && (
+                                    </label>
+                                    {(() => {
+                                        const modeAccounts = getAccountsForMode(formData.transaction_mode)
+                                        const selectedAcc =
+                                            modeAccounts.find((a) => a.id === formData.account_id) ||
+                                            modeAccounts.find((a) => a.name === formData.payment_method) ||
+                                            modeAccounts[0]
+                                        return (
                                             <>
-                                                <option value="Bank Transfer">Bank Transfer</option>
-                                                <option value="Esewa">Esewa</option>
-                                                <option value="Khalti">Khalti</option>
-                                                <option value="Others">Others</option>
+                                                <select
+                                                    value={selectedAcc ? selectedAcc.id : formData.payment_method}
+                                                    onChange={(e) => {
+                                                        const val = e.target.value
+                                                        const found = modeAccounts.find((a) => a.id === val)
+                                                        if (found) {
+                                                            setFormData({
+                                                                ...formData,
+                                                                account_id: found.id,
+                                                                payment_method: found.name,
+                                                            })
+                                                        } else {
+                                                            setFormData({
+                                                                ...formData,
+                                                                account_id: '',
+                                                                payment_method: val,
+                                                            })
+                                                        }
+                                                    }}
+                                                    className="w-full px-3 py-2 text-sm border-2 border-gray-500 dark:border-gray-400 rounded-md bg-white dark:bg-zinc-900"
+                                                >
+                                                    {modeAccounts.length > 0 ? (
+                                                        modeAccounts.map((acc) => (
+                                                            <option key={acc.id} value={acc.id}>
+                                                                {acc.name}
+                                                            </option>
+                                                        ))
+                                                    ) : formData.transaction_mode === 'Cash' ? (
+                                                        <option value="Cash">
+                                                            {currentUser?.full_name ? `${currentUser.full_name} Cash in Hand` : 'Cash'}
+                                                        </option>
+                                                    ) : formData.transaction_mode === 'Cheque' ? (
+                                                        <>
+                                                            <option value="BTAS Global">BTAS Global</option>
+                                                            <option value="BTAS NBL">BTAS NBL</option>
+                                                            <option value="Others">Others</option>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <option value="Bank Transfer">Bank Transfer</option>
+                                                            <option value="Esewa">Esewa</option>
+                                                            <option value="Khalti">Khalti</option>
+                                                            <option value="Others">Others</option>
+                                                        </>
+                                                    )}
+                                                </select>
+                                                {selectedAcc && formData.amount && formData.transaction_mode !== 'Cheque' && (
+                                                    <p className="text-[11px] text-gray-500 mt-1">
+                                                        After {formData.transaction_type}:{' '}
+                                                        <strong className="text-emerald-600">
+                                                            Rs{' '}
+                                                            {Math.round(
+                                                                selectedAcc.current_balance +
+                                                                    (formData.transaction_type === 'Received' ? 1 : -1) *
+                                                                        (parseFloat(formData.amount) || 0)
+                                                            ).toLocaleString('en-IN')}
+                                                        </strong>{' '}
+                                                        remaining in {selectedAcc.name}
+                                                    </p>
+                                                )}
                                             </>
-                                        )}
-                                    </select>
+                                        )
+                                    })()}
                                 </div>
 
                                 {/* Cheque Mode Fields */}

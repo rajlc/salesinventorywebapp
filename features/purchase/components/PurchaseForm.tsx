@@ -7,6 +7,8 @@ import { createPurchase, updatePurchase } from '@/features/purchase/actions/purc
 import { getAllProductOptions } from '@/features/inventory/actions/product-actions'
 import { getSuppliers } from '@/features/suppliers/actions/supplier-actions'
 import { getLatestMrpByProductName, addMrpPrice, MrpPriceItem } from '@/features/purchase/actions/mrp-actions'
+import { getFinancialAccounts, getCurrentUserProfile } from '@/features/transaction/actions/account-actions'
+import type { FinancialAccount } from '@/features/transaction/types'
 import Select from 'react-select'
 import { X, Save, Loader2 } from 'lucide-react'
 import { ComboComponentSelectModal } from '@/features/inventory/components/ComboComponentSelectModal'
@@ -46,6 +48,9 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
     const [supplierOptions, setSupplierOptions] = useState<any[]>([])
     const [loadingProducts, setLoadingProducts] = useState(false)
     const [loadingSuppliers, setLoadingSuppliers] = useState(false)
+    const [financialAccounts, setFinancialAccounts] = useState<FinancialAccount[]>([])
+    const [currentUser, setCurrentUser] = useState<{ id: string; full_name: string } | null>(null)
+    const [selectedAccountId, setSelectedAccountId] = useState<string>('')
 
     // Init Data Loading
     useEffect(() => {
@@ -83,6 +88,20 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
                 toast.error("Failed to load suppliers")
             })
             .finally(() => setLoadingSuppliers(false))
+
+        // Load user-scoped financial accounts for Payment Type -> Bank Statement & CashFlow auto-sync
+        Promise.all([getFinancialAccounts(), getCurrentUserProfile()])
+            .then(([accs, me]) => {
+                setFinancialAccounts(accs)
+                setCurrentUser(me)
+                if (!editMode) {
+                    const myCash =
+                        accs.find((a) => a.account_type === 'cash' && a.owner_user_id === me?.id) ||
+                        accs.find((a) => a.account_type === 'cash')
+                    if (myCash) setSelectedAccountId(myCash.id)
+                }
+            })
+            .catch(() => {})
     }, [])
 
     // Form State
@@ -165,6 +184,7 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
                 total_amount: formData.total_amount,
                 supplier_id: formData.supplier_id,
                 payment_type: formData.payment_type,
+                account_id: formData.payment_type === 'Due' ? null : (selectedAccountId || null),
                 purchase_name: formData.purchase_name,
                 purchase_type: formData.purchase_type,
                 remarks: formData.remarks
@@ -226,6 +246,62 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
         }),
         menuPortal: (base: any) => ({ ...base, zIndex: 99999 })
     }
+
+    // Build Payment Type options scoped to logged-in user (Cash = user's Cash in Hand, Due, + user's Personal Banks/Wallets + Shared/Company Banks)
+    const myCashAccount =
+        financialAccounts.find((a) => a.account_type === 'cash' && a.owner_user_id === currentUser?.id) ||
+        financialAccounts.find((a) => a.account_type === 'cash')
+    const bankAndWalletOptions = financialAccounts.filter(
+        (a) =>
+            a.account_type !== 'cash' &&
+            (a.owner_scope === 'business' || !a.owner_user_id || a.owner_user_id === currentUser?.id)
+    )
+
+    const currentPaymentSelectValue =
+        formData.payment_type === 'Due'
+            ? 'Due'
+            : formData.payment_type === 'Cash'
+            ? 'Cash'
+            : selectedAccountId
+            ? `acc:${selectedAccountId}`
+            : formData.payment_type
+
+    const handlePaymentSelectChange = (val: string) => {
+        if (val === 'Due') {
+            setFormData({ ...formData, payment_type: 'Due' })
+            setSelectedAccountId('')
+        } else if (val === 'Cash') {
+            setFormData({ ...formData, payment_type: 'Cash' })
+            setSelectedAccountId(myCashAccount?.id || '')
+        } else if (val.startsWith('acc:')) {
+            const accId = val.slice(4)
+            setFormData({ ...formData, payment_type: 'Online' })
+            setSelectedAccountId(accId)
+        } else {
+            setFormData({ ...formData, payment_type: val })
+            setSelectedAccountId('')
+        }
+    }
+
+    const renderPaymentTypeOptions = () => (
+        <>
+            <option value="Cash">
+                {myCashAccount ? `Cash (${myCashAccount.name})` : 'Cash'}
+            </option>
+            <option value="Due">Due (Credit)</option>
+            {bankAndWalletOptions.map((acc) => (
+                <option key={acc.id} value={`acc:${acc.id}`}>
+                    {acc.name}
+                </option>
+            ))}
+            {bankAndWalletOptions.length === 0 && (
+                <>
+                    <option value="Online">Online</option>
+                    <option value="Others">Others</option>
+                </>
+            )}
+        </>
+    )
 
     return (
         <div className="flex flex-col h-full bg-white dark:bg-zinc-900">
@@ -345,14 +421,11 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
                                 <div>
                                     <label className="block text-xs font-bold mb-1 text-black dark:text-white">Payment Type <span className="text-red-500">*</span></label>
                                     <select
-                                        value={formData.payment_type}
-                                        onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
+                                        value={currentPaymentSelectValue}
+                                        onChange={(e) => handlePaymentSelectChange(e.target.value)}
                                         className="w-full px-3 py-2 text-sm border-2 border-gray-500 dark:border-gray-400 rounded-md bg-white dark:bg-zinc-900"
                                     >
-                                        <option value="Cash">Cash</option>
-                                        <option value="Due">Due</option>
-                                        <option value="Online">Online</option>
-                                        <option value="Others">Others</option>
+                                        {renderPaymentTypeOptions()}
                                     </select>
                                 </div>
                             </div>
@@ -464,14 +537,11 @@ export default function PurchaseForm({ onClose, onSuccess, editMode = false, pur
                             <div>
                                 <label className="block text-xs font-bold mb-1 text-black dark:text-white">Payment Type <span className="text-red-500">*</span></label>
                                 <select
-                                    value={formData.payment_type}
-                                    onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
+                                    value={currentPaymentSelectValue}
+                                    onChange={(e) => handlePaymentSelectChange(e.target.value)}
                                     className="w-full px-3 py-2 text-sm border-2 border-gray-500 dark:border-gray-400 rounded-md bg-white dark:bg-zinc-900"
                                 >
-                                    <option value="Cash">Cash</option>
-                                    <option value="Due">Due</option>
-                                    <option value="Online">Online</option>
-                                    <option value="Others">Others</option>
+                                    {renderPaymentTypeOptions()}
                                 </select>
                             </div>
 

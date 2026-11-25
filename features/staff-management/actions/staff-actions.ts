@@ -115,12 +115,16 @@ export async function updateUserStatus(userId: string, status: 'pending' | 'acti
         throw new Error('Only admins can update user status')
     }
 
-    const { error } = await supabase
+    const adminClient = await createAdminClient()
+    const { data: updated, error } = await adminClient
         .from('user_profiles')
         .update({ status, updated_at: new Date().toISOString() })
         .eq('id', userId)
+        .select('id, status')
+        .maybeSingle()
 
     if (error) throw new Error(error.message)
+    if (!updated) throw new Error('User profile not found for status update')
 
     invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
     invalidateMemoryCachePrefix(`listing_scope:${userId}`)
@@ -145,12 +149,16 @@ export async function updateUserRole(userId: string, role: 'admin' | 'editor' | 
         throw new Error('Only admins can update user roles')
     }
 
-    const { error } = await supabase
+    const adminClient = await createAdminClient()
+    const { data: updated, error } = await adminClient
         .from('user_profiles')
         .update({ role, updated_at: new Date().toISOString() })
         .eq('id', userId)
+        .select('id, role')
+        .maybeSingle()
 
     if (error) throw new Error(error.message)
+    if (!updated) throw new Error('User profile not found for role update')
 
     invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
     invalidateMemoryCachePrefix(`listing_scope:${userId}`)
@@ -563,29 +571,93 @@ export async function deleteUser(userId: string) {
         throw new Error('Only admins can delete users')
     }
 
-    // Check the target user's status — must be 'disable' to delete
-    const { data: targetProfile, error: profileError } = await supabase
+    const adminClient = await createAdminClient()
+
+    // Check the target user's status — must NOT be 'active' to delete
+    const { data: targetProfile } = await adminClient
         .from('user_profiles')
         .select('status, role')
         .eq('id', userId)
-        .single()
+        .maybeSingle()
 
-    if (profileError) throw new Error(`User not found: ${profileError.message}`)
-
-    if (targetProfile.status === 'active') {
+    if (targetProfile && targetProfile.status === 'active') {
         throw new Error('Cannot delete an active user. Please disable the user first.')
     }
 
-    // Clean up related data first (in case FK constraints don't cascade)
-    await supabase.from('user_permissions').delete().eq('user_id', userId)
-    await supabase.from('user_locations').delete().eq('user_id', userId)
-    await supabase.from('user_activity_logs').delete().eq('user_id', userId)
-    await supabase.from('user_profiles').delete().eq('id', userId)
+    // 1. Delete user-owned operational rows (using service role to bypass RLS)
+    const deleteTasks = [
+        adminClient.from('user_permissions').delete().eq('user_id', userId),
+        adminClient.from('user_locations').delete().eq('user_id', userId),
+        adminClient.from('user_activity_logs').delete().eq('user_id', userId),
+        adminClient.from('connector_tokens').delete().eq('user_id', userId),
+        adminClient.from('connector_oauth_codes').delete().eq('user_id', userId),
+        adminClient.from('mobile_push_tokens').delete().eq('user_id', userId),
+        adminClient.from('activity_logs').delete().eq('user_id', userId),
+    ]
+    await Promise.allSettled(deleteTasks)
 
-    // Finally delete from Supabase Auth (permanent, user can re-signup)
-    const adminClient = await createAdminClient()
+    // 2. Nullify audit/creator FK references across business tables so auth.users deletion never hits FK violations
+    const nullifyRefs: Array<[string, string]> = [
+        ['purchases', 'created_by'],
+        ['purchases', 'updated_by'],
+        ['expenses', 'created_by'],
+        ['expenses', 'updated_by'],
+        ['daraz_orders', 'created_by'],
+        ['daraz_orders', 'updated_by'],
+        ['daraz_orders', 'deleted_by'],
+        ['marketplace_orders', 'created_by'],
+        ['marketplace_orders', 'updated_by'],
+        ['marketplace_orders', 'confirmed_by'],
+        ['marketplace_orders', 'shipped_by'],
+        ['marketplace_orders', 'delivered_by'],
+        ['marketplace_orders', 'cancelled_by'],
+        ['marketplace_orders', 'failed_delivered_by'],
+        ['website_orders', 'created_by'],
+        ['website_orders', 'updated_by'],
+        ['sales_bills', 'created_by'],
+        ['pan_vat_bills', 'created_by'],
+        ['daraz_weekly_transactions', 'created_by'],
+        ['balance_confirmations', 'created_by'],
+        ['balance_confirmations', 'verified_by'],
+        ['financial_accounts', 'owner_user_id'],
+        ['financial_accounts', 'created_by'],
+        ['cash_transactions', 'created_by'],
+        ['daraz_payout_settlements', 'verified_by'],
+        ['courier_settlements', 'verified_by'],
+        ['other_liabilities', 'created_by'],
+        ['net_worth_snapshots', 'created_by'],
+        ['pending_bank_sms_alerts', 'handled_by'],
+        ['products', 'created_by'],
+        ['products', 'updated_by'],
+        ['suppliers', 'created_by'],
+        ['supplier_transactions', 'created_by'],
+        ['reminders', 'created_by'],
+        ['reminders', 'user_id'],
+        ['ledger_comments', 'user_id'],
+        ['final_stock_audit_logs', 'changed_by'],
+        ['daraz_draft_listings', 'created_by'],
+        ['damage_resolutions', 'created_by'],
+        ['stock_adjustments', 'created_by'],
+    ]
+
+    await Promise.allSettled(
+        nullifyRefs.map(([table, col]) =>
+            adminClient.from(table).update({ [col]: null }).eq(col, userId)
+        )
+    )
+
+    // 3. Delete profile row
+    await adminClient.from('user_profiles').delete().eq('id', userId)
+
+    // 4. Finally delete from Supabase Auth (permanent, user can re-signup)
     const { error: deleteError } = await adminClient.auth.admin.deleteUser(userId)
-    if (deleteError) throw new Error(`Failed to delete auth user: ${deleteError.message}`)
+    if (deleteError) {
+        throw new Error(
+            `Failed to delete auth user: ${deleteError.message}. If a custom table still references auth.users, run migration 20261125_safe_delete_auth_user_fks.sql in Supabase SQL Editor.`
+        )
+    }
 
+    invalidateMemoryCachePrefix(`user_role_perms:${userId}`)
+    invalidateMemoryCachePrefix(`listing_scope:${userId}`)
     revalidatePath('/dashboard/staff-management')
 }

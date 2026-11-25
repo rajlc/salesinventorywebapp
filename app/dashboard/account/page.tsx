@@ -1,11 +1,17 @@
 'use client'
 
-import { Package, FileText, TrendingUp, CreditCard, ShoppingCart, Truck, Store, Users } from 'lucide-react'
+import { Package, FileText, TrendingUp, CreditCard, ShoppingCart, Truck, Store, Users, ArrowLeftRight } from 'lucide-react'
 import Link from 'next/link'
 import { Card } from '@/components/ui-shim'
 
 export default function AccountPage() {
     const accountModules = [
+        {
+            name: 'Transaction',
+            href: '/dashboard/account/transaction/cash-flow',
+            icon: ArrowLeftRight,
+            color: 'bg-emerald-600',
+        },
         {
             name: 'Vat Billing',
             href: '/dashboard/account/pan-vat-billing',

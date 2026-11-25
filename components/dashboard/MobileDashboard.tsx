@@ -115,6 +115,12 @@ export function MobileDashboard() {
 
     const moreItems = [
         {
+            title: "Transaction",
+            href: "/dashboard/account/transaction/cash-flow",
+            icon: <ArrowLeftRight className="h-8 w-8 text-emerald-600" />,
+            color: "bg-emerald-50"
+        },
+        {
             title: "Buy/Sell Suppliers",
             href: "/dashboard/purchase/buy-sell-suppliers",
             icon: <Briefcase className="h-8 w-8 text-blue-600" />,
