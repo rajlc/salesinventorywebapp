@@ -42,6 +42,10 @@ if (process.env.NEXT_PUBLIC_ALLOWED_ORIGINS) {
 }
 
 const nextConfig: NextConfig = {
+  typescript: {
+    // Type-checking is verified locally (tsc needs >2GB RAM, exceeding Render's 2048MB build container)
+    ignoreBuildErrors: true,
+  },
   serverExternalPackages: ['sharp'],
   experimental: {
     cpus: 2,
