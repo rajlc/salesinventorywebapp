@@ -2,7 +2,7 @@
 
 import { useState, useRef } from 'react'
 import { RefreshCw, CheckCircle2, XCircle, AlertCircle, Sparkles, X, ChevronRight } from 'lucide-react'
-import { syncOrderPurchaseCost, getDailyOrdersForDate } from '@/features/sales/actions/report-actions'
+import { syncOrdersBatchFast, getDailyOrdersForDate } from '@/features/sales/actions/report-actions'
 import { useQueryClient } from '@tanstack/react-query'
 
 interface SyncLogItem {
@@ -81,8 +81,9 @@ export function BulkSyncButton({
         let successCount = 0
         let failCount = 0
 
-        // Process in sequential or fast batches with live UI feedback
-        for (let i = 0; i < total; i++) {
+        // Process in parallel chunks of 8 orders per batch for fast bulk sync with live UI feedback
+        const BATCH_SIZE = 8
+        for (let i = 0; i < total; i += BATCH_SIZE) {
             if (cancelRef.current) {
                 setLogs(prev => [...prev, {
                     orderNumber: 'Cancelled',
@@ -92,30 +93,41 @@ export function BulkSyncButton({
                 break
             }
 
-            const orderNum = targetOrders[i]
-            setCurrentOrder(`Syncing #${orderNum} (${i + 1} of ${total})...`)
-            setProgress({ current: i + 1, total })
+            const batch = targetOrders.slice(i, i + BATCH_SIZE)
+            const batchEnd = Math.min(i + batch.length, total)
+            setCurrentOrder(`Syncing orders ${i + 1}–${batchEnd} of ${total} in parallel...`)
 
             try {
-                const result = await syncOrderPurchaseCost(orderNum)
-                successCount++
-                const logItem: SyncLogItem = {
-                    orderNumber: orderNum,
-                    sellerAccount: result.sellerAccount,
-                    status: 'success',
-                    fee: result.fee,
-                    message: `${result.feeSync || 'Synced'} • Cost items: ${result.updatesCount || 0}`
+                const { results } = await syncOrdersBatchFast(batch)
+                const newLogs: SyncLogItem[] = []
+                for (const r of results) {
+                    if (r.status === 'success') {
+                        successCount++
+                    } else {
+                        failCount++
+                    }
+                    newLogs.push({
+                        orderNumber: r.orderNumber,
+                        sellerAccount: r.sellerAccount,
+                        status: r.status,
+                        fee: r.fee,
+                        message: r.message
+                    })
                 }
-                setLogs(prev => [...prev, logItem])
+                setLogs(prev => [...prev, ...newLogs])
             } catch (err: any) {
-                failCount++
-                const logItem: SyncLogItem = {
-                    orderNumber: orderNum,
-                    status: 'error',
-                    message: err.message || 'Sync failed'
-                }
-                setLogs(prev => [...prev, logItem])
+                failCount += batch.length
+                setLogs(prev => [
+                    ...prev,
+                    ...batch.map(orderNum => ({
+                        orderNumber: orderNum,
+                        status: 'error' as const,
+                        message: err.message || 'Batch sync failed'
+                    }))
+                ])
             }
+
+            setProgress({ current: batchEnd, total })
 
             // Scroll log to bottom
             setTimeout(() => {
@@ -129,12 +141,15 @@ export function BulkSyncButton({
         setCurrentOrder('')
         setSummary({ success: successCount, failed: failCount })
 
-        // Invalidate and refetch all profit tracker queries
-        await queryClient.invalidateQueries({ queryKey: ['profit-tracker'] })
-        await queryClient.invalidateQueries({ queryKey: ['daily-profit-stats'] })
-        await queryClient.invalidateQueries({ queryKey: ['complete-date-stats'] })
-        await queryClient.invalidateQueries({ queryKey: ['daily-orders-detail'] })
-        await queryClient.invalidateQueries({ queryKey: ['weekly-orders-detail'] })
+        // Invalidate and refetch all profit tracker queries in parallel
+        await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['profit-tracker'], refetchType: 'all' }),
+            queryClient.invalidateQueries({ queryKey: ['daily-profit-stats'], refetchType: 'all' }),
+            queryClient.invalidateQueries({ queryKey: ['complete-date-stats'], refetchType: 'all' }),
+            queryClient.invalidateQueries({ queryKey: ['daily-orders-detail'], refetchType: 'all' }),
+            queryClient.invalidateQueries({ queryKey: ['weekly-orders-detail'], refetchType: 'all' }),
+            queryClient.invalidateQueries({ queryKey: ['daily-commission-alerts'], refetchType: 'all' }),
+        ])
 
         if (onComplete) {
             onComplete()

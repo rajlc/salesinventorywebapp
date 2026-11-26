@@ -31,7 +31,7 @@ async function handleSync(request: NextRequest) {
         const includeYesterday = includeYesterdayParam !== null ? includeYesterdayParam !== 'false' : true
         const sellerAccount = searchParams.get('store') || undefined
         const concurrencyParam = searchParams.get('concurrency')
-        const concurrency = concurrencyParam ? parseInt(concurrencyParam, 10) : 4
+        const concurrency = concurrencyParam ? parseInt(concurrencyParam, 10) : 8
 
         console.log(`[Cron-DailyProfitFees] Triggered bulk fees sync. Target Date: ${customDate || 'Today (Nepal Time)'}, Include Yesterday: ${includeYesterday}`)
 

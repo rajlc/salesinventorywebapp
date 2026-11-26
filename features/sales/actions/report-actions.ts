@@ -8,7 +8,7 @@ import { format } from 'date-fns'
 import { calculateDarazFeeBreakdown } from '@/features/sales/utils/daraz-fee-calculator'
 import { getDarazOtherFees } from './daraz-commission-actions'
 import { enrichStoresWithSyncModes } from '@/lib/daraz/store-sync-config'
-import { withMemoryCache } from '@/lib/cache/memory-cache'
+import { withMemoryCache, getMemoryCache, setMemoryCache, invalidateMemoryCachePrefix } from '@/lib/cache/memory-cache'
 
 export interface OrderReportItem {
     order_primary_id: string
@@ -125,6 +125,20 @@ function findCategoryCommissionRate(
 }
 
 // --- Helper Functions ---
+
+function extractSellerVoucher(itemsDetail: any): number {
+    try {
+        const arr = typeof itemsDetail === 'string'
+            ? JSON.parse(itemsDetail || '[]')
+            : (Array.isArray(itemsDetail) ? itemsDetail : [])
+        if (!Array.isArray(arr) || arr.length === 0) return 0
+        const delivered = arr.filter((d: any) => !d?.status || String(d.status).toLowerCase() === 'delivered')
+        const target = delivered.length > 0 ? delivered : arr
+        return target.reduce((sum: number, d: any) => sum + (Number(d?.voucher_seller) || 0), 0)
+    } catch {
+        return 0
+    }
+}
 
 async function fetchProductPrices(supabase: any, productIds: number[]) {
     if (!productIds || productIds.length === 0) return {}
@@ -447,9 +461,17 @@ export async function getSellerAccounts(): Promise<string[]> {
 
 export async function getProfitTrackerData(params: GetOrderReportParams) {
     const cacheKey = `profit_tracker:list:${JSON.stringify(params || {})}`
-    return withMemoryCache(cacheKey, 60_000, async () => {
-        return getProfitTrackerDataUncached(params)
-    })
+    const cached = getMemoryCache<any>(cacheKey)
+    if (cached && !cached._isError && (cached.data?.length > 0 || (params?.page || 1) === 1)) {
+        return cached
+    }
+
+    const result = await getProfitTrackerDataUncached(params)
+    // Never cache error responses or suspicious empty pages beyond page 1
+    if (!result._isError && (result.data.length > 0 || (params?.page || 1) === 1)) {
+        setMemoryCache(cacheKey, result, 60)
+    }
+    return result
 }
 
 async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
@@ -505,12 +527,11 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
             query = query.lte('delivered_by_daraz', endDateTime);
         }
 
-        query = query.range(from, to);
-
         query = query
             .order('delivered_by_daraz', { ascending: false, nullsFirst: false })
             .order('delivered_at', { ascending: false, nullsFirst: false })
-            .order('created_at', { ascending: false, nullsFirst: false });
+            .order('created_at', { ascending: false, nullsFirst: false })
+            .range(from, to);
 
         // 2. Fetch count and data concurrently
         const dataPromise = query;
@@ -583,20 +604,22 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
                 totalCount: 0,
                 page,
                 limit,
-                totalPages: 0
+                totalPages: 0,
+                _isError: true
             };
         }
 
         const orderPrimaryIds = (data || []).map((o: any) => o.id || o.order_primary_id).filter(Boolean);
 
         let itemsByOrderMap: Record<string, any[]> = {};
+        let itemsDetailByOrderMap: Record<string, any> = {};
         let categoryCommissionMap = new Map<string, number>();
         let otherFeesList: any[] = [];
         let latestPurchaseCostMap = new Map<string, number>();
 
         if (orderPrimaryIds.length > 0) {
             try {
-                const [orderItemsRes, otherFees] = await Promise.all([
+                const [orderItemsRes, itemsDetailRes, otherFees] = await Promise.all([
                     supabase
                         .from('daraz_order_items')
                         .select(`
@@ -621,8 +644,18 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
                             )
                         `)
                         .in('order_id', orderPrimaryIds),
+                    supabase
+                        .from('daraz_orders')
+                        .select('id, items_detail')
+                        .in('id', orderPrimaryIds),
                     getDarazOtherFees()
                 ]);
+
+                if (itemsDetailRes?.data) {
+                    itemsDetailRes.data.forEach((row: any) => {
+                        if (row.id) itemsDetailByOrderMap[row.id] = row.items_detail;
+                    });
+                }
 
                 if (otherFees) {
                     otherFeesList = otherFees;
@@ -660,8 +693,9 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
                 orderItems.forEach((it: any) => {
                     const prod = it.product || (it.seller_sku ? skuProductMap.get(it.seller_sku.toLowerCase().trim()) : null);
                     const cost = Number(it.purchase_cost) || Number(prod?.est_price) || 0;
-                    if (cost <= 0 && it.product_id) {
-                        missingCostProductIds.add(it.product_id);
+                    const prodUuid = it.product_id || prod?.id;
+                    if (cost <= 0 && prodUuid) {
+                        missingCostProductIds.add(prodUuid);
                     }
                 });
 
@@ -691,6 +725,7 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
                             const enrichedItem = {
                                 ...item,
                                 product: prod,
+                                raw_product_id: item.product_id || prod?.id || null,
                                 product_id: prod?.product_id || item.product_id
                             };
                             itemsByOrderMap[key].push(enrichedItem);
@@ -706,7 +741,8 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
             const orderKey = order.id || order.order_primary_id;
             const fetchedItems = itemsByOrderMap[orderKey] || itemsByOrderMap[order.order_number] || order.items_summary || [];
 
-            // 1. Calculate revenue from order items total_amount (or fallback to order.price)
+            // 1. Calculate net revenue from order items total_amount (or fallback to order.price),
+            // subtracting seller-funded vouchers (voucher_seller) so it matches Daraz Finance API "Product Price Paid by Buyer"
             let revenue = fetchedItems.reduce((sum: number, it: any) => {
                 const itemAmt = Number(it.total_amount) || Number(it.amount) || 0;
                 return sum + itemAmt;
@@ -714,13 +750,18 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
             if (revenue === 0 && order.price) {
                 revenue = parseFloat(String(order.price)) || 0;
             }
+            const sellerVoucher = extractSellerVoucher(itemsDetailByOrderMap[orderKey] ?? order.items_detail);
+            if (sellerVoucher > 0 && revenue >= sellerVoucher) {
+                revenue = Math.round((revenue - sellerVoucher) * 100) / 100;
+            }
 
             // 2. Calculate purchase cost from items
             let totalPurchaseCost = fetchedItems.reduce((sum: number, it: any) => {
                 const qty = Number(it.quantity) || 1;
-                const cost = Number(it.purchase_cost) 
-                    || Number(it.product?.est_price) 
-                    || (it.product_id ? (latestPurchaseCostMap.get(it.product_id) || 0) : 0);
+                const prodUuid = it.product?.id || it.raw_product_id || it.product_id;
+                const cost = Number(it.purchase_cost)
+                    || Number(it.product?.est_price)
+                    || (prodUuid ? (latestPurchaseCostMap.get(prodUuid) || 0) : 0);
                 return sum + (qty * cost);
             }, 0);
 
@@ -736,7 +777,7 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
                 || order.seller_account 
                 || 'Unknown';
 
-            const estimatedProfit = (revenue - totalPurchaseCost - fees) - 30;
+            const estimatedProfit = Math.round(((revenue - totalPurchaseCost - fees) - 30) * 100) / 100;
             const profitPercentage = revenue > 0 ? parseFloat(((estimatedProfit / revenue) * 100).toFixed(2)) : 0;
 
             // Calculate expected Commission % from Average Sales Price
@@ -807,7 +848,8 @@ async function getProfitTrackerDataUncached(params: GetOrderReportParams) {
             totalCount: 0,
             page,
             limit,
-            totalPages: 0
+            totalPages: 0,
+            _isError: true
         };
     }
 }
@@ -1111,16 +1153,6 @@ export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: 
     // 1b. Sync Finance Fees (Matching order-sync page logic EXACTLY)
     if (storeId) {
         try {
-            // Calculate revenue (Product Price)
-            const { data: orderData } = await supabase
-                .from('daraz_orders')
-                .select('items:daraz_order_items(amount, quantity)')
-                .eq('order_number', orderNumber)
-                .single()
-
-            const revenue = orderData?.items?.reduce((sum: number, item: any) =>
-                sum + ((item.amount || 0) * (item.quantity || 1)), 0) || 0
-
             // Fetch Finance API transactions
             const targetId = order.order_id || orderNumber
             const transactions = await fetchDarazFinanceTransactions(targetId, storeId, order.order_date)
@@ -1180,17 +1212,11 @@ export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: 
 
                 console.log(`[SYNC DEBUG] Order ${orderNumber} (ID: ${targetId}): Found ${transactions?.length || 0} txns. Total Fee: ${finalFee}`)
 
-                // Save to database
-                let updateQuery = supabase
+                // Save to database by primary key so orders with null store_id are also updated reliably
+                const { error: updateError } = await supabase
                     .from('daraz_orders')
                     .update({ daraz_fees: finalFee, store_id: storeId })
-                    .eq('order_number', orderNumber)
-
-                if (storeId) {
-                    updateQuery = updateQuery.eq('store_id', storeId)
-                }
-
-                const { error: updateError } = await updateQuery
+                    .eq('id', order.id)
 
                 if (updateError) {
                     console.error(`[SYNC ERROR] Failed to update ${orderNumber}:`, updateError)
@@ -1222,43 +1248,77 @@ export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: 
 
     // 3. Resolve Prices and Re-Link if necessary
     if (itemsToUpdate.length > 0) {
-        const { data: products } = await supabase
-            .from('inventory_price_reports_view')
-            .select('product_id, product_name, seller_sku1, seller_sku2, seller_sku3, seller_sku4, last_price, est_price')
-            .limit(10000)
+        // Resolve unlinked items by seller_sku
+        const unlinkedSkus = Array.from(
+            new Set(
+                itemsToUpdate
+                    .filter((i: any) => !i.product_id && i.seller_sku)
+                    .map((i: any) => String(i.seller_sku).trim().toLowerCase())
+                    .filter(Boolean)
+            )
+        ) as string[]
 
-        const linkedItemIds = itemsToUpdate.map((i: any) => i.product_id).filter(Boolean)
-        const allProductIds = Array.from(new Set(linkedItemIds))
+        const skuToProductIdMap = new Map<string, string>()
+        if (unlinkedSkus.length > 0) {
+            const { data: skuMatchedProducts } = await supabase
+                .from('products')
+                .select('id, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+                .eq('is_deleted', false)
+                .or(unlinkedSkus.map(s => `seller_sku1.ilike.${s},seller_sku2.ilike.${s},seller_sku3.ilike.${s},seller_sku4.ilike.${s}`).join(','))
 
-        const { data: productDetails } = await supabase
-            .from('products')
-            .select('id, product_type, est_price')
-            .in('id', allProductIds)
+            skuMatchedProducts?.forEach((p: any) => {
+                ;[p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                    if (sku) {
+                        const norm = String(sku).trim().toLowerCase()
+                        if (norm && !skuToProductIdMap.has(norm)) {
+                            skuToProductIdMap.set(norm, p.id)
+                        }
+                    }
+                })
+            })
+        }
+
+        const resolvedItemProductIds = itemsToUpdate.map((i: any) => {
+            if (i.product_id) return i.product_id
+            const sku = i.seller_sku ? String(i.seller_sku).trim().toLowerCase() : ''
+            return sku ? (skuToProductIdMap.get(sku) || null) : null
+        })
+
+        const allProductIds = Array.from(new Set(resolvedItemProductIds.filter(Boolean))) as string[]
 
         const productTypeMap = new Map<string, string>()
         const productDetailsMap = new Map<string, any>()
-
-        productDetails?.forEach(pt => {
-            productTypeMap.set(pt.id, pt.product_type)
-            productDetailsMap.set(pt.id, pt)
-        })
-
-        const comboProductIds = productDetails?.filter(pt => pt.product_type === 'combo').map(pt => pt.id) || []
-        const { data: comboComponents } = await supabase
-            .from('product_combos')
-            .select('parent_product_id, child_product_id, quantity')
-            .in('parent_product_id', comboProductIds)
-
         const comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
-        comboComponents?.forEach(cc => {
-            if (!comboComponentsMap.has(cc.parent_product_id)) {
-                comboComponentsMap.set(cc.parent_product_id, [])
-            }
-            comboComponentsMap.get(cc.parent_product_id)!.push({
-                child_product_id: cc.child_product_id,
-                quantity: cc.quantity
+
+        if (allProductIds.length > 0) {
+            const { data: productDetails } = await supabase
+                .from('products')
+                .select('id, product_type, est_price')
+                .in('id', allProductIds)
+
+            productDetails?.forEach(pt => {
+                productTypeMap.set(pt.id, pt.product_type)
+                productDetailsMap.set(pt.id, pt)
             })
-        })
+
+            const comboProductIds = productDetails?.filter(pt => pt.product_type === 'combo').map(pt => pt.id) || []
+            if (comboProductIds.length > 0) {
+                const { data: comboComponents } = await supabase
+                    .from('product_combos')
+                    .select('parent_product_id, child_product_id, quantity')
+                    .in('parent_product_id', comboProductIds)
+
+                comboComponents?.forEach(cc => {
+                    if (!comboComponentsMap.has(cc.parent_product_id)) {
+                        comboComponentsMap.set(cc.parent_product_id, [])
+                    }
+                    comboComponentsMap.get(cc.parent_product_id)!.push({
+                        child_product_id: cc.child_product_id,
+                        quantity: cc.quantity
+                    })
+                })
+            }
+        }
 
         const allChildIds = Array.from(new Set(
             Array.from(comboComponentsMap.values())
@@ -1267,51 +1327,91 @@ export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: 
         ))
 
         const allLinkedAndChildIds = Array.from(new Set([...allProductIds, ...allChildIds]))
-        let priceMap = new Map<string, any>()
+        const priceMap = new Map<string, any>()
+        const directPurchasePriceMap = new Map<string, number>()
 
         if (allLinkedAndChildIds.length > 0) {
-            const { data: prices } = await supabase
-                .from('inventory_price_reports_view')
-                .select('product_id, last_price, est_price')
-                .in('product_id', allLinkedAndChildIds)
+            const [viewPricesRes, directPurchasesRes] = await Promise.all([
+                supabase
+                    .from('inventory_price_reports_view')
+                    .select('product_id, last_price, est_price')
+                    .in('product_id', allLinkedAndChildIds),
+                supabase
+                    .from('purchases')
+                    .select('product_id, unit_amount, purchase_date, created_at')
+                    .in('product_id', allLinkedAndChildIds)
+                    .gt('unit_amount', 0)
+                    .order('purchase_date', { ascending: false })
+                    .order('created_at', { ascending: false })
+            ])
 
-            prices?.forEach(p => {
+            viewPricesRes.data?.forEach(p => {
                 priceMap.set(p.product_id, p)
+            })
+
+            directPurchasesRes.data?.forEach((p: any) => {
+                if (p.product_id && !directPurchasePriceMap.has(p.product_id)) {
+                    const price = Number(p.unit_amount) || 0
+                    if (price > 0) {
+                        directPurchasePriceMap.set(p.product_id, price)
+                    }
+                }
             })
         }
 
-        // Process Updates
-        for (const item of itemsToUpdate) {
-            let purchaseCost = 0
+        const resolveUnitPrice = (pid: string): number => {
+            const livePrice = priceMap.get(pid)
+            const pd = productDetailsMap.get(pid)
+            return Number(livePrice?.last_price)
+                || Number(directPurchasePriceMap.get(pid))
+                || Number(livePrice?.est_price)
+                || Number(pd?.est_price)
+                || 0
+        }
 
-            if (item.product_id) {
-                const pType = productTypeMap.get(item.product_id) || 'single'
+        // Process Updates
+        for (let idx = 0; idx < itemsToUpdate.length; idx++) {
+            const item = itemsToUpdate[idx]
+            const targetProductId = resolvedItemProductIds[idx]
+            let purchaseCost = Number(item.purchase_cost) || 0
+
+            if (targetProductId && purchaseCost <= 0) {
+                const pType = productTypeMap.get(targetProductId) || 'single'
 
                 if (pType === 'combo') {
-                    const components = comboComponentsMap.get(item.product_id) || []
+                    const components = comboComponentsMap.get(targetProductId) || []
                     let comboCost = 0
                     components.forEach(comp => {
-                        const cp = priceMap.get(comp.child_product_id)
-                        const price = cp?.last_price || cp?.est_price || 0
+                        const price = resolveUnitPrice(comp.child_product_id)
                         comboCost += (price * comp.quantity)
                     })
-                    purchaseCost = comboCost
+                    purchaseCost = comboCost > 0 ? comboCost : resolveUnitPrice(targetProductId)
                 } else {
-                    const livePrice = priceMap.get(item.product_id)
-                    const pd = productDetailsMap.get(item.product_id)
-                    purchaseCost = livePrice?.last_price || livePrice?.est_price || pd?.est_price || 0
+                    purchaseCost = resolveUnitPrice(targetProductId)
                 }
             }
 
-            if (purchaseCost > 0) {
-                await supabase.from('daraz_order_items').update({ purchase_cost: purchaseCost }).eq('id', item.id)
+            const itemUpdatePayload: Record<string, any> = {}
+            if (purchaseCost > 0 && (!item.purchase_cost || Number(item.purchase_cost) <= 0)) {
+                itemUpdatePayload.purchase_cost = purchaseCost
+            }
+            if (targetProductId && !item.product_id) {
+                itemUpdatePayload.product_id = targetProductId
+            }
+
+            if (Object.keys(itemUpdatePayload).length > 0) {
+                await supabase.from('daraz_order_items').update(itemUpdatePayload).eq('id', item.id)
                 updates.push({ item_id: item.id, cost: purchaseCost })
             }
         }
     }
 
+    // Invalidate server-side Profit Tracker memory cache so immediate refetches return fresh DB values
+    invalidateMemoryCachePrefix('profit_tracker:')
+
     try {
         revalidatePath('/dashboard/sales/daraz/profit-tracker')
+        revalidatePath('/dashboard/sales/daraz/dashboard')
     } catch {
         // Ignored when invoked outside request context (e.g. background cron)
     }
@@ -1324,6 +1424,335 @@ export async function syncOrderPurchaseCost(orderNumber: string, storeIdParam?: 
         updatesCount: updates.length,
         log: debugLog
     }
+}
+
+// Fast Parallel Batch Sync for Bulk Sync Button (preloads orders, tokens, and costs in bulk)
+export async function syncOrdersBatchFast(orderNumbers: string[]) {
+    if (!orderNumbers || orderNumbers.length === 0) {
+        return { results: [] as Array<{ orderNumber: string, sellerAccount?: string, status: 'success' | 'error', fee?: number, message: string, updatesCount?: number }> }
+    }
+
+    const supabase = await createAdminClient()
+
+    // 1. Fetch all orders + items in a single query
+    const { data: ordersList, error: ordersErr } = await supabase
+        .from('daraz_orders')
+        .select(`
+            id,
+            store_id,
+            order_date,
+            order_id,
+            order_number,
+            store:online_stores(seller_account),
+            items:daraz_order_items(id, product_id, purchase_cost, seller_sku, product_name, seller_account)
+        `)
+        .in('order_number', orderNumbers)
+
+    if (ordersErr) {
+        throw new Error(`Failed to load batch orders: ${ordersErr.message}`)
+    }
+
+    const orderMap = new Map<string, any>()
+    ;(ordersList || []).forEach((o: any) => {
+        if (!orderMap.has(o.order_number)) {
+            orderMap.set(o.order_number, o)
+        }
+    })
+
+    // 2. Preload all stores & order API tokens in 2 tiny queries
+    const [storesRes, tokensRes] = await Promise.all([
+        supabase.from('online_stores').select('id, seller_account'),
+        supabase.from('daraz_api_tokens').select('store_id, account, access_token').eq('app_type', 'order')
+    ])
+
+    const storeIdByAccount = new Map<string, string>()
+    storesRes.data?.forEach((s: any) => {
+        if (s.seller_account && s.id) {
+            storeIdByAccount.set(String(s.seller_account).trim().toLowerCase(), s.id)
+        }
+    })
+
+    const tokenByStoreId = new Map<string, string>()
+    const storeIdByTokenAccount = new Map<string, string>()
+    tokensRes.data?.forEach((t: any) => {
+        if (t.store_id && t.access_token) {
+            tokenByStoreId.set(t.store_id, t.access_token)
+        }
+        if (t.account && t.store_id) {
+            storeIdByTokenAccount.set(String(t.account).trim().toLowerCase(), t.store_id)
+        }
+    })
+
+    // 3. Batch-resolve missing purchase costs & unlinked SKUs across all orders in the batch
+    const allItemsNeedingCost: Array<{ orderNumber: string, item: any }> = []
+    for (const ordNum of orderNumbers) {
+        const order = orderMap.get(ordNum)
+        if (!order) continue
+        for (const item of (order.items || [])) {
+            if (!item.purchase_cost || Number(item.purchase_cost) <= 0 || !item.product_id) {
+                allItemsNeedingCost.push({ orderNumber: ordNum, item })
+            }
+        }
+    }
+
+    const skuToProductIdMap = new Map<string, string>()
+    const productTypeMap = new Map<string, string>()
+    const productDetailsMap = new Map<string, any>()
+    const comboComponentsMap = new Map<string, Array<{ child_product_id: string, quantity: number }>>()
+    const directPurchasePriceMap = new Map<string, number>()
+
+    if (allItemsNeedingCost.length > 0) {
+        const unlinkedSkus = Array.from(new Set(
+            allItemsNeedingCost
+                .filter(({ item }) => !item.product_id && item.seller_sku)
+                .map(({ item }) => String(item.seller_sku).trim().toLowerCase())
+                .filter(Boolean)
+        ))
+
+        if (unlinkedSkus.length > 0) {
+            const { data: skuMatched } = await supabase
+                .from('products')
+                .select('id, seller_sku1, seller_sku2, seller_sku3, seller_sku4')
+                .eq('is_deleted', false)
+                .or(unlinkedSkus.map(s => `seller_sku1.ilike.${s},seller_sku2.ilike.${s},seller_sku3.ilike.${s},seller_sku4.ilike.${s}`).join(','))
+
+            skuMatched?.forEach((p: any) => {
+                ;[p.seller_sku1, p.seller_sku2, p.seller_sku3, p.seller_sku4].forEach(sku => {
+                    if (sku) {
+                        const norm = String(sku).trim().toLowerCase()
+                        if (norm && !skuToProductIdMap.has(norm)) {
+                            skuToProductIdMap.set(norm, p.id)
+                        }
+                    }
+                })
+            })
+        }
+
+        const allProductIds = Array.from(new Set(
+            allItemsNeedingCost.map(({ item }) => {
+                if (item.product_id) return item.product_id
+                const sku = item.seller_sku ? String(item.seller_sku).trim().toLowerCase() : ''
+                return sku ? (skuToProductIdMap.get(sku) || null) : null
+            }).filter(Boolean)
+        )) as string[]
+
+        if (allProductIds.length > 0) {
+            const { data: prodDetails } = await supabase
+                .from('products')
+                .select('id, product_type, est_price')
+                .in('id', allProductIds)
+
+            prodDetails?.forEach(pt => {
+                productTypeMap.set(pt.id, pt.product_type)
+                productDetailsMap.set(pt.id, pt)
+            })
+
+            const comboIds = prodDetails?.filter(pt => pt.product_type === 'combo').map(pt => pt.id) || []
+            if (comboIds.length > 0) {
+                const { data: comboComps } = await supabase
+                    .from('product_combos')
+                    .select('parent_product_id, child_product_id, quantity')
+                    .in('parent_product_id', comboIds)
+
+                comboComps?.forEach(cc => {
+                    if (!comboComponentsMap.has(cc.parent_product_id)) {
+                        comboComponentsMap.set(cc.parent_product_id, [])
+                    }
+                    comboComponentsMap.get(cc.parent_product_id)!.push({
+                        child_product_id: cc.child_product_id,
+                        quantity: cc.quantity
+                    })
+                })
+            }
+
+            const allChildIds = Array.from(new Set(
+                Array.from(comboComponentsMap.values()).flat().map(c => c.child_product_id)
+            ))
+            const allPriceIds = Array.from(new Set([...allProductIds, ...allChildIds]))
+
+            if (allPriceIds.length > 0) {
+                const { data: directPurchases } = await supabase
+                    .from('purchases')
+                    .select('product_id, unit_amount, purchase_date, created_at')
+                    .in('product_id', allPriceIds)
+                    .gt('unit_amount', 0)
+                    .order('purchase_date', { ascending: false })
+                    .order('created_at', { ascending: false })
+
+                directPurchases?.forEach((p: any) => {
+                    if (p.product_id && !directPurchasePriceMap.has(p.product_id)) {
+                        const price = Number(p.unit_amount) || 0
+                        if (price > 0) directPurchasePriceMap.set(p.product_id, price)
+                    }
+                })
+            }
+        }
+    }
+
+    const resolveUnitPrice = (pid: string): number => {
+        const pd = productDetailsMap.get(pid)
+        return Number(directPurchasePriceMap.get(pid)) || Number(pd?.est_price) || 0
+    }
+
+    const parseAmount = (val: any): number => {
+        if (val === null || val === undefined || val === '') return 0
+        if (typeof val === 'number') return isNaN(val) ? 0 : val
+        const num = parseFloat(String(val).replace(/,/g, '').trim())
+        return isNaN(num) ? 0 : num
+    }
+
+    const touchedProductIds = new Set<string>()
+
+    // 4. Process all orders in this batch concurrently!
+    const results = await Promise.all(
+        orderNumbers.map(async (orderNumber) => {
+            const order = orderMap.get(orderNumber)
+            if (!order) {
+                return {
+                    orderNumber,
+                    status: 'error' as const,
+                    message: `Order ${orderNumber} not found in DB`
+                }
+            }
+
+            const sellerAccountName = (order.store as any)?.seller_account || order.items?.[0]?.seller_account || ''
+            let storeId = order.store_id
+            if (!storeId && sellerAccountName) {
+                const norm = sellerAccountName.trim().toLowerCase()
+                storeId = storeIdByAccount.get(norm) || storeIdByTokenAccount.get(norm) || null
+            }
+
+            let feeSyncResult = 'Skipped'
+            let finalFee = 0
+
+            try {
+                if (storeId) {
+                    const preloadedToken = tokenByStoreId.get(storeId)
+                    const targetId = order.order_id || orderNumber
+                    const transactions = await fetchDarazFinanceTransactions(targetId, storeId, order.order_date, preloadedToken)
+
+                    if (!transactions || transactions.length === 0) {
+                        feeSyncResult = 'Pending (No Finance Data)'
+                    } else {
+                        const feeTransactions = transactions.filter((t: any) => {
+                            const name = (t.fee_name || '').toLowerCase().trim()
+                            return !name.includes('product price paid by buyer') && !name.includes('item price credit')
+                        })
+
+                        if (feeTransactions.length > 0) {
+                            finalFee = feeTransactions.reduce((sum: number, t: any) => sum - parseAmount(t.amount), 0)
+                        } else {
+                            const getFinanceTotal = (keywords: string[]) =>
+                                transactions
+                                    .filter((t: any) => {
+                                        const name = (t.fee_name || '').toLowerCase()
+                                        const type = (t.transaction_type || t.fee_type || '').toLowerCase()
+                                        return keywords.some(k => name.includes(k) || type.includes(k))
+                                    })
+                                    .reduce((sum: number, t: any) => sum - parseAmount(t.amount), 0)
+
+                            finalFee =
+                                getFinanceTotal(['free shipping', 'free_shipping']) +
+                                getFinanceTotal(['co-funded', 'cofunded', 'co_funded']) +
+                                getFinanceTotal(['commission']) +
+                                getFinanceTotal(['payment fee']) +
+                                getFinanceTotal(['handling fee']) +
+                                getFinanceTotal(['coin']) +
+                                getFinanceTotal(['tax', 'vat', 'wht']) +
+                                getFinanceTotal(['shipping fee'])
+                        }
+
+                        finalFee = Math.round((finalFee || 0) * 100) / 100
+
+                        const { error: updateError } = await supabase
+                            .from('daraz_orders')
+                            .update({ daraz_fees: finalFee, store_id: storeId })
+                            .eq('id', order.id)
+
+                        if (updateError) {
+                            feeSyncResult = 'Update Failed'
+                        } else {
+                            feeSyncResult = `Updated (Fee: Rs. ${finalFee.toFixed(2)})`
+                            ;(order.items || []).forEach((it: any) => {
+                                if (it.product_id) touchedProductIds.add(it.product_id)
+                            })
+                        }
+                    }
+                } else {
+                    feeSyncResult = 'Skipped (No Store ID)'
+                }
+
+                // Update missing item purchase costs / links for this order in parallel
+                let updatesCount = 0
+                const itemUpdates = (order.items || [])
+                    .filter((item: any) => !item.purchase_cost || Number(item.purchase_cost) <= 0 || !item.product_id)
+                    .map(async (item: any) => {
+                        const sku = item.seller_sku ? String(item.seller_sku).trim().toLowerCase() : ''
+                        const targetProductId = item.product_id || (sku ? (skuToProductIdMap.get(sku) || null) : null)
+                        let purchaseCost = Number(item.purchase_cost) || 0
+
+                        if (targetProductId && purchaseCost <= 0) {
+                            const pType = productTypeMap.get(targetProductId) || 'single'
+                            if (pType === 'combo') {
+                                const comps = comboComponentsMap.get(targetProductId) || []
+                                const comboCost = comps.reduce((s, c) => s + (resolveUnitPrice(c.child_product_id) * c.quantity), 0)
+                                purchaseCost = comboCost > 0 ? comboCost : resolveUnitPrice(targetProductId)
+                            } else {
+                                purchaseCost = resolveUnitPrice(targetProductId)
+                            }
+                        }
+
+                        const payload: Record<string, any> = {}
+                        if (purchaseCost > 0 && (!item.purchase_cost || Number(item.purchase_cost) <= 0)) {
+                            payload.purchase_cost = purchaseCost
+                        }
+                        if (targetProductId && !item.product_id) {
+                            payload.product_id = targetProductId
+                        }
+
+                        if (Object.keys(payload).length > 0) {
+                            await supabase.from('daraz_order_items').update(payload).eq('id', item.id)
+                            updatesCount++
+                        }
+                    })
+
+                if (itemUpdates.length > 0) {
+                    await Promise.all(itemUpdates)
+                }
+
+                return {
+                    orderNumber,
+                    sellerAccount: sellerAccountName,
+                    status: 'success' as const,
+                    fee: finalFee,
+                    updatesCount,
+                    message: `${feeSyncResult} • Cost items: ${updatesCount}`
+                }
+            } catch (err: any) {
+                return {
+                    orderNumber,
+                    sellerAccount: sellerAccountName,
+                    status: 'error' as const,
+                    message: err?.message || 'Sync failed'
+                }
+            }
+        })
+    )
+
+    // 5. Batch-update product commissions once for the whole chunk (instead of per order)
+    if (touchedProductIds.size > 0) {
+        try {
+            const { updateProductCommissions } = await import('./avg-price-actions')
+            await updateProductCommissions(Array.from(touchedProductIds))
+        } catch (commErr: any) {
+            console.error('[BULK SYNC COMMISSION ERROR]:', commErr.message)
+        }
+    }
+
+    // 6. Invalidate memory cache once per batch
+    invalidateMemoryCachePrefix('profit_tracker:')
+
+    return { results }
 }
 
 // Fetch all orders for a specific delivery date with commission difference tracking
@@ -1342,7 +1771,8 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
             delivered_by_daraz,
             created_at,
             daraz_fees,
-            price
+            price,
+            items_detail
         `
         if (sellerAccount && sellerAccount !== 'All') {
             selectFields += `, daraz_order_items!inner(seller_account)`
@@ -1466,8 +1896,9 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
                 orderItems.forEach((it: any) => {
                     const prod = it.product || (it.seller_sku ? skuProductMap.get(it.seller_sku.toLowerCase().trim()) : null)
                     const cost = Number(it.purchase_cost) || Number(prod?.est_price) || 0
-                    if (cost <= 0 && it.product_id) {
-                        missingCostProductIds.add(it.product_id)
+                    const prodUuid = it.product_id || prod?.id
+                    if (cost <= 0 && prodUuid) {
+                        missingCostProductIds.add(prodUuid)
                     }
                 })
 
@@ -1501,12 +1932,17 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
             if (revenue === 0 && o.price) {
                 revenue = parseFloat(String(o.price)) || 0
             }
+            const sellerVoucher = extractSellerVoucher(o.items_detail)
+            if (sellerVoucher > 0 && revenue >= sellerVoucher) {
+                revenue = Math.round((revenue - sellerVoucher) * 100) / 100
+            }
 
             let totalPurchaseCost = fetchedItems.reduce((sum: number, it: any) => {
                 const qty = Number(it.quantity) || 1
-                const cost = Number(it.purchase_cost) 
-                    || Number(it.product?.est_price) 
-                    || (it.product_id ? (latestPurchaseCostMap.get(it.product_id) || 0) : 0)
+                const prodUuid = it.product?.id || it.product_id
+                const cost = Number(it.purchase_cost)
+                    || Number(it.product?.est_price)
+                    || (prodUuid ? (latestPurchaseCostMap.get(prodUuid) || 0) : 0)
                 return sum + (qty * cost)
             }, 0)
 
@@ -1514,7 +1950,7 @@ export async function getDailyOrdersForDate(params: { dateStr: string, sellerAcc
             const hasValidCost = totalPurchaseCost > 0
             const hasValidFees = fees > 0
             const isSynced = hasValidCost && hasValidFees
-            const estimatedProfit = (revenue - totalPurchaseCost - fees) - 30
+            const estimatedProfit = Math.round(((revenue - totalPurchaseCost - fees) - 30) * 100) / 100
             const sellerAccountVal = fetchedItems[0]?.seller_account 
                 || (Array.isArray(o.daraz_order_items) ? o.daraz_order_items[0]?.seller_account : null) 
                 || o.seller_account 
@@ -1607,7 +2043,7 @@ export async function getDailyCommissionAlerts(params: {
     try {
         const supabase = await createAdminClient()
 
-        let selectFields = 'id, order_number, delivered_by_daraz, delivered_at, daraz_fees, price'
+        let selectFields = 'id, order_number, delivered_by_daraz, delivered_at, daraz_fees, price, items_detail'
         if (sellerAccount && sellerAccount !== 'All') {
             selectFields += ', daraz_order_items!inner(seller_account)'
         }
@@ -1725,6 +2161,10 @@ export async function getDailyCommissionAlerts(params: {
             let revenue = orderItems.reduce((sum: number, it: any) => sum + (Number(it.total_amount) || Number(it.amount) || 0), 0)
             if (revenue === 0 && order.price) {
                 revenue = parseFloat(String(order.price)) || 0
+            }
+            const sellerVoucher = extractSellerVoucher(order.items_detail)
+            if (sellerVoucher > 0 && revenue >= sellerVoucher) {
+                revenue = Math.round((revenue - sellerVoucher) * 100) / 100
             }
 
             const fees = Number(order.daraz_fees) || 0
@@ -1878,7 +2318,7 @@ export interface DailyProfitSyncOptions {
 
 export async function syncDailyOrdersProfitFees(options: DailyProfitSyncOptions = {}) {
     const startTime = Date.now()
-    const concurrency = Math.max(1, Math.min(options.concurrency || 4, 8))
+    const batchSize = Math.max(1, Math.min(options.concurrency || 8, 12))
 
     // 1. Determine target date in Nepal Time (Asia/Kathmandu: UTC+5:45)
     const nepalDateFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kathmandu' })
@@ -1945,37 +2385,47 @@ export async function syncDailyOrdersProfitFees(options: DailyProfitSyncOptions 
         }
     }
 
-    // 4. Process in concurrent batches
+    // 4. Process in fast parallel batches (preloads orders, tokens, and costs in bulk)
     let successCount = 0
     let failedCount = 0
     let totalDeductions = 0
     const logs: Array<{ orderNumber: string, status: 'success' | 'failed', fee?: number, message: string }> = []
 
-    for (let i = 0; i < allOrdersToSync.length; i += concurrency) {
-        const batch = allOrdersToSync.slice(i, i + concurrency)
-        await Promise.all(
-            batch.map(async (ord) => {
-                try {
-                    const res = await syncOrderPurchaseCost(ord.order_number, ord.store_id)
+    const orderNumbersToSync = allOrdersToSync.map(o => o.order_number)
+    for (let i = 0; i < orderNumbersToSync.length; i += batchSize) {
+        const batch = orderNumbersToSync.slice(i, i + batchSize)
+        try {
+            const { results } = await syncOrdersBatchFast(batch)
+            for (const r of results) {
+                if (r.status === 'success') {
                     successCount++
-                    const feeVal = typeof res.fee === 'number' ? res.fee : 0
+                    const feeVal = typeof r.fee === 'number' ? r.fee : 0
                     totalDeductions += feeVal
                     logs.push({
-                        orderNumber: ord.order_number,
+                        orderNumber: r.orderNumber,
                         status: 'success',
                         fee: feeVal,
-                        message: res.feeSync || 'Synced'
+                        message: r.message
                     })
-                } catch (err: any) {
+                } else {
                     failedCount++
                     logs.push({
-                        orderNumber: ord.order_number,
+                        orderNumber: r.orderNumber,
                         status: 'failed',
-                        message: err.message || 'Unknown error'
+                        message: r.message
                     })
                 }
-            })
-        )
+            }
+        } catch (err: any) {
+            for (const orderNum of batch) {
+                failedCount++
+                logs.push({
+                    orderNumber: orderNum,
+                    status: 'failed',
+                    message: err?.message || 'Batch sync failed'
+                })
+            }
+        }
     }
 
     const elapsed = Date.now() - startTime

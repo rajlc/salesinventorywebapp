@@ -20,9 +20,12 @@ function signRequest(apiName: string, params: Record<string, any>, appSecret: st
 }
 
 // 1. Existing function for Order-Specific sync (Profit Tracker usage)
-export async function fetchDarazFinanceTransactions(orderId: string, storeId: string, orderDate?: string) {
-    const supabase = await createAdminClient()
-
+export async function fetchDarazFinanceTransactions(
+    orderId: string,
+    storeId: string,
+    orderDate?: string,
+    preloadedAccessToken?: string
+) {
     const appKey = process.env.NEXT_PUBLIC_DARAZ_APP_KEY
     const appSecret = process.env.DARAZ_APP_SECRET
     const apiUrl = process.env.DARAZ_API_URL || 'https://api.daraz.com.np/rest'
@@ -31,16 +34,21 @@ export async function fetchDarazFinanceTransactions(orderId: string, storeId: st
         throw new Error('Daraz API configuration missing')
     }
 
-    // 1. Get Token
-    const { data: tokenData, error: dbError } = await supabase
-        .from('daraz_api_tokens')
-        .select('*')
-        .eq('store_id', storeId)
-        .eq('app_type', 'order')
-        .maybeSingle()
+    // 1. Get Token (reuse preloaded token during bulk sync to avoid N+1 DB queries)
+    let accessToken = preloadedAccessToken
+    if (!accessToken) {
+        const supabase = await createAdminClient()
+        const { data: tokenData, error: dbError } = await supabase
+            .from('daraz_api_tokens')
+            .select('access_token')
+            .eq('store_id', storeId)
+            .eq('app_type', 'order')
+            .maybeSingle()
 
-    if (dbError || !tokenData) {
-        throw new Error('No active connection/token found for this store. Please connect your Daraz account for Orders.')
+        if (dbError || !tokenData?.access_token) {
+            throw new Error('No active connection/token found for this store. Please connect your Daraz account for Orders.')
+        }
+        accessToken = tokenData.access_token
     }
 
     let startTime = new Date()
@@ -73,7 +81,7 @@ export async function fetchDarazFinanceTransactions(orderId: string, storeId: st
         while (hasMore && loopCount < 20) { // Safety break at 10k transactions per order
             const params: Record<string, any> = {
                 app_key: appKey,
-                access_token: tokenData.access_token,
+                access_token: accessToken,
                 timestamp: new Date().getTime(),
                 sign_method: 'sha256',
                 trade_order_id: orderId,

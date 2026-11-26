@@ -250,10 +250,15 @@ export function ProfitTrackerContent({ isEmbedded = false }: { isEmbedded?: bool
         setSyncingOrderNumber(orderNumber)
         try {
             const result = await syncOrderPurchaseCost(orderNumber)
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['profit-tracker'], refetchType: 'all' }),
+                queryClient.invalidateQueries({ queryKey: ['daily-profit-stats'], refetchType: 'all' }),
+                queryClient.invalidateQueries({ queryKey: ['complete-date-stats'], refetchType: 'all' }),
+                queryClient.invalidateQueries({ queryKey: ['daily-orders-detail'], refetchType: 'all' }),
+                queryClient.invalidateQueries({ queryKey: ['weekly-orders-detail'], refetchType: 'all' }),
+                queryClient.invalidateQueries({ queryKey: ['daily-commission-alerts'], refetchType: 'all' }),
+            ])
             toast.success(`Fee synced for #${orderNumber}: ${result?.feeSync || 'Updated'}`)
-            await queryClient.invalidateQueries({ queryKey: ['profit-tracker'] })
-            await queryClient.invalidateQueries({ queryKey: ['daily-profit-stats'] })
-            await queryClient.invalidateQueries({ queryKey: ['complete-date-stats'] })
         } catch (err: any) {
             console.error('Failed to sync order fee:', err)
             toast.error(`Sync failed for #${orderNumber}: ${err.message}`)
